@@ -1488,7 +1488,7 @@ IllumioUtils.prototype = {
             var finalSysIds = Object.keys(finalWorkloadSysIds);
             gs.info('[getWorkloadsBySyncFilter] Total unique workloads matched: ' + finalSysIds.length);
 
-            // Apply extent filter (known_to_pce) if configured on the Sync Filter
+            // Apply extent filter (known_to_pce + enforcement_mode) if configured on the Sync Filter
             var extentValue = syncFilterGr.getValue('extent');
             if (!gs.nil(extentValue) && finalSysIds.length > 0) {
                 var extentList = extentValue.split(',');
@@ -1570,10 +1570,31 @@ IllumioUtils.prototype = {
     _filterWorkloadsByExtent: function(sysIds, extentList) {
         var filtered = [];
         var chunks = this._chunkArray(sysIds, 500);
+
         for (var c = 0; c < chunks.length; c++) {
             var gr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
             gr.addQuery('sys_id', 'IN', chunks[c].join(','));
-            gr.addQuery('known_to_pce', 'IN', extentList.join(','));
+
+            // Each extent value is "knownToPce" (e.g. "managed") or "knownToPce-enforcementMode" (e.g. "managed-full")
+            var extentCondition = null;
+            for (var i = 0; i < extentList.length; i++) {
+                var extentParts = extentList[i].split('-');
+                var knownToPce = extentParts[0];
+                var enforcementMode = extentParts.length > 1 ? extentParts.slice(1).join('-') : null;
+
+                if (i === 0) {
+                    extentCondition = gr.addQuery('known_to_pce', knownToPce);
+                    if (enforcementMode) {
+                        extentCondition.addCondition('enforcement_mode', enforcementMode);
+                    }
+                } else {
+                    var orCondition = extentCondition.addOrCondition('known_to_pce', knownToPce);
+                    if (enforcementMode) {
+                        orCondition.addCondition('enforcement_mode', enforcementMode);
+                    }
+                }
+            }
+
             gr.query();
 
             while (gr.next()) {
@@ -2349,14 +2370,14 @@ IllumioUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-11-04 13:11:02</sys_created_on>
         <sys_id>b630a09ddb9020d01206fd641d9619df</sys_id>
-        <sys_mod_count>458</sys_mod_count>
+        <sys_mod_count>459</sys_mod_count>
         <sys_name>IllumioUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_b630a09ddb9020d01206fd641d9619df</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-02 14:04:07</sys_updated_on>
+        <sys_updated_on>2026-09-15 06:49:40</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>b630a09ddb9020d01206fd641d9619df</id>
