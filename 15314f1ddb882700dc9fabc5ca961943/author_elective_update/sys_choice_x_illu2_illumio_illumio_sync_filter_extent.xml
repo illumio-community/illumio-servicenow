@@ -20,7 +20,7 @@
             <element>extent</element>
             <hint/>
             <inactive>false</inactive>
-            <label>Managed</label>
+            <label>Managed - All</label>
             <language>en</language>
             <name>x_illu2_illumio_illumio_sync_filter</name>
             <sequence>1</sequence>
@@ -29,9 +29,9 @@
             <sys_created_on>2026-07-30 14:18:25</sys_created_on>
             <sys_domain>global</sys_domain>
             <sys_domain_path>/</sys_domain_path>
-            <sys_mod_count>0</sys_mod_count>
+            <sys_mod_count>1</sys_mod_count>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-07-30 14:18:25</sys_updated_on>
+            <sys_updated_on>2026-09-07 16:11:16</sys_updated_on>
             <value>managed</value>
         </sys_choice>
         <sys_choice action="INSERT_OR_UPDATE">
@@ -39,19 +39,114 @@
             <element>extent</element>
             <hint/>
             <inactive>false</inactive>
-            <label>Unmanaged</label>
+            <label>Managed - Full</label>
             <language>en</language>
             <name>x_illu2_illumio_illumio_sync_filter</name>
             <sequence>2</sequence>
             <synonyms/>
             <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-07 16:10:52</sys_created_on>
+            <sys_domain>global</sys_domain>
+            <sys_domain_path>/</sys_domain_path>
+            <sys_mod_count>1</sys_mod_count>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-07 16:11:38</sys_updated_on>
+            <value>managed-full</value>
+        </sys_choice>
+        <sys_choice action="INSERT_OR_UPDATE">
+            <dependent_value/>
+            <element>extent</element>
+            <hint/>
+            <inactive>false</inactive>
+            <label>Managed - Idle</label>
+            <language>en</language>
+            <name>x_illu2_illumio_illumio_sync_filter</name>
+            <sequence>3</sequence>
+            <synonyms/>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-07 16:13:38</sys_created_on>
+            <sys_domain>global</sys_domain>
+            <sys_domain_path>/</sys_domain_path>
+            <sys_mod_count>1</sys_mod_count>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-07 16:13:48</sys_updated_on>
+            <value>managed-idle</value>
+        </sys_choice>
+        <sys_choice action="INSERT_OR_UPDATE">
+            <dependent_value/>
+            <element>extent</element>
+            <hint/>
+            <inactive>false</inactive>
+            <label>Managed - Selective</label>
+            <language>en</language>
+            <name>x_illu2_illumio_illumio_sync_filter</name>
+            <sequence>4</sequence>
+            <synonyms/>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-07 16:14:29</sys_created_on>
+            <sys_domain>global</sys_domain>
+            <sys_domain_path>/</sys_domain_path>
+            <sys_mod_count>1</sys_mod_count>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-07 16:14:39</sys_updated_on>
+            <value>managed-selective</value>
+        </sys_choice>
+        <sys_choice action="INSERT_OR_UPDATE">
+            <dependent_value/>
+            <element>extent</element>
+            <hint/>
+            <inactive>false</inactive>
+            <label>Managed - Visibility Only</label>
+            <language>en</language>
+            <name>x_illu2_illumio_illumio_sync_filter</name>
+            <sequence>5</sequence>
+            <synonyms/>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-07 16:15:00</sys_created_on>
+            <sys_domain>global</sys_domain>
+            <sys_domain_path>/</sys_domain_path>
+            <sys_mod_count>1</sys_mod_count>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-07 16:15:08</sys_updated_on>
+            <value>managed-visibility_only</value>
+        </sys_choice>
+        <sys_choice action="INSERT_OR_UPDATE">
+            <dependent_value/>
+            <element>extent</element>
+            <hint/>
+            <inactive>false</inactive>
+            <label>Unmanaged - All</label>
+            <language>en</language>
+            <name>x_illu2_illumio_illumio_sync_filter</name>
+            <sequence>20</sequence>
+            <synonyms/>
+            <sys_created_by>admin</sys_created_by>
             <sys_created_on>2026-07-30 14:18:39</sys_created_on>
             <sys_domain>global</sys_domain>
             <sys_domain_path>/</sys_domain_path>
-            <sys_mod_count>0</sys_mod_count>
+            <sys_mod_count>2</sys_mod_count>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-07-30 14:18:39</sys_updated_on>
+            <sys_updated_on>2026-09-07 16:16:07</sys_updated_on>
             <value>unmanaged</value>
+        </sys_choice>
+        <sys_choice action="INSERT_OR_UPDATE">
+            <dependent_value/>
+            <element>extent</element>
+            <hint/>
+            <inactive>false</inactive>
+            <label>Unmanaged - Visibility Only</label>
+            <language>en</language>
+            <name>x_illu2_illumio_illumio_sync_filter</name>
+            <sequence>21</sequence>
+            <synonyms/>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-07 16:15:46</sys_created_on>
+            <sys_domain>global</sys_domain>
+            <sys_domain_path>/</sys_domain_path>
+            <sys_mod_count>1</sys_mod_count>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-07 16:15:57</sys_updated_on>
+            <value>unmanaged-visibility_only</value>
         </sys_choice>
         <sys_choice action="INSERT_OR_UPDATE">
             <dependent_value/>
@@ -61,15 +156,15 @@
             <label>Unknown</label>
             <language>en</language>
             <name>x_illu2_illumio_illumio_sync_filter</name>
-            <sequence>3</sequence>
+            <sequence>30</sequence>
             <synonyms/>
             <sys_created_by>admin</sys_created_by>
             <sys_created_on>2026-07-30 14:18:51</sys_created_on>
             <sys_domain>global</sys_domain>
             <sys_domain_path>/</sys_domain_path>
-            <sys_mod_count>0</sys_mod_count>
+            <sys_mod_count>1</sys_mod_count>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-07-30 14:18:51</sys_updated_on>
+            <sys_updated_on>2026-09-07 16:11:31</sys_updated_on>
             <value>unknown</value>
         </sys_choice>
     </sys_choice>
