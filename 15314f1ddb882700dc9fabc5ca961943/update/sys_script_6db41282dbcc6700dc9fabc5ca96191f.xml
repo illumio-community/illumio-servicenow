@@ -49,6 +49,12 @@ function updateJob(sys_id) {
         if (current.job_status + "" == 'ready_to_map') {
             var data = [];
             var configSysId = utils.getConfigurationId(current.illumio_job_id);
+            var jobId = current.illumio_job_id + "";
+            var identifier = current.job_identifier + "";
+            var tag = identifier.charAt(0).toUpperCase() + identifier.slice(1);
+            var mappingLabel = identifier === 'workloads' ? 'Workload Mapping Table' : 'Label Mapping Table';
+            var stagingLabel = identifier === 'workloads' ? 'Workload Staging Table' : 'Label Staging Table';
+
             var mappingTableGr = new GlideRecordSecure(current.mapping_table_name + "");
             mappingTableGr.addQuery('illumio_pce_configuration', configSysId);
             mappingTableGr.query();
@@ -56,6 +62,7 @@ function updateJob(sys_id) {
             stagingTableGr.addQuery('illumio_pce_configuration', configSysId);
             stagingTableGr.query();
 
+            var readStartTime = Date.now();
             while (stagingTableGr.next()) {
                 var json_data = stagingTableGr.getValue('json_data');
                 if (json_data.trim() == '<see_attachment/>') {
@@ -64,10 +71,21 @@ function updateJob(sys_id) {
                     data = data.concat(JSON.parse(stagingTableGr.json_data + ""));
                 }
             }
+            var readElapsed = ((Date.now() - readStartTime) / 1000).toFixed(2);
+            utils.updateJobRecord(jobId, {
+                logs: '[' + tag + '] Read from staging: ' + data.length + ' records (' + readElapsed + 's)'
+            });
 
             if (data.length) {
                 try {
+                    var deleteStartTime = Date.now();
                     mappingTableGr.deleteMultiple();
+                    var deleteElapsed = ((Date.now() - deleteStartTime) / 1000).toFixed(2);
+                    utils.updateJobRecord(jobId, {
+                        logs: '[' + tag + '] Deleted old records from ' + mappingLabel + ' (' + deleteElapsed + 's)'
+                    });
+
+                    var insertStartTime = Date.now();
                     var keysToMap = JSON.parse(current.keys_to_map + "");
                     for (var index = 0, dataLength = data.length; index < dataLength; index++) {
                         mappingTableGr.initialize();
@@ -83,13 +101,35 @@ function updateJob(sys_id) {
                             }
                             mappingTableGr[keysToMap[key]] = (data[index][keysToMap[key]]) == "null" ? "" : data[index][keysToMap[key]] + "";
                         }
+
+                        // Derived match key for discovery: the PCE hostname up to its first dot.
+                        // IllumioDiscoveryRepository.findWorkloadMappings matches CMDB short
+                        // hostnames against this column, which is what lets a CMDB `wl-1` reach a
+                        // PCE `wl-1.corp.local` from a batched IN instead of a per-workload
+                        // STARTSWITH. Not lower-cased -- the IN compares against raw CMDB
+                        // hostnames and relies on the column collation, exactly as hostname does.
+                        if (identifier === 'workloads') {
+                            var pceHostname = data[index].hostname == "null" ? "" : data[index].hostname + "";
+                            mappingTableGr.setValue('hostname_part', pceHostname.split(".")[0]);
+                        }
+
                         mappingTableGr.setValue('illumio_pce_configuration', configSysId);
                         mappingTableGr.insert();
                     }
+                    var insertElapsed = ((Date.now() - insertStartTime) / 1000).toFixed(2);
+                    utils.updateJobRecord(jobId, {
+                        logs: '[' + tag + '] Inserted into ' + mappingLabel + ': ' + dataLength + ' records (' + insertElapsed + 's)'
+                    });
 
+                    var cleanupStartTime = Date.now();
                     stagingTableGr.initialize();
                     stagingTableGr.addQuery('illumio_pce_configuration', configSysId);
                     stagingTableGr.deleteMultiple();
+                    var cleanupElapsed = ((Date.now() - cleanupStartTime) / 1000).toFixed(2);
+                    utils.updateJobRecord(jobId, {
+                        logs: '[' + tag + '] Deleted records from ' + stagingLabel + ' (' + cleanupElapsed + 's)'
+                    });
+
                     updateJob(current.sys_id);
                 } catch (ex) {
                     gs.error("Exception occurred while creating workloads for mapping table: " + ex);
@@ -131,15 +171,15 @@ function updateJob(sys_id) {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>6db41282dbcc6700dc9fabc5ca96191f</sys_id>
-        <sys_mod_count>85</sys_mod_count>
+        <sys_mod_count>87</sys_mod_count>
         <sys_name>Illumio Poll PCE Async Job Status</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_6db41282dbcc6700dc9fabc5ca96191f</sys_update_name>
-        <sys_updated_by>crest.data</sys_updated_by>
-        <sys_updated_on>2025-07-21 07:25:23</sys_updated_on>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-16 14:18:17</sys_updated_on>
         <template/>
         <when>async</when>
     </sys_script>

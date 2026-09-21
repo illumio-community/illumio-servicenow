@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_ui_policy_action">
+    <sys_ui_policy_action action="DELETE">
+        <cleared>false</cleared>
+        <disabled>true</disabled>
+        <field>pce_configuration</field>
+        <field_message/>
+        <field_message_type>none</field_message_type>
+        <mandatory>true</mandatory>
+        <sys_class_name>sys_ui_policy_action</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-21 15:11:48</sys_created_on>
+        <sys_id>f499a514c32b87d050bffa0ed4013192</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>pce_configuration</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_ui_policy_action_f499a514c32b87d050bffa0ed4013192</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 15:11:48</sys_updated_on>
+        <table>x_illu2_illumio_illumio_sync_filter</table>
+        <ui_policy display_value="Always disable PCE Configuration">7c99a514c32b87d050bffa0ed401318d</ui_policy>
+        <value/>
+        <value_action>ignore</value_action>
+        <visible>true</visible>
+    </sys_ui_policy_action>
+    <sys_translated_text action="DELETE" query="documentkey=f499a514c32b87d050bffa0ed4013192"/>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>265197833bafced0c55a348aa4e45a7a</instance_id>
+        <instance_name>dev279711</instance_name>
+        <name>sys_ui_policy_action_f499a514c32b87d050bffa0ed4013192</name>
+        <payload><![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_ui_policy_action"><sys_ui_policy_action action="INSERT_OR_UPDATE"><cleared>false</cleared><disabled>true</disabled><field>pce_configuration</field><field_message/><field_message_type>none</field_message_type><mandatory>true</mandatory><sys_class_name>sys_ui_policy_action</sys_class_name><sys_created_by>admin</sys_created_by><sys_created_on>2026-09-21 15:11:48</sys_created_on><sys_id>f499a514c32b87d050bffa0ed4013192</sys_id><sys_mod_count>0</sys_mod_count><sys_name>pce_configuration</sys_name><sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package><sys_policy/><sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope><sys_update_name>sys_ui_policy_action_f499a514c32b87d050bffa0ed4013192</sys_update_name><sys_updated_by>admin</sys_updated_by><sys_updated_on>2026-09-21 15:11:48</sys_updated_on><table>x_illu2_illumio_illumio_sync_filter</table><ui_policy display_value="Always disable PCE Configuration">7c99a514c32b87d050bffa0ed401318d</ui_policy><value/><value_action>ignore</value_action><visible>true</visible></sys_ui_policy_action><sys_translated_text action="delete_multiple" query="documentkey=f499a514c32b87d050bffa0ed4013192"/></record_update>]]></payload>
+        <payload_hash>1924406110</payload_hash>
+        <record_name>pce_configuration</record_name>
+        <reverted_from/>
+        <source>4530ca06c347031050bffa0ed4013170</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-21 15:11:48</sys_created_on>
+        <sys_id>7c99a514c32b87d050bffa0ed40131f9</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a0c485f5250000001</sys_recorded_at>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 15:11:48</sys_updated_on>
+        <type>UI Policy Action</type>
+        <update_guid>f099a5143b2b87d045b8235d87729a95</update_guid>
+        <update_guid_history>f099a5143b2b87d045b8235d87729a95:1924406110</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-21 15:25:14</sys_created_on>
+        <sys_db_object display_value="" name="sys_ui_policy_action">sys_ui_policy_action</sys_db_object>
+        <sys_id>0bd676001fed434c908d5cfcf1769064</sys_id>
+        <sys_metadata>f499a514c32b87d050bffa0ed4013192</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>pce_configuration</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sys_ui_policy_action_f499a514c32b87d050bffa0ed4013192</sys_update_name>
+        <sys_update_version display_value="sys_ui_policy_action_f499a514c32b87d050bffa0ed4013192">7c99a514c32b87d050bffa0ed40131f9</sys_update_version>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 15:25:14</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

@@ -1,22 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
     <element db_object_id="fbb2c5a79300021062233f018bba1059" label="Illumio PCE Workloads Mapping" max_length="40" name="x_illu2_illumio_illumio_pce_workloads_mapping" type="collection">
-        <element label="Labels" max_length="4000" name="labels" type="string"/>
-        <element label="Enforcement Mode" max_length="40" name="enforcement_mode" type="string"/>
-        <element label="Href" mandatory="true" max_length="100" name="href" type="string"/>
-        <element label="Interfaces" max_length="4000" name="interfaces" type="string"/>
-        <element label="OS ID" max_length="40" name="os_id" type="string"/>
         <element label="VEN Status" max_length="40" name="ven_status" type="string"/>
-        <element label="Agent Installed" max_length="40" name="agent" type="boolean"/>
-        <element label="IP Address" max_length="40" name="public_ip" type="string"/>
-        <element label="VEN Version" max_length="40" name="ven_version" type="string"/>
-        <element label="Illumio PCE Configuration" max_length="32" name="illumio_pce_configuration" reference="x_illu2_illumio_illumio_pce_conf" type="reference"/>
-        <element label="VEN Href" max_length="100" name="ven_href" type="string"/>
+        <element label="OS ID" max_length="40" name="os_id" type="string"/>
+        <element label="Interfaces" max_length="4000" name="interfaces" type="string"/>
+        <element label="Href" mandatory="true" max_length="100" name="href" type="string"/>
+        <element label="Enforcement Mode" max_length="40" name="enforcement_mode" type="string"/>
         <element label="Hostname" mandatory="true" max_length="100" name="hostname" type="string"/>
+        <element label="Labels" max_length="4000" name="labels" type="string"/>
+        <element label="VEN Href" max_length="100" name="ven_href" type="string"/>
+        <element label="VEN Version" max_length="40" name="ven_version" type="string"/>
+        <element label="Hostname Part" max_length="100" name="hostname_part" type="string"/>
+        <element label="Agent Installed" max_length="40" name="agent" type="boolean"/>
+        <element label="Illumio PCE Configuration" max_length="32" name="illumio_pce_configuration" reference="x_illu2_illumio_illumio_pce_conf" type="reference"/>
+        <element label="IP Address" max_length="40" name="public_ip" type="string"/>
         <index name="index">
             <element name="hostname"/>
             <element name="agent"/>
         </index>
         <index name="index2">
+            <element name="hostname_part"/>
+            <element name="agent"/>
+        </index>
+        <index name="index3">
             <element name="illumio_pce_configuration"/>
         </index>
     </element>

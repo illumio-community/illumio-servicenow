@@ -1,9 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
     <element db_object_id="2f7d86f497bc0210b7daf896f053afcf" label="Illumio Config Class Mapping" max_length="40" name="x_illu2_illumio_illumio_config_class_mapping" type="collection">
+        <element choice="3" default="allow_all" label="Restrict Unknown Workload Creation" max_length="255" name="restrict_unknown_workload_creation" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Allow None" sequence="2" value="allow_none"/>
+                <element inactive_on_update="false" label="Conditional" sequence="1" value="conditional"/>
+                <element inactive_on_update="false" label="Allow All" sequence="0" value="allow_all"/>
+            </choice>
+        </element>
         <element dependent="source_table" dependent_on_field="source_table" label="Conditions for Creating Incidents" max_length="1000" name="conditions_for_creating_incidents" type="conditions" use_dependent_field="true"/>
         <element attributes="readonly_clickthrough=true" label="Illumio PCE Configuration" max_length="32" name="illumio_pce_configuration" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_pce_conf" reference_cascade_rule="delete" type="reference"/>
         <element dependent="source_table" dependent_on_field="source_table" label="Order by Column Name" max_length="80" name="order_by_column_name" type="field_name" use_dependent_field="true"/>
         <element dependent="source_table" dependent_on_field="source_table" label="Conditions for Excluding Workloads" max_length="4000" name="conditions_for_excluding_workloads" type="conditions" use_dependent_field="true"/>
+        <element dependent="source_table" dependent_on_field="source_table" label="Conditions for Unknown Workload Creation Limit" max_length="40" name="conditions_for_unknown_workload_creation_limit" type="conditions" use_dependent_field="true"/>
         <element choice="1" label="Filter Mode" max_length="40" name="filter_mode" type="choice">
             <choice>
                 <element inactive_on_update="false" label="Inclusion" sequence="1" value="inclusion"/>
@@ -12,6 +20,7 @@
         </element>
         <element active="false" dependent="source_table" dependent_on_field="source_table" label="Conditions for Deleting Workloads" max_length="4000" name="conditions_for_deleting_workloads" type="conditions" use_dependent_field="true"/>
         <element attributes="allow_public=true,base_table=cmdb_ci,base_start=true,edge_encryption_enabled=true" display="true" label="Source Table" max_length="80" name="source_table" type="table_name"/>
+        <element label="Maximum Unknown Workload Creation" max_length="40" name="maximum_unknown_workload_creation" type="integer"/>
         <element default="true" label="Active" max_length="40" name="active" type="boolean"/>
         <element label="User Configurable Sort Order" max_length="40" name="user_configurable_sort_order" type="boolean"/>
         <element choice="3" default="ASC" label="Order" max_length="40" name="order" type="choice">

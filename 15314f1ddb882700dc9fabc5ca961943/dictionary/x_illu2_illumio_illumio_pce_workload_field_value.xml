@@ -1,13 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
     <element db_object_id="acafa2a897700210b7daf896f053afb6" label="Illumio PCE Workload Field Value" max_length="40" name="x_illu2_illumio_illumio_pce_workload_field_value" type="collection">
         <element label="CMDB Value" max_length="100" name="cmdb_value" read_only="true" read_only_option="client_script_modifiable" type="string"/>
-        <element label="Illumio Label Dimension" max_length="32" name="illumio_label_dimension" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_label_dimension" reference_qual="javascript:&quot;illumio_pce_configuration=&quot; + current.illumio_pce_workload.illumio_pce_configuration" type="reference" use_reference_qualifier="advanced"/>
-        <element label="Illumio PCE Workload" max_length="32" name="illumio_pce_workload" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_pce_workload" reference_cascade_rule="delete" type="reference"/>
+        <element label="Class Mapping" max_length="32" name="class_mapping" reference="x_illu2_illumio_illumio_config_class_mapping" type="reference"/>
         <element label="PCE Value" max_length="100" name="pce_value" read_only="true" read_only_option="client_script_modifiable" type="string"/>
+        <element label="PCE Configuration" max_length="32" name="illumio_pce_configuration" reference="x_illu2_illumio_illumio_pce_conf" type="reference"/>
+        <element label="Illumio PCE Workload" max_length="32" name="illumio_pce_workload" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_pce_workload" reference_cascade_rule="delete" type="reference"/>
+        <element label="Illumio Label Dimension" max_length="32" name="illumio_label_dimension" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_label_dimension" reference_qual="javascript:&quot;illumio_pce_configuration=&quot; + current.illumio_pce_workload.illumio_pce_configuration" type="reference" use_reference_qualifier="advanced"/>
         <index name="index">
-            <element name="illumio_label_dimension"/>
+            <element name="class_mapping"/>
         </index>
         <index name="index2">
+            <element name="illumio_label_dimension"/>
+        </index>
+        <index name="index3">
+            <element name="illumio_pce_configuration"/>
+            <element name="class_mapping"/>
+            <element name="illumio_label_dimension"/>
+            <element name="cmdb_value"/>
+        </index>
+        <index name="index4">
             <element name="illumio_pce_workload"/>
         </index>
     </element>

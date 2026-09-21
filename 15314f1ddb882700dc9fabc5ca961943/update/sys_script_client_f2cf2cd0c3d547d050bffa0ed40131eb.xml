@@ -13,7 +13,18 @@
         <script><![CDATA[function onLoad() {
 	if (!g_form.isNewRecord()) {
 		g_form.setDisabled('type', true);
-		g_form.setDisabled('pce_configuration', true);
+	} else {
+		var classMapId = g_form.getValue('class_mapping');
+		if (classMapId) {
+			g_form.getReference('class_mapping', function(classMapRecord) {
+				if (classMapRecord.illumio_pce_configuration) {
+					g_form.setValue(
+						'pce_configuration', 
+						classMapRecord.illumio_pce_configuration
+					);
+				}
+			});
+		}
 	}
 }
 ]]></script>
@@ -23,7 +34,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>f2cf2cd0c3d547d050bffa0ed40131eb</sys_id>
-        <sys_mod_count>3</sys_mod_count>
+        <sys_mod_count>22</sys_mod_count>
         <sys_name>Sync Filter Type Read Only On Edit</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -31,7 +42,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_client_f2cf2cd0c3d547d050bffa0ed40131eb</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-31 11:56:58</sys_updated_on>
+        <sys_updated_on>2026-09-21 15:34:32</sys_updated_on>
         <table>x_illu2_illumio_illumio_sync_filter</table>
         <type>onLoad</type>
         <ui_type>0</ui_type>

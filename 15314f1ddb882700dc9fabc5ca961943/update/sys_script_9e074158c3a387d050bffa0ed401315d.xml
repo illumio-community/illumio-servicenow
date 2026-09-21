@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_illu2_illumio_illumio_sync_filter</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>Populate Sync Filter Condition Table</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[/**
+ * Sync Filter -- before insert/update, order 100.
+ *
+ * Keeps cmdb_condition_table equal to the table the chosen Class Mapping reads from.
+ *
+ * The CMDB Condition is a Conditions field dependent on this one: it has no table of its own
+ * and cannot render a condition builder until this column holds a table name. The field must
+ * also be on the form -- the builder resolves its dependency through g_form, so a dependent
+ * field that is not rendered reads back empty and the builder shows "Please select a table".
+ *
+ * Runs before "Validate Sync Filter Conditions" (order 200) so that validation sees the table
+ * this rule just settled on.
+ */
+(function executeRule(current, previous /*null when async*/ ) {
+
+    var sourceTable = '';
+    var classMappingSysId = current.getValue('class_mapping');
+
+    if (!gs.nil(classMappingSysId)) {
+        sourceTable = new IllumioSyncRepoUtils().getClassMappingSourceTable(classMappingSysId);
+    }
+
+    var currentTable = current.getValue('cmdb_condition_table');
+    if (currentTable == sourceTable) {
+        return;
+    }
+
+    // A condition authored against the old table is meaningless against the new one and would
+    // silently query columns that may not exist, so it goes. But only when the table is really
+    // CHANGING: on insert, or when the column is simply being filled in for the first time, the
+    // condition was authored against the table we are about to write and must be kept.
+    if (!current.isNewRecord() && !gs.nil(currentTable)) {
+        current.setValue('cmdb_condition', '');
+    }
+
+    current.setValue('cmdb_condition_table', sourceTable);
+
+})(current, previous);
+]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-21 12:40:54</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>9e074158c3a387d050bffa0ed401315d</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>Populate Sync Filter Condition Table</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_9e074158c3a387d050bffa0ed401315d</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 12:45:47</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=9e074158c3a387d050bffa0ed401315d"/>
+</record_update>

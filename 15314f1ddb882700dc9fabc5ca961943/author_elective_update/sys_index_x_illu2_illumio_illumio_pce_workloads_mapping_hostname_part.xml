@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_index">
+    <sys_index action="DELETE">
+        <access_method>btree</access_method>
+        <col_name_string>hostname_part</col_name_string>
+        <index_col_name element="hostname_part" name="x_illu2_illumio_illumio_pce_workloads_mapping">a7ef9beec3d70b9050bffa0ed4013132</index_col_name>
+        <logical_table_name>x_illu2_illumio_illumio_pce_workloads_mapping</logical_table_name>
+        <sys_class_name>sys_index</sys_class_name>
+        <sys_created_by>system</sys_created_by>
+        <sys_created_on>2026-09-16 13:21:26</sys_created_on>
+        <sys_id>1750eb22c31b0b9050bffa0ed401311a</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio_illumio_pce_workloads_mapping</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_index_x_illu2_illumio_illumio_pce_workloads_mapping_hostname_part</sys_update_name>
+        <sys_updated_by>system</sys_updated_by>
+        <sys_updated_on>2026-09-16 13:21:26</sys_updated_on>
+        <table display_value="Illumio PCE Workloads Mapping" name="x_illu2_illumio_illumio_pce_workloads_mapping">fbb2c5a79300021062233f018bba1059</table>
+        <unique_index>false</unique_index>
+    </sys_index>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>265197833bafced0c55a348aa4e45a7a</instance_id>
+        <instance_name>dev279711</instance_name>
+        <name>sys_index_x_illu2_illumio_illumio_pce_workloads_mapping_hostname_part</name>
+        <payload><![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_index"><sys_index action="INSERT_OR_UPDATE"><access_method>btree</access_method><col_name_string>hostname_part</col_name_string><index_col_name element="hostname_part" name="x_illu2_illumio_illumio_pce_workloads_mapping">a7ef9beec3d70b9050bffa0ed4013132</index_col_name><logical_table_name>x_illu2_illumio_illumio_pce_workloads_mapping</logical_table_name><sys_class_name>sys_index</sys_class_name><sys_created_by>system</sys_created_by><sys_created_on>2026-09-16 13:21:26</sys_created_on><sys_id>1750eb22c31b0b9050bffa0ed401311a</sys_id><sys_mod_count>0</sys_mod_count><sys_name>x_illu2_illumio_illumio_pce_workloads_mapping</sys_name><sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package><sys_policy/><sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope><sys_update_name>sys_index_x_illu2_illumio_illumio_pce_workloads_mapping_hostname_part</sys_update_name><sys_updated_by>system</sys_updated_by><sys_updated_on>2026-09-16 13:21:26</sys_updated_on><table display_value="Illumio PCE Workloads Mapping" name="x_illu2_illumio_illumio_pce_workloads_mapping">fbb2c5a79300021062233f018bba1059</table><unique_index>false</unique_index></sys_index></record_update>]]></payload>
+        <payload_hash>-505785594</payload_hash>
+        <record_name>Illumio PCE Workloads Mapping: Hostname Part</record_name>
+        <reverted_from/>
+        <source>4530ca06c347031050bffa0ed4013170</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>system</sys_created_by>
+        <sys_created_on>2026-09-16 13:21:26</sys_created_on>
+        <sys_id>1750eb22c31b0b9050bffa0ed4013120</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a0aa611fa20000001</sys_recorded_at>
+        <sys_updated_by>system</sys_updated_by>
+        <sys_updated_on>2026-09-16 13:21:26</sys_updated_on>
+        <type>Indexes</type>
+        <update_guid>1350eb226f1b0b90085ade2139dafc1f</update_guid>
+        <update_guid_history>1350eb226f1b0b90085ade2139dafc1f:-505785594</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>system</sys_created_by>
+        <sys_created_on>2026-09-16 14:11:51</sys_created_on>
+        <sys_db_object display_value="" name="sys_index">sys_index</sys_db_object>
+        <sys_id>818fbb9609df482fb32f2fdaed6ffa41</sys_id>
+        <sys_metadata>1750eb22c31b0b9050bffa0ed401311a</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio_illumio_pce_workloads_mapping</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sys_index_x_illu2_illumio_illumio_pce_workloads_mapping_hostname_part</sys_update_name>
+        <sys_update_version display_value="sys_index_x_illu2_illumio_illumio_pce_workloads_mapping_hostname_part">1750eb22c31b0b9050bffa0ed4013120</sys_update_version>
+        <sys_updated_by>system</sys_updated_by>
+        <sys_updated_on>2026-09-16 14:11:51</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

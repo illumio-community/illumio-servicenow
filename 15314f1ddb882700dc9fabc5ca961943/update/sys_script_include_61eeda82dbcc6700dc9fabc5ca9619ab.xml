@@ -112,9 +112,21 @@ IllumioGetPCEConfiguration.prototype = {
 
     createMappedFields: function(configClassGr) {
         var mappedFields = {};
+        // Carried so discovery can stamp it onto every PCE Workload Field Value row it writes.
+        // Sync Filters scope a label condition to one class mapping, and that condition is
+        // evaluated against the field value table -- which had no way to tell which mapping a
+        // row came from without dot-walking back through the workload.
+        mappedFields['class_mapping_sys_id'] = configClassGr.getUniqueValue();
         mappedFields['filter_mode'] = configClassGr.getValue('filter_mode') || 'exclusion_legacy';
         mappedFields['exclude_condition'] = configClassGr.getValue('conditions_for_excluding_workloads');
 		mappedFields['incident_condition'] = configClassGr.getValue('conditions_for_creating_incidents');
+        // Gate on creating unknown workloads. Defaults keep an unconfigured class mapping
+        // behaving exactly as before: create every unknown, no ceiling.
+        mappedFields['restrict_unknown_creation'] = configClassGr.getValue('restrict_unknown_workload_creation') || 'allow_all';
+        mappedFields['unknown_condition'] = configClassGr.getValue('conditions_for_unknown_workload_creation_limit');
+        // parseInt, not a bare getValue: the gate compares it numerically, and a blank
+        // column reads back "" which would make every >= comparison false by coercion.
+        mappedFields['unknown_creation_limit'] = parseInt(configClassGr.getValue('maximum_unknown_workload_creation'), 10) || 0;
         mappedFields['sort_order'] = configClassGr['user_configurable_sort_order'] ? configClassGr['order_by_column_name'].getDisplayValue() : configClassGr['sys_updated_on'].getDisplayValue();
         mappedFields['order_by'] = configClassGr.getValue('order');
         mappedFields['host_name'] = {};
@@ -156,14 +168,14 @@ IllumioGetPCEConfiguration.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:18:42</sys_created_on>
         <sys_id>61eeda82dbcc6700dc9fabc5ca9619ab</sys_id>
-        <sys_mod_count>72</sys_mod_count>
+        <sys_mod_count>74</sys_mod_count>
         <sys_name>IllumioGetPCEConfiguration</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_61eeda82dbcc6700dc9fabc5ca9619ab</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-02 08:01:05</sys_updated_on>
+        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>61eeda82dbcc6700dc9fabc5ca9619ab</id>

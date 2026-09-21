@@ -1,27 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
     <element db_object_id="05d9ae6497700210b7daf896f053af19" label="Illumio PCE Workload" max_length="40" name="x_illu2_illumio_illumio_pce_workload" type="collection">
-        <element label="Interfaces" max_length="4000" name="interfaces" type="string"/>
-        <element label="OS ID" max_length="40" name="os_id" type="string"/>
-        <element attributes="readonly_clickthrough=true" label="ServiceNow CMDB Identifier" max_length="32" name="servicenow_cmdb_identifier" reference="cmdb_ci" type="reference"/>
         <element label="Duplicate" max_length="40" name="duplicate" type="boolean"/>
-        <element display="true" label="Hostname" max_length="100" name="hostname" type="string"/>
-        <element label="Source Table" max_length="80" name="source_table" type="string"/>
+        <element attributes="readonly_clickthrough=true" label="Incident" max_length="32" name="incident" read_only="true" read_only_option="client_script_modifiable" reference="incident" type="reference"/>
+        <element label="VEN Status" max_length="40" name="ven_status" type="string"/>
         <element attributes="readonly_clickthrough=true" label="Illumio PCE Configuration" mandatory="true" max_length="32" name="illumio_pce_configuration" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_pce_conf" reference_cascade_rule="delete" type="reference"/>
-        <element label="Enforcement Mode" max_length="40" name="enforcement_mode" type="string"/>
+        <element label="OS ID" max_length="40" name="os_id" type="string"/>
+        <element active="false" label="Deleted from PCE" max_length="40" name="deleted_from_pce" type="boolean"/>
+        <element label="PCE Public IP Address" max_length="80" name="public_ip_address" type="string"/>
         <element label="VEN Version" max_length="40" name="ven_version" type="string"/>
+        <element display="true" label="Hostname" max_length="100" name="hostname" type="string"/>
+        <element label="Conflicts" max_length="40" name="conflicts" type="boolean"/>
+        <element attributes="readonly_clickthrough=true" label="Primary Workload" max_length="32" name="duplicate_of" reference="x_illu2_illumio_illumio_pce_workload" type="reference"/>
+        <element label="Enforcement Mode" max_length="40" name="enforcement_mode" type="string"/>
+        <element attributes="readonly_clickthrough=true" label="ServiceNow CMDB Identifier" max_length="32" name="servicenow_cmdb_identifier" reference="cmdb_ci" type="reference"/>
+        <element label="Href" max_length="2048" name="pce_workload_href" type="string"/>
         <element choice="3" default="unknown" label="Known to PCE" max_length="10" name="known_to_pce" type="string">
             <choice>
                 <element inactive_on_update="false" label="Managed" sequence="0" value="managed"/>
-                <element inactive_on_update="false" label="Unmanaged" sequence="1" value="unmanaged"/>
                 <element inactive_on_update="false" label="Unknown" sequence="2" value="unknown"/>
+                <element inactive_on_update="false" label="Unmanaged" sequence="1" value="unmanaged"/>
             </choice>
         </element>
-        <element label="VEN Status" max_length="40" name="ven_status" type="string"/>
-        <element attributes="readonly_clickthrough=true" label="Primary Workload" max_length="32" name="duplicate_of" reference="x_illu2_illumio_illumio_pce_workload" type="reference"/>
-        <element label="PCE Public IP Address" max_length="80" name="public_ip_address" type="string"/>
-        <element label="Href" max_length="2048" name="pce_workload_href" type="string"/>
-        <element attributes="readonly_clickthrough=true" label="Incident" max_length="32" name="incident" read_only="true" read_only_option="client_script_modifiable" reference="incident" type="reference"/>
-        <element label="Conflicts" max_length="40" name="conflicts" type="boolean"/>
+        <element label="Source Table" max_length="80" name="source_table" type="string"/>
+        <element label="Interfaces" max_length="4000" name="interfaces" type="string"/>
         <element label="VEN Href" max_length="100" name="ven_href" type="string"/>
         <index name="index">
             <element name="duplicate_of"/>

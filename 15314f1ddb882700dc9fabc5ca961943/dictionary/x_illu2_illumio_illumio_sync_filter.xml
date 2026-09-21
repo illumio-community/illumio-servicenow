@@ -1,16 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
     <element db_object_id="e1e8abc5c3600b5050bffa0ed40131f8" label="Illumio Sync Filter" max_length="40" name="x_illu2_illumio_illumio_sync_filter" type="collection">
         <element default="true" label="Active" max_length="40" name="active" type="boolean"/>
+        <element dependent="label_condition_table" dependent_on_field="label_condition_table" label="Label Condition" max_length="4000" name="label_condition" type="conditions" use_dependent_field="true"/>
         <element choice="3" default="inclusion" label="Type" mandatory="true" max_length="40" name="type" type="choice">
             <choice>
                 <element inactive_on_update="false" label="INCLUSION" sequence="0" value="inclusion"/>
                 <element inactive_on_update="false" label="DELETION" sequence="1" value="deletion"/>
             </choice>
         </element>
-        <element label="PCE Configuration" mandatory="true" max_length="32" name="pce_configuration" reference="x_illu2_illumio_illumio_pce_conf" type="reference"/>
+        <element label="PCE Configuration" max_length="32" name="pce_configuration" reference="x_illu2_illumio_illumio_pce_conf" type="reference"/>
+        <element label="Class Mapping" max_length="32" name="class_mapping" reference="x_illu2_illumio_illumio_config_class_mapping" type="reference"/>
+        <element dependent="cmdb_condition_table" dependent_on_field="cmdb_condition_table" label="CMDB Condition" max_length="4000" name="cmdb_condition" type="conditions" use_dependent_field="true"/>
+        <element label="cmdb_condition_table" max_length="80" name="cmdb_condition_table" type="table_name"/>
         <element display="true" label="Name" mandatory="true" max_length="40" name="name" type="string"/>
+        <element default="x_illu2_illumio_illumio_pce_workload_field_value" label="label_condition_table" mandatory="true" max_length="80" name="label_condition_table" read_only="true" read_only_option="client_script_modifiable" type="table_name"/>
         <element label="Extent" max_length="40" name="extent" type="glide_list"/>
         <index name="index">
+            <element name="class_mapping"/>
+        </index>
+        <index name="index2">
             <element name="pce_configuration"/>
         </index>
     </element>

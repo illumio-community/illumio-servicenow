@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_script_client">
+    <sys_script_client action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <applies_extended>false</applies_extended>
+        <condition/>
+        <description/>
+        <field>class_mapping</field>
+        <global>true</global>
+        <isolate_script>true</isolate_script>
+        <messages/>
+        <name>Sync Filter Class Mapping onChange</name>
+        <order/>
+        <script><![CDATA[/**
+ * Sync Filter -- onChange of class_mapping.
+ *
+ * Keeps cmdb_condition_table in step with the chosen Class Mapping WITHOUT a save.
+ *
+ * Not optional, and not a duplicate of the "Populate Sync Filter Condition Table" business
+ * rule. The condition builder for cmdb_condition reads the dependent field's value off the
+ * form, not the database, so without this it keeps offering the previous Class Mapping's table
+ * until the record is saved and reloaded -- and the author writes a condition against the
+ * wrong table in the meantime.
+ *
+ * getReference is used rather than a GlideAjax because source_table is a plain field on the
+ * referenced record; there is nothing to compute server-side.
+ */
+function onChange(control, oldValue, newValue, isLoading, isTemplate) {
+    if (isLoading) {
+        return;
+    }
+
+    if (newValue === '') {
+        g_form.setValue('cmdb_condition', '');
+        g_form.setValue('cmdb_condition_table', '');
+        return;
+    }
+
+    g_form.getReference('class_mapping', function(classMapping) {
+        var sourceTable = classMapping ? classMapping.source_table : '';
+
+        // Same Class Mapping, or a different one over the same table: whatever condition is
+        // already there is still valid, so leave it alone.
+        if (g_form.getValue('cmdb_condition_table') === sourceTable) {
+            return;
+        }
+
+        // Clear the condition BEFORE the table. A condition authored against the old table
+        // cannot be rendered against the new one, and the builder would be left showing rows
+        // for columns the new table may not have.
+        g_form.setValue('cmdb_condition', '');
+        g_form.setValue('cmdb_condition_table', sourceTable);
+    });
+}
+]]></script>
+        <sys_class_name>sys_script_client</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-21 12:40:55</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>a2074158c3a387d050bffa0ed40131ff</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>Sync Filter Class Mapping onChange</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_client_a2074158c3a387d050bffa0ed40131ff</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 12:43:40</sys_updated_on>
+        <table>x_illu2_illumio_illumio_sync_filter</table>
+        <type>onChange</type>
+        <ui_type>0</ui_type>
+        <view/>
+    </sys_script_client>
+</record_update>

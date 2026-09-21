@@ -105,7 +105,7 @@ IllumioStartDiscovery.prototype = {
                         '[' + timestamp + '] Illumio data collection started' +
                         (isPostSync ? ' [POST_SYNC]' : '');
                     this.scheduledJobsGr.logs +=
-                        '\n[' + timestamp + '] Fetching PCE data';
+                        '\n[' + timestamp + '] PHASE - START: Fetch & Store PCE Data';
                     this.scheduledJobsGr.job_type = 'data collection';
                     var jobSysId = this.scheduledJobsGr.insert();
 
@@ -159,7 +159,7 @@ IllumioStartDiscovery.prototype = {
                 for (var typeIndex in types) {
 
 
-                    if (this.utils.getCancelledJobStatus(jobSysId)) {
+                    if (this.utils.isJobCancelled(jobSysId)) {
                         break;
                     }
 
@@ -211,7 +211,7 @@ IllumioStartDiscovery.prototype = {
                 }
 
 
-                if (this.utils.getCancelledJobStatus(jobSysId)) {
+                if (this.utils.isJobCancelled(jobSysId)) {
                     return false;
                 }
                 return true;
@@ -241,14 +241,14 @@ IllumioStartDiscovery.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:20:29</sys_created_on>
         <sys_id>641f9e82dbcc6700dc9fabc5ca9619ce</sys_id>
-        <sys_mod_count>127</sys_mod_count>
+        <sys_mod_count>129</sys_mod_count>
         <sys_name>IllumioStartDiscovery</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_641f9e82dbcc6700dc9fabc5ca9619ce</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-06-24 08:08:32</sys_updated_on>
+        <sys_updated_on>2026-09-16 09:04:01</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>641f9e82dbcc6700dc9fabc5ca9619ce</id>

@@ -40,7 +40,7 @@
     var count;
 	var utils=new IllumioUtils();
 	
-	if(utils.getCancelledJobStatus(illumioJobId)){ 
+	if(utils.isJobCancelled(illumioJobId)){ 
 		return;
 	}
 	
@@ -55,7 +55,7 @@
             if (illumioScheduledJobsGr.next()) {
                 gs.info('Triggering cmdb discovery');
                 illumioScheduledJobsGr.current_operation = 'Completed fetching PCE data';
-                illumioScheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] Added PCE data to mapping table';
+                illumioScheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] PHASE - END: Fetch & Store PCE Data';
 
                 illumioScheduledJobsGr.update();
 
@@ -82,15 +82,15 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>425ee9ae878a8510d7a34046cebb3535</sys_id>
-        <sys_mod_count>4</sys_mod_count>
+        <sys_mod_count>8</sys_mod_count>
         <sys_name>Illumio start mapping when job is done</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_425ee9ae878a8510d7a34046cebb3535</sys_update_name>
-        <sys_updated_by>crest.data</sys_updated_by>
-        <sys_updated_on>2025-07-21 07:25:45</sys_updated_on>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-16 09:04:01</sys_updated_on>
         <template/>
         <when>before</when>
     </sys_script>

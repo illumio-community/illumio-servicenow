@@ -237,6 +237,7 @@ IllumioManageAsyncJobs.prototype = {
 
             this.logger._info('IllumioManageAsyncJobs - Getting async job results');
 
+            var fetchStartTime = new Date().getTime();
             var response = this.pceHttpClient.get('/api/v2' + resultsLocation, '');
 
             if (response.hasError) {
@@ -266,6 +267,9 @@ IllumioManageAsyncJobs.prototype = {
             // Data will be array of objects
 
             var resultData = [];
+            // Records PCE returned that carry no primary key. They are dropped on purpose --
+            // see the log line below -- but the drop is invisible without a count.
+            var missingPrimaryKey = 0;
             response.data = JSON.parse(JSON.stringify(response.data));
             response.data.map(function(resultObj) {
 
@@ -294,16 +298,33 @@ IllumioManageAsyncJobs.prototype = {
                         }
                     });
                     resultData.push(requredDataObj);
+                } else {
+                    missingPrimaryKey++;
                 }
             });
 
             var resultLength = resultData.length;
+            var fetchElapsed = ((new Date().getTime() - fetchStartTime) / 1000).toFixed(2);
+            var tag = (job_identifier + "").charAt(0).toUpperCase() + (job_identifier + "").slice(1);
             this.logger._debug('IllumioManageAsyncJobs - Total records : ' + resultLength + ", will be broken down into batches of " + this.batchSize);
 
-            var jobContent = {
-                logs: 'Total ' + job_identifier + ' fetched : ' + resultLength
-            };
-            this._updateJobRecord(scheduled_job_id, jobContent);
+            // The primary key is the only field discovery can match on -- 'hostname' for
+            // workloads, 'value' for labels -- so a record without one cannot be mapped and is
+            // dropped by design. Reported on the fetch line rather than its own, because
+            // _updateJobRecord costs a GET plus a PUT against the SNOW Table API, and because
+            // the count is only meaningful next to the number that was kept.
+            //
+            // Worth knowing when this is non-zero for workloads: PCE workloads created through
+            // the PCE UI have Name set but Hostname null, so they never reach the mapping table
+            // and the CMDB CI that should have matched one classifies as unknown instead.
+            var fetchLog = '[' + tag + '] Fetched from PCE: ' + resultLength + ' records (' + fetchElapsed + 's)';
+            if (missingPrimaryKey > 0) {
+                fetchLog += '; skipped ' + missingPrimaryKey + ' with no ' + primaryKey;
+            }
+
+            this._updateJobRecord(scheduled_job_id, {
+                logs: fetchLog
+            });
 
             if (this.utils.checkCancelledJobStatus(this.illumio_jobId, this.snowUrl, this.snowUsername, this.snowPassword)) {
                 return;
@@ -311,6 +332,8 @@ IllumioManageAsyncJobs.prototype = {
             // add 1 more iteration count in case the 'resultLength' is exactly divisible by 'batchSize'
             var iterations = (resultLength / this.batchSize) + 1;
 
+            var stagingStartTime = new Date().getTime();
+            var batchCount = 0;
             // extra check on 'resultData' length as it gets shorter everytime the chunked payload is sent
             for (var iter = 0; iter < iterations && resultData.length != 0; iter++) {
                 var payload = {
@@ -328,8 +351,15 @@ IllumioManageAsyncJobs.prototype = {
                     );
                     return false;
                 }
+                batchCount++;
                 this.logger._debug("Pending " + job_identifier + " to be written:" + resultData.length);
             }
+
+            var stagingElapsed = ((new Date().getTime() - stagingStartTime) / 1000).toFixed(2);
+            this._updateJobRecord(scheduled_job_id, {
+                logs: '[' + tag + '] Written to staging: ' + batchCount + ' batch(es) (batch size: ' + this.batchSize + ', ' + resultLength + ' records) (' + stagingElapsed + 's)'
+            });
+
             this.logger._info('IllumioManageAsyncJobs - Posted all records to SNOW');
             return true;
 
@@ -445,7 +475,7 @@ IllumioManageAsyncJobs.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>63973142db8c6700dc9fabc5ca961947</sys_id>
-        <sys_mod_count>89</sys_mod_count>
+        <sys_mod_count>92</sys_mod_count>
         <sys_name>IllumioManageAsyncJobs</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -453,6 +483,6 @@ IllumioManageAsyncJobs.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_63973142db8c6700dc9fabc5ca961947</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-04-23 16:48:55</sys_updated_on>
+        <sys_updated_on>2026-09-16 20:38:54</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

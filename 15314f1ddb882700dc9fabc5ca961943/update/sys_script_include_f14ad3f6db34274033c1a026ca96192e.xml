@@ -12,6 +12,17 @@
         <script><![CDATA[gs.include("IllumioConstants");
 var IllumioAutoSyncWithPCE = Class.create();
 IllumioAutoSyncWithPCE.prototype = {
+
+    /**
+     * Conditions a workload must meet to be worth syncing, applied to every phase-2 chunk.
+     *
+     * It lives in the chunk query rather than in a pass of its own because there it is free --
+     * the chunk is being read anyway. The pre-rewrite code ran a separate query over every
+     * workload of the configuration just to establish this, then intersected the result with
+     * the Sync Filter's in JavaScript.
+     */
+    SYNC_CHUNK_QUERY: "duplicate=false^conflicts=true",
+
     initialize: function() {
         this.sys_ids = [];
         this.managedWorkloadsList = [];
@@ -27,14 +38,15 @@ IllumioAutoSyncWithPCE.prototype = {
      **/
     process: function(illumioJobId) {
         var utils = new IllumioUtils(),
+            syncUtils = new IllumioSyncUtils(),
+            repo = new IllumioSyncRepoUtils(syncUtils),
             skippedWorkloads = 0,
             partial_success = "false",
             countObject, sysIds = [],
-            counter = 0,
-            selectedRecordsObject = {};
+            counter = 0;
 
         try {
-            if (utils.getCancelledJobStatus(illumioJobId)) {
+            if (utils.isJobCancelled(illumioJobId)) {
                 return;
             }
 
@@ -62,34 +74,25 @@ IllumioAutoSyncWithPCE.prototype = {
             var userName = userGr.first_name + " " + userGr.last_name,
                 pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
 
-            // get all the workload sysIds
-            var allWorkloads = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload");
-            allWorkloads.addEncodedQuery('duplicate=false^conflicts=true');
-            allWorkloads.addQuery("illumio_pce_configuration", configSysId);
-            allWorkloads.orderBy("known_to_pce");
-            allWorkloads.query();
-            while (allWorkloads.next()) {
-                sysIds.push(allWorkloads.getUniqueValue());
-            }
-
-            // Apply Sync Filter if one exists for this PCE Configuration
+            // ---------------------------------------------------------------------------
+            // Phase 1 -- WHICH workloads this run acts on.
+            //
+            // Cheap, set-based, and it has to COMPLETE before phase 2 starts: deduplication is
+            // global, so a workload matched by two Sync Filters is built and sent exactly once.
+            // Nothing bigger than a list of sys_ids exists at this point.
+            // ---------------------------------------------------------------------------
             var syncFilterResult = utils.getEligibleWorkloadSysIdsByConfig(configSysId, 'inclusion');
+
             if (syncFilterResult.hasFilter) {
-                var workloadsBeforeFilter = sysIds.length;
-                var eligibleSet = {};
-                for (var e = 0; e < syncFilterResult.sysIds.length; e++) {
-                    eligibleSet[syncFilterResult.sysIds[e]] = true;
-                }
-                sysIds = sysIds.filter(function(id) {
-                    return eligibleSet[id] === true;
-                });
-                var syncFilterLog = 'Workloads with conflicts: ' + workloadsBeforeFilter + '. Eligible workloads after sync filter: ' + sysIds.length;
+                sysIds = syncFilterResult.sysIds;
+                var syncFilterLog = 'Eligible workloads after sync filter: ' + sysIds.length;
                 gs.info('[IllumioAutoSyncWithPCE] ' + syncFilterLog);
                 illumioScheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] ' + syncFilterLog;
                 illumioScheduledJobsGr.update();
+            } else {
+                // No Sync Filter: every workload of this configuration is a candidate.
+                sysIds = repo.findSyncCandidateSysIds(configSysId, this.SYNC_CHUNK_QUERY);
             }
-
-            selectedRecordsObject[configSysId] = sysIds;
 
             var status = utils.fetchLabelGroupsAndLabelsFromPCE(configGr);
             if (!status) {
@@ -107,72 +110,46 @@ IllumioAutoSyncWithPCE.prototype = {
             // fetch count of critical group names
             countObject = utils.countLabelGroups([configSysId]);
 
-            // check if workload contains critical label
-            var response = utils.skipRecordsForSync(selectedRecordsObject);
-            var checkedRecordsObject = response.filteredRecords;
-            var totalRecords = response.totalRecords;
-            if (totalRecords < sysIds.length) {
-                skippedWorkloads = sysIds.length - totalRecords;
-            }
-
-            // process all workloads
-            response = utils.getWorkloadData(checkedRecordsObject);
-            totalRecords = response.totalRecords;
-            var cancelJobOnLimitExceed = response.cancelJobOnLimitExceed;
-            var checkedRecordsData = response.filteredRecords[configSysId];
-            var thresholdLimitLog = response.logMessage[configSysId];
-
-            if (!cancelJobOnLimitExceed) {
-                // Generate the managed and unmanaged workloads' list
-                for (var index = 0, len = checkedRecordsData.length; index < len; index++) {
-                    var workloadObject = checkedRecordsData[index];
-
-                    if (checkedRecordsData[index]["known_to_pce"] == "managed") {
-                        // If the workload is managed and has conflicts
-                        workloadObject["href"] = checkedRecordsData[index]["pce_workload_href"];
-
-                        // Add note about update
-                        workloadObject["description"] =
-                            "Updated by " +
-                            userName +
-                            " [" + instanceURL + "] at " +
-                            new Date().toLocaleString();
-
-                        this.managedWorkloadsList.push(workloadObject);
-                        counter = this.addObjectToPayload(false, counter);
-                    } else if (checkedRecordsData[index]["known_to_pce"] == "unmanaged") {
-                        // If the workload is unmanaged and has conflicts
-                        workloadObject["href"] = checkedRecordsData[index]["pce_workload_href"];
-
-                        // Add note about update
-                        workloadObject["description"] =
-                            "Updated by " +
-                            userName +
-                            " [" + instanceURL + "] at " +
-                            new Date().toLocaleString();
-
-                        this.unManagedWorkloadsList.push(workloadObject);
-                        counter = this.addObjectToPayload(false, counter);
-                    } else {
-                        workloadObject["description"] =
-                            "Created by " +
-                            userName +
-                            " [" + instanceURL + "] at " +
-                            new Date().toLocaleString();
-
-                        this.unknownWorkloadsList.push(workloadObject);
-                        counter = this.addObjectToPayload(false, counter);
-                    }
+            // ---------------------------------------------------------------------------
+            // Phase 2 -- WHAT each workload becomes.
+            //
+            // Expensive, so it is streamed a chunk at a time and never holds more than one
+            // chunk of objects. The critical-label check, the label values and the PCE label
+            // hrefs are all resolved per chunk inside runWorkloadChunks; this callback only
+            // decides which list a finished object belongs in.
+            // ---------------------------------------------------------------------------
+            var self = this;
+            var outcome = utils.runWorkloadChunks({
+                pceConfigSysId: configSysId,
+                sysIds: sysIds,
+                chunkQuery: this.SYNC_CHUNK_QUERY,
+                skipCriticalLabels: true,
+                applyThreshold: true,
+                appendRow: function(workloadObject) {
+                    self.queueWorkloadForSync(workloadObject, userName, instanceURL);
+                    counter = self.addObjectToPayload(false, counter);
                 }
+            });
 
-                // get workload limit object
-                var thresholdLimit = new IllumioThresholdLimit();
-                var wlLimitObject = thresholdLimit.getThresholdLimit(configSysId);
-            }
-
+            skippedWorkloads = outcome.skippedCritical;
+            var totalRecords = outcome.processed;
+            var thresholdLimitLog = outcome.logMessage;
 
             // Check threshold limit
-            if (cancelJobOnLimitExceed) {
+            if (outcome.cancelJob) {
+                // Payload rows are inserted as the run proceeds now rather than all at once at
+                // the end, so cancelling means withdrawing the ones already written -- they
+                // describe work that must not happen. The old code got this for free by
+                // discarding an in-memory array.
+                var withdrawn = repo.deletePayloadRows(
+                    syncUtils.AUTOSYNC_PAYLOAD_TABLE, this.payloadSysIds);
+                gs.info("[IllumioAutoSyncWithPCE] Job cancelled on threshold limit, withdrew " +
+                    withdrawn + " payload record(s)");
+                this.payloadSysIds = [];
+                this.managedWorkloadsList = [];
+                this.unManagedWorkloadsList = [];
+                this.unknownWorkloadsList = [];
+
                 illumioScheduledJobsGr.logs +=
                     "\n[" +
                     new Date(new GlideDateTime().getNumericValue()).toISOString() +
@@ -294,37 +271,60 @@ IllumioAutoSyncWithPCE.prototype = {
     },
 
     /**
+     * Sort one finished workload object into the list the MID Server operation it needs.
+     *
+     * The only difference between the three is the verb in the description and, for the two the
+     * PCE already knows, that they carry the href to update. This is the "row builder" half of
+     * the phase-2 parameterisation -- the deletion path supplies its own.
+     *
+     * @param {Object} workloadObject Object from IllumioUtils.runWorkloadChunks
+     * @param {String} userName Display name of the job owner, for the audit note
+     * @param {String} instanceURL Instance host, for the audit note
+     */
+    queueWorkloadForSync: function(workloadObject, userName, instanceURL) {
+        var signature = " [" + instanceURL + "] at " + new Date().toLocaleString();
+
+        if (workloadObject["known_to_pce"] == "managed") {
+            workloadObject["href"] = workloadObject["pce_workload_href"];
+            workloadObject["description"] = "Updated by " + userName + signature;
+            this.managedWorkloadsList.push(workloadObject);
+        } else if (workloadObject["known_to_pce"] == "unmanaged") {
+            workloadObject["href"] = workloadObject["pce_workload_href"];
+            workloadObject["description"] = "Updated by " + userName + signature;
+            this.unManagedWorkloadsList.push(workloadObject);
+        } else {
+            workloadObject["description"] = "Created by " + userName + signature;
+            this.unknownWorkloadsList.push(workloadObject);
+        }
+    },
+
+    /**
      * Updated workload object with label details
+     *
+     * Kept for the callers that hold one workload at a time (IllumioPrepareWorkload,
+     * GetLabelGroupsAjax, IllumioUtils.getWorkloadData). It used to run one query per label
+     * dimension against a mapping table of ~100k rows; it now runs one query for the whole
+     * workload, and the sync pipeline does not come through here at all -- it resolves a whole
+     * chunk's labels in one go.
+     *
      * @param {String} configSysId Illumio PCE Configuration sys_id
      * @param {Object} workloadObject Object of the workload
      * @param {Object} labelData Object of the labels to map
      * @returns updated object of the workload
      */
     getUseCreateLabelsList: function(configSysId, workloadObject, labelData) {
-        workloadObject.labels = [];
-        workloadObject.createlabels = [];
+        var syncUtils = new IllumioSyncUtils();
+        var repo = new IllumioSyncRepoUtils(syncUtils);
 
-        var utils = new IllumioUtils();
-        for (var labelType in labelData) {
-            var labelCMDBValue = labelData[labelType];
+        var hrefByPair = repo.getLabelHrefsByPair(configSysId,
+            syncUtils.collectLabelPairs({
+                workload: labelData
+            }));
 
-            var labelsGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_labels_mapping");
-            labelsGr.addQuery("key", labelType);
-            labelsGr.addQuery("value", labelCMDBValue);
-            labelsGr.addQuery("illumio_pce_configuration", configSysId);
-            labelsGr.query();
-            var resp = utils.queryCaseSensitiveGr(labelsGr, 'value', labelCMDBValue, 'href');
-            if (resp.found) {
-                workloadObject.labels.push({
-                    href: resp.returnValue,
-                });
-            } else if (!gs.nil(labelCMDBValue)) {
-                workloadObject.createlabels.push({
-                    key: labelType,
-                    value: labelCMDBValue,
-                });
-            }
-        }
+        var split = syncUtils.splitLabelsForSync(labelData, hrefByPair);
+        workloadObject.labels = split.labels;
+        workloadObject.createlabels = split.createlabels;
+
         return workloadObject;
     },
 
@@ -332,8 +332,10 @@ IllumioAutoSyncWithPCE.prototype = {
      * this function will add the workload payload to table if couter exceeds or if its a last batch
      * @param {boolean} pushBundle
      * @param {number} objCounter
+     * @param {string} [payloadTable] Payload table, defaults to the auto sync payload table.
+     *   Parameterised because it is the single point at which the deletion path differs.
      */
-    addObjectToPayload: function(pushBundle, objCounter) {
+    addObjectToPayload: function(pushBundle, objCounter, payloadTable) {
         objCounter++;
 
         var sys_id = "";
@@ -346,7 +348,7 @@ IllumioAutoSyncWithPCE.prototype = {
                 0
             ) {
                 var grPayload = new GlideRecordSecure(
-                    "x_illu2_illumio_illumio_autosync_payload"
+                    payloadTable || new IllumioSyncUtils().AUTOSYNC_PAYLOAD_TABLE
                 );
                 grPayload.initialize();
                 var payload = {
@@ -374,19 +376,20 @@ IllumioAutoSyncWithPCE.prototype = {
     },
 
     type: "IllumioAutoSyncWithPCE",
-};]]></script>
+};
+]]></script>
         <sys_class_name>sys_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-10-01 06:20:45</sys_created_on>
         <sys_id>f14ad3f6db34274033c1a026ca96192e</sys_id>
-        <sys_mod_count>356</sys_mod_count>
+        <sys_mod_count>358</sys_mod_count>
         <sys_name>IllumioAutoSyncWithPCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_f14ad3f6db34274033c1a026ca96192e</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-08-03 12:09:38</sys_updated_on>
+        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>f14ad3f6db34274033c1a026ca96192e</id>

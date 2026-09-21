@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_index">
+    <sys_index action="INSERT_OR_UPDATE">
+        <access_method>btree</access_method>
+        <col_name_string>illumio_pce_configuration,class_mapping,illumio_label_dimension,cmdb_value</col_name_string>
+        <index_col_name>7e803458c3ef47d050bffa0ed4013146,76803458c3ef47d050bffa0ed401314d,ff7bb804c392031050bffa0ed40131de,377bb804c392031050bffa0ed40131e1</index_col_name>
+        <logical_table_name>x_illu2_illumio_illumio_pce_workload_field_value</logical_table_name>
+        <sys_class_name>sys_index</sys_class_name>
+        <sys_created_by>system</sys_created_by>
+        <sys_created_on>2026-09-21 11:05:51</sys_created_on>
+        <sys_id>8e41f0d8c3ef47d050bffa0ed4013193</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio_illumio_pce_workload_field_value</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_index_x_illu2_illumio_illumio_pce_workload_field_value_illumio_pce_configuration_class_mapping_illumio_label_dimension_cmdb_value</sys_update_name>
+        <sys_updated_by>system</sys_updated_by>
+        <sys_updated_on>2026-09-21 11:05:51</sys_updated_on>
+        <table display_value="Illumio PCE Workload Field Value" name="x_illu2_illumio_illumio_pce_workload_field_value">acafa2a897700210b7daf896f053afb6</table>
+        <unique_index>false</unique_index>
+    </sys_index>
+</record_update>

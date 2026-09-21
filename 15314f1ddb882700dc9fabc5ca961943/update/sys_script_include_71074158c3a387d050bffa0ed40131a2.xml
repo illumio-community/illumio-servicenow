@@ -1,0 +1,665 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioSyncUtils</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioSyncUtils</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var IllumioSyncUtils = Class.create();
+
+/**
+ * Pure helpers for Sync Filter evaluation. Parsing, query-string building, set algebra.
+ *
+ * Nothing here touches the database, and nothing here calls `gs`. That is deliberate and it is
+ * the point of the file: every function below runs unchanged in a plain Node harness, so the
+ * condition parser -- which turns a user-authored encoded query into the workload set a sync
+ * acts on, and whose mistakes are wrong results rather than errors -- can be tested exhaustively
+ * without an instance.
+ *
+ * Data access lives in IllumioSyncRepoUtils. Orchestration stays in IllumioUtils and
+ * IllumioAutoSyncWithPCE. Same three-way split as the discovery side.
+ */
+IllumioSyncUtils.prototype = {
+
+    // ---- tables ----
+
+    WORKLOAD_TABLE: "x_illu2_illumio_illumio_pce_workload",
+    WORKLOAD_FIELD_VALUE_TABLE: "x_illu2_illumio_illumio_pce_workload_field_value",
+    SYNC_FILTER_TABLE: "x_illu2_illumio_illumio_sync_filter",
+    CLASS_MAPPING_TABLE: "x_illu2_illumio_illumio_config_class_mapping",
+    AUTOSYNC_PAYLOAD_TABLE: "x_illu2_illumio_illumio_autosync_payload",
+    DELETION_PAYLOAD_TABLE: "x_illu2_illumio_illumio_deletion_payload",
+
+    // ---- columns on WORKLOAD_FIELD_VALUE_TABLE ----
+
+    DIMENSION_FIELD: "illumio_label_dimension",
+    WORKLOAD_FIELD: "illumio_pce_workload",
+
+    // Added for the re-architecture so a term is an index seek rather than a join. The old
+    // evaluation reached the PCE Configuration by dot-walking illumio_pce_workload, which no
+    // index on this table can serve.
+    CONFIG_FIELD: "illumio_pce_configuration",
+    CLASS_MAPPING_FIELD: "class_mapping",
+
+    // ---- encoded query grammar ----
+
+    // ^NQ starts a whole new query in ServiceNow, where ^OR only ORs the condition immediately
+    // before it. The re-architecture reads a ^NQ group as one DNF term.
+    TERM_SEPARATOR: "^NQ",
+    CONDITION_SEPARATOR: "^",
+    OR_PREFIX: "OR",
+
+    // Clauses the condition builder can append after the conditions themselves. Parsing stops at
+    // the first one. ORDERBY is checked before the ^OR continuation test for the obvious reason.
+    END_MARKERS: ["ORDERBYDESC", "ORDERBY", "GROUPBY", "EQ"],
+
+    // ---- batch sizes ----
+
+    // Maximum number of elements ServiceNow can safely take in a single IN clause. Same value
+    // IllumioDiscoveryRepository.IN_CLAUSE_BATCH_SIZE uses, for the same reason.
+    CI_CHUNK_SIZE: 500,
+    WORKLOAD_CHUNK_SIZE: 500,
+
+    // Distinct (dimension key, label value) pairs resolved to PCE label hrefs in one query.
+    // The PCE labels mapping table holds ~100k rows in production, so it is never loaded for a
+    // whole run -- only for the workload chunk currently being built. A chunk of 500 workloads
+    // can in the worst case carry a few thousand distinct pairs, and this keeps the resulting
+    // OR clause to a size the database will plan sensibly.
+    LABEL_PAIR_BATCH_SIZE: 250,
+
+    initialize: function() {},
+
+    // ---- condition parsing ----
+
+    /**
+     * Is a condition string absent or blank?
+     * A Sync Filter with both conditions empty is SKIPPED, not treated as match-everything --
+     * see IllumioUtils.getWorkloadsBySyncFilter. An empty filter is far more likely to be a
+     * half-finished one than a deliberate "sync everything".
+     * @param {String} encodedQuery Encoded query, possibly nil
+     * @returns {Boolean} true when there is nothing to evaluate
+     */
+    isConditionEmpty: function(encodedQuery) {
+        return !encodedQuery || ("" + encodedQuery).trim() === "";
+    },
+
+    /**
+     * Split an encoded query into DNF terms on ^NQ.
+     *
+     * NOTE: a value containing the literal "^NQ" would split here. ServiceNow does not escape
+     * ^ inside encoded query values, so this is unavoidable at this layer and was equally true
+     * of the filter-item code this replaces.
+     *
+     * @param {String} encodedQuery Encoded query from the condition builder
+     * @returns {Array} Array of term strings, empty when there is nothing to parse
+     */
+    splitConditionTerms: function(encodedQuery) {
+        if (this.isConditionEmpty(encodedQuery)) {
+            return [];
+        }
+
+        var raw = ("" + encodedQuery).split(this.TERM_SEPARATOR);
+        var terms = [];
+        for (var index = 0; index < raw.length; index++) {
+            if (raw[index].trim() !== "") {
+                terms.push(raw[index]);
+            }
+        }
+        return terms;
+    },
+
+    /**
+     * Strip the ^OR continuation prefix from a condition, if it has one
+     * @param {String} condition One ^-separated condition
+     * @returns {String} The condition without a leading "OR"
+     */
+    stripOrPrefix: function(condition) {
+        var text = "" + (condition || "");
+        return text.substring(0, 2) === this.OR_PREFIX ? text.substring(2) : text;
+    },
+
+    /**
+     * Is this token a trailing ORDERBY / GROUPBY / EQ clause rather than a condition?
+     * @param {String} condition One ^-separated token
+     * @returns {Boolean} true when parsing should stop here
+     */
+    isEndMarker: function(condition) {
+        var text = "" + (condition || "");
+        for (var index = 0; index < this.END_MARKERS.length; index++) {
+            if (text.indexOf(this.END_MARKERS[index]) === 0) {
+                return true;
+            }
+        }
+        return false;
+    },
+
+    /**
+     * Is this condition ORed onto the one before it?
+     * End markers are tested first because ORDERBY also starts with "OR".
+     * @param {String} condition One ^-separated token
+     * @returns {Boolean} true for a ^OR continuation
+     */
+    isOrContinuation: function(condition) {
+        var text = "" + (condition || "");
+        if (this.isEndMarker(text)) {
+            return false;
+        }
+        return text.substring(0, 2) === this.OR_PREFIX;
+    },
+
+    /**
+     * Field a condition applies to.
+     *
+     * The field name is the leading run of lower-case-name characters, which is safe because
+     * every ServiceNow column name is lower case while every encoded-query operator either is a
+     * symbol (=, !=, <, >) or starts with an upper-case letter (LIKE, IN, STARTSWITH, ISEMPTY).
+     * So `cmdb_valueSTARTSWITHwin` yields `cmdb_value`, and the same rule is what lets
+     * isOrContinuation distinguish the `OR` prefix from a column called `order`.
+     *
+     * @param {String} condition One ^-separated condition, with or without an OR prefix
+     * @returns {String} Field name, "" when the token has no recognisable field
+     */
+    conditionField: function(condition) {
+        var match = this.stripOrPrefix(condition).match(/^[a-z0-9_]+(\.[a-z0-9_]+)*/);
+        return match ? match[0] : "";
+    },
+
+    /**
+     * Does this condition pin a label dimension?
+     * A dot-walk such as illumio_label_dimension.key counts: it pins the dimension just as the
+     * reference itself does.
+     * @param {String} condition One ^-separated condition
+     * @returns {Boolean} true when the condition is on the dimension field
+     */
+    isDimensionCondition: function(condition) {
+        var field = this.conditionField(condition);
+        return field === this.DIMENSION_FIELD ||
+            field.indexOf(this.DIMENSION_FIELD + ".") === 0;
+    },
+
+    /**
+     * Split one DNF term into sub-predicates.
+     *
+     * The label table is EAV -- one row per (workload, dimension) -- so "env=qa AND os=windows"
+     * spans two rows and no single row filter can express it. A term is therefore read as a set
+     * of sub-predicates, each of which must be satisfied by a DIFFERENT row of the same workload.
+     *
+     * Each illumio_label_dimension condition opens a new sub-predicate; everything after it
+     * attaches to that sub-predicate until the next dimension condition. So
+     *
+     *   illumio_label_dimension=ENV^cmdb_value=qa^illumio_label_dimension=OS^cmdb_value=windows
+     *
+     * is two sub-predicates, not four conditions.
+     *
+     * A ^OR inside a sub-predicate is kept as-is and is genuinely useful: ServiceNow binds ^OR to
+     * the condition immediately before it, so `...^cmdb_value=windows^ORcmdb_value=win` reads as
+     * dimension=OS AND (cmdb_value=windows OR cmdb_value=win) -- an OR *within* one row, which is
+     * the one case the COUNT mechanism does not need to handle itself.
+     *
+     * @param {String} term One ^NQ group
+     * @returns {Object} { subPredicates: Array, errors: Array }
+     */
+    splitTermSubPredicates: function(term) {
+        var result = {
+            subPredicates: [],
+            errors: []
+        };
+
+        var tokens = ("" + (term || "")).split(this.CONDITION_SEPARATOR);
+        var current = null;
+
+        for (var index = 0; index < tokens.length; index++) {
+            var token = tokens[index];
+
+            if (token === "") {
+                continue;
+            }
+            if (this.isEndMarker(token)) {
+                break;
+            }
+
+            if (this.isDimensionCondition(token)) {
+                // ^OR on the dimension field would let one sub-predicate span two dimensions.
+                // A single row would then satisfy it either way and COUNT would over-report,
+                // matching workloads that have only one of the two labels.
+                if (this.isOrContinuation(token)) {
+                    result.errors.push("'" + token + "' ORs the label dimension itself. " +
+                        "Put each dimension in its own condition joined by AND, or in its own " +
+                        "OR group.");
+                    continue;
+                }
+
+                if (current !== null) {
+                    result.subPredicates.push(current);
+                }
+                current = token;
+                continue;
+            }
+
+            // A value condition with no dimension ahead of it has nothing to attach to. Left
+            // alone it would silently widen the term to every dimension at once.
+            if (current === null) {
+                result.errors.push("'" + token + "' comes before any Label Dimension condition. " +
+                    "Start each part of the condition with the Label Dimension it applies to.");
+                continue;
+            }
+
+            current = current + this.CONDITION_SEPARATOR + token;
+        }
+
+        if (current !== null) {
+            result.subPredicates.push(current);
+        }
+
+        return result;
+    },
+
+    /**
+     * Parse a whole label condition into DNF terms of sub-predicates.
+     *
+     * Callers must check `errors` before using `terms`. The evaluator fails closed on a non-empty
+     * errors array -- a mis-parsed condition that silently syncs the wrong workloads is worse
+     * than one that syncs none -- and the save-time business rule reports the same strings, so
+     * validation and evaluation cannot drift apart.
+     *
+     * @param {String} encodedQuery Value of the Sync Filter's label_condition
+     * @returns {Object} { terms: Array of sub-predicate arrays, errors: Array of messages }
+     */
+    parseLabelCondition: function(encodedQuery) {
+        var result = {
+            terms: [],
+            errors: []
+        };
+
+        var terms = this.splitConditionTerms(encodedQuery);
+
+        for (var index = 0; index < terms.length; index++) {
+            var parsed = this.splitTermSubPredicates(terms[index]);
+
+            for (var errorIndex = 0; errorIndex < parsed.errors.length; errorIndex++) {
+                result.errors.push("OR group " + (index + 1) + ": " + parsed.errors[errorIndex]);
+            }
+
+            if (parsed.subPredicates.length > 0) {
+                result.terms.push(parsed.subPredicates);
+            }
+        }
+
+        return result;
+    },
+
+    // ---- query building ----
+
+    /**
+     * Conditions every label sub-predicate carries.
+     *
+     * Direct columns only, never a dot-walk -- this is what the composite index on
+     * (illumio_pce_configuration, class_mapping, illumio_label_dimension, cmdb_value) exists to
+     * serve, and what the old `illumio_pce_workload.illumio_pce_configuration=` could not use.
+     *
+     * The `duplicate=false` guard the old evaluation dot-walked for is NOT here. It is applied
+     * once per filter against the workload table instead (IllumioSyncRepoUtils.filterWorkloads),
+     * where it is a direct column, rather than joined on every row of every term.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @param {String} classMappingSysId sys_id of the Config Class Mapping, nil to span all of them
+     * @returns {String} Encoded query fragment
+     */
+    buildBaseQuery: function(pceConfigSysId, classMappingSysId) {
+        var parts = [this.CONFIG_FIELD + "=" + pceConfigSysId];
+
+        if (classMappingSysId && ("" + classMappingSysId).trim() !== "") {
+            parts.push(this.CLASS_MAPPING_FIELD + "=" + classMappingSysId);
+        }
+
+        return parts.join(this.CONDITION_SEPARATOR);
+    },
+
+    /**
+     * One term as a single encoded query.
+     *
+     * Sub-predicates are joined by ^NQ, so the query selects the UNION of the rows each one
+     * matches. The caller then groups by workload and keeps those with COUNT >= subPredicates
+     * length: k distinct rows, which under one-row-per-(workload, dimension) means k distinct
+     * sub-predicates satisfied. That is the AND.
+     *
+     * The base has to be repeated in every clause because ^NQ discards everything before it.
+     *
+     * @param {String} baseQuery Fragment from buildBaseQuery
+     * @param {Array} subPredicates Sub-predicates of one term
+     * @returns {String} Encoded query, "" when there are no sub-predicates
+     */
+    buildTermQuery: function(baseQuery, subPredicates) {
+        if (!subPredicates || subPredicates.length === 0) {
+            return "";
+        }
+
+        var clauses = [];
+        for (var index = 0; index < subPredicates.length; index++) {
+            clauses.push(baseQuery ?
+                baseQuery + this.CONDITION_SEPARATOR + subPredicates[index] :
+                subPredicates[index]);
+        }
+
+        return clauses.join(this.TERM_SEPARATOR);
+    },
+
+    // ---- set algebra ----
+    //
+    // Sets are plain objects keyed by sys_id. Values are sys_ids -- 32 hex characters, never a
+    // user string -- so the Object.prototype collision that IllumioDiscoveryUtils.mapKey guards
+    // against cannot arise here and no key prefix is needed.
+
+    /**
+     * Add sys_ids to a set, in place
+     * @param {Object} targetSet Set to grow
+     * @param {Array} sysIds sys_ids to add
+     * @returns {Number} How many were not already present
+     */
+    unionInto: function(targetSet, sysIds) {
+        var added = 0;
+        for (var index = 0; index < sysIds.length; index++) {
+            if (!targetSet[sysIds[index]]) {
+                targetSet[sysIds[index]] = true;
+                added++;
+            }
+        }
+        return added;
+    },
+
+    /**
+     * Append the sys_ids that survive a guard set to an array, in place.
+     *
+     * This is how the CMDB side is intersected with the label side without ever materialising
+     * it: the guard set is built once and only read, while the array grows one batch at a time
+     * and can only ever gain ids the guard set already holds. Growing the GUARD instead would
+     * produce the union -- the opposite result.
+     *
+     * @param {Array} target Array to append to
+     * @param {Array} sysIds Candidate sys_ids, one batch
+     * @param {Object} guardSet Set to test against, nil to accept everything
+     * @returns {Number} How many were appended
+     */
+    intersectInto: function(target, sysIds, guardSet) {
+        var appended = 0;
+        for (var index = 0; index < sysIds.length; index++) {
+            if (!guardSet || guardSet[sysIds[index]]) {
+                target.push(sysIds[index]);
+                appended++;
+            }
+        }
+        return appended;
+    },
+
+    /**
+     * Keys of a set as an array
+     * @param {Object} set Set built by unionInto
+     * @returns {Array} sys_ids
+     */
+    setToArray: function(set) {
+        return Object.keys(set);
+    },
+
+    /**
+     * Split an array into chunks of a given size
+     * @param {Array} arr Array to split
+     * @param {Number} size Maximum chunk size
+     * @returns {Array} Array of arrays
+     */
+    chunkArray: function(arr, size) {
+        var chunks = [];
+        for (var index = 0; index < arr.length; index += size) {
+            chunks.push(arr.slice(index, index + size));
+        }
+        return chunks;
+    },
+
+    // ---- label handling for the sync pipeline ----
+    //
+    // The three functions below are the per-workload decisions the old sync path made with a
+    // query each. They are pure so the chunked pipeline can make the same decisions from maps
+    // built once per chunk, and so they can be tested without an instance.
+
+    /**
+     * Map key for one (label dimension key, label value) pair.
+     *
+     * A newline separates the two parts because neither a dimension key nor a label value can
+     * contain one, so the key is unambiguous -- and, usefully, no property of Object.prototype
+     * contains a newline either, so a user-authored label value can never collide with
+     * `constructor` or `__proto__` the way a bare value used as a key could.
+     *
+     * @param {String} dimensionKey Label dimension key, e.g. "env"
+     * @param {String} labelValue Label value, e.g. "Production"
+     * @returns {String} Map key
+     */
+    labelPairKey: function(dimensionKey, labelValue) {
+        return "" + dimensionKey + "\n" + labelValue;
+    },
+
+    /**
+     * Distinct (dimension key, label value) pairs across a chunk's worth of label data.
+     *
+     * Deduplicated because label values repeat heavily -- a chunk of 500 workloads typically
+     * carries far fewer distinct pairs than it does workloads, and every duplicate removed here
+     * is an OR clause not sent to the database.
+     *
+     * Pairs with no value are dropped: there is nothing to look up and nothing to create.
+     *
+     * @param {Object} labelDataByWorkload { workloadSysId: { dimensionKey: labelValue } }
+     * @returns {Array} [{ key: String, value: String }]
+     */
+    collectLabelPairs: function(labelDataByWorkload) {
+        var seen = {};
+        var pairs = [];
+
+        for (var workloadSysId in labelDataByWorkload) {
+            var labelData = labelDataByWorkload[workloadSysId];
+
+            for (var dimensionKey in labelData) {
+                var labelValue = labelData[dimensionKey];
+                if (labelValue === null || labelValue === undefined || labelValue === "") {
+                    continue;
+                }
+
+                var pairKey = this.labelPairKey(dimensionKey, labelValue);
+                if (seen[pairKey]) {
+                    continue;
+                }
+
+                seen[pairKey] = true;
+                pairs.push({
+                    key: dimensionKey,
+                    value: "" + labelValue
+                });
+            }
+        }
+
+        return pairs;
+    },
+
+    /**
+     * Which label value a workload should send to the PCE, per dimension.
+     *
+     * A dimension the class mapping owns (it is in updateFields) is synced FROM the CMDB, so the
+     * CMDB value wins and a blank one means "nothing to say about this dimension". Any other
+     * dimension is not ours to change, so the workload's existing PCE value is echoed back
+     * unchanged.
+     *
+     * @param {Object} labelValues { dimensionKey: { cmdb_value: String, pce_value: String } }
+     * @param {Array} updateFields Dimension keys the class mapping maps, may be nil
+     * @returns {Object} { dimensionKey: labelValue }
+     */
+    selectLabelData: function(labelValues, updateFields) {
+        var mapped = updateFields || [];
+        var labelData = {};
+
+        for (var dimensionKey in labelValues) {
+            var values = labelValues[dimensionKey];
+
+            if (mapped.indexOf(dimensionKey) > -1) {
+                if (values.cmdb_value !== null && values.cmdb_value !== undefined &&
+                    values.cmdb_value !== "") {
+                    labelData[dimensionKey] = values.cmdb_value;
+                }
+            } else {
+                labelData[dimensionKey] = values.pce_value;
+            }
+        }
+
+        return labelData;
+    },
+
+    /**
+     * Split a workload's labels into the ones the PCE already has and the ones it must create.
+     *
+     * The href map is keyed by the label value AS STORED, and looked up by the exact value the
+     * CMDB holds, which is what keeps the match case-sensitive: the query that built the map is
+     * case-insensitive, so "Production" and "production" both come back, and only the exact key
+     * is found here. This is the job IllumioUtils.queryCaseSensitiveGr did one row at a time.
+     *
+     * A dimension with no value goes in neither list -- there is nothing to reference and
+     * nothing to create.
+     *
+     * @param {Object} labelData { dimensionKey: labelValue }, from selectLabelData
+     * @param {Object} hrefByPair { labelPairKey: href }
+     * @returns {Object} { labels: [{ href: }], createlabels: [{ key: , value: }] }
+     */
+    splitLabelsForSync: function(labelData, hrefByPair) {
+        var split = {
+            labels: [],
+            createlabels: []
+        };
+
+        for (var dimensionKey in labelData) {
+            var labelValue = labelData[dimensionKey];
+            var href = hrefByPair[this.labelPairKey(dimensionKey, labelValue)];
+
+            if (href) {
+                split.labels.push({
+                    href: href
+                });
+            } else if (labelValue !== null && labelValue !== undefined && labelValue !== "") {
+                split.createlabels.push({
+                    key: dimensionKey,
+                    value: labelValue
+                });
+            }
+        }
+
+        return split;
+    },
+
+    /**
+     * Does this workload carry a critical label whose CMDB value disagrees with the PCE?
+     *
+     * Such a workload is skipped rather than synced: a critical label is one an administrator
+     * has declared too consequential to overwrite from the CMDB automatically.
+     *
+     * Membership is compared case-insensitively because the query this replaces
+     * (IllumioUtils.skipRecordsForSync) used `pce_value IN (...)`, and ServiceNow string
+     * comparison is case-insensitive. The disagreement test itself stays exact, as it was.
+     *
+     * @param {Object} labelValues { dimensionKey: { cmdb_value: , pce_value: } }
+     * @param {Object} criticalLabelsByType { dimensionKey: [critical label names] }
+     * @returns {Boolean} true when the workload must be skipped
+     */
+    hasCriticalLabelConflict: function(labelValues, criticalLabelsByType) {
+        for (var dimensionKey in criticalLabelsByType) {
+            var criticalValues = criticalLabelsByType[dimensionKey];
+            if (!criticalValues || criticalValues.length === 0) {
+                continue;
+            }
+
+            var values = labelValues[dimensionKey];
+            if (!values || !values.pce_value) {
+                continue;
+            }
+
+            var pceValue = ("" + values.pce_value).toLowerCase();
+            var isCritical = false;
+            for (var index = 0; index < criticalValues.length; index++) {
+                if (("" + criticalValues[index]).toLowerCase() === pceValue) {
+                    isCritical = true;
+                    break;
+                }
+            }
+
+            if (isCritical && values.cmdb_value != values.pce_value) {
+                return true;
+            }
+        }
+
+        return false;
+    },
+
+    // ---- threshold budget ----
+    //
+    // Extracted from IllumioUtils.getWorkloadData so the chunked pipeline and the legacy
+    // per-record path decide identically. One set of rules, two callers.
+
+    /**
+     * Is there budget left for one more workload of this operation?
+     * @param {Object} wlLimitObject Limit object from IllumioThresholdLimit.getThresholdLimit
+     * @param {String} operation "create" or "update"
+     * @returns {Boolean} true when the workload may be processed
+     */
+    hasOperationBudget: function(wlLimitObject, operation) {
+        if (!operation || !wlLimitObject["limitEnabled"]) {
+            return true;
+        }
+        if (!wlLimitObject["isLimitEnabled"][operation]) {
+            return true;
+        }
+        return wlLimitObject["wlLimit"][operation] > 0;
+    },
+
+    /**
+     * Is there budget left to create this many new labels?
+     * @param {Object} wlLimitObject Limit object from IllumioThresholdLimit.getThresholdLimit
+     * @param {Number} labelCreateCount Labels this workload would have the PCE create
+     * @returns {Boolean} true when the workload may be processed
+     */
+    hasLabelCreationBudget: function(wlLimitObject, labelCreateCount) {
+        if (labelCreateCount === 0 || !wlLimitObject["limitEnabled"]) {
+            return true;
+        }
+        if (!wlLimitObject["isLimitEnabled"]["labelCreate"]) {
+            return true;
+        }
+        return (wlLimitObject["wlLimit"]["labelCreate"] - labelCreateCount) >= 0;
+    },
+
+    /**
+     * Spend one workload's worth of budget, in place
+     * @param {Object} wlLimitObject Limit object from IllumioThresholdLimit.getThresholdLimit
+     * @param {String} operation "create" or "update"
+     * @param {Number} labelCreateCount Labels this workload has the PCE create
+     */
+    consumeBudget: function(wlLimitObject, operation, labelCreateCount) {
+        if (operation) {
+            wlLimitObject["wlLimit"][operation] -= 1;
+        }
+        wlLimitObject["wlLimit"]["labelCreate"] -= labelCreateCount;
+    },
+
+    type: "IllumioSyncUtils"
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-21 12:40:52</sys_created_on>
+        <sys_id>71074158c3a387d050bffa0ed40131a2</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>IllumioSyncUtils</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_71074158c3a387d050bffa0ed40131a2</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 12:40:52</sys_updated_on>
+    </sys_script_include>
+</record_update>

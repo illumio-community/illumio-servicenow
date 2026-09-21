@@ -1,0 +1,679 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioDiscoveryUtils</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioDiscoveryUtils</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var IllumioDiscoveryUtils = Class.create();
+IllumioDiscoveryUtils.prototype = {
+    // Reference to hostname rules http://man7.org/linux/man-pages/man7/hostname.7.html
+    // Moved byte-for-byte from IllumioDiscoverAndMapCMDBServers. The dot before the closing
+    // group paren is deliberately left unescaped, so it matches any character and the pattern
+    // is far more permissive than a strict hostname rule. Tightening it widens the reject set
+    // and changes which records get logged -- do not "correct" it in isolation.
+    VALID_HOSTNAME_REGEX: "^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]).)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])$",
+
+    // Number of CMDB rows discovery pages through at a time
+    DISCOVERY_WINDOW_SIZE: 1000,
+
+    // Logged when a class mapping restricts unknown workload creation to a condition but
+    // leaves the condition empty. The gate falls back to allow_all; this is what stops that
+    // being a silent difference between what the form says and what the run did.
+    //
+    // Says "eligible", not "created": a limit is a separate control and survives the
+    // fallback, so this must not promise that every unknown workload gets created. The
+    // preceding restriction line has already reported the limit, if one is set.
+    MISSING_UNKNOWN_CONDITION_LOG: "Unknown Workload Creation is set to Conditional but no " +
+        "condition is configured; every unknown workload is eligible",
+
+    // Rows deleted per batch on a `batched` stale-data step, and so the unit of progress in
+    // the deletion log. Asked for with setLimit, which deleteMultiple usually honours but has
+    // been seen to ignore -- so _deleteStaleInBatches counts rather than assumes.
+    DELETE_BATCH_SIZE: 2000,
+
+    // Tables cleared at the start of a discovery run, in deletion order.
+    // Adding a table here adds a deletion log step automatically.
+    //
+    // `batched` splits the delete into DELETE_BATCH_SIZE chunks and logs progress after each
+    // one. Without it the step is a single deleteMultiple that reports nothing until it
+    // finishes -- which on the workload table is minutes of apparent silence.
+    //
+    // Not set on the field value step on purpose: its configField dot-walks, so every batch
+    // would re-join the workload table, and the progress count would pay that join too.
+    STALE_DISCOVERY_DATA: [{
+        label: "workload field value",
+        table: "x_illu2_illumio_illumio_pce_workload_field_value",
+        configField: "illumio_pce_workload.illumio_pce_configuration"
+    }, {
+        label: "workload",
+        table: "x_illu2_illumio_illumio_pce_workload",
+        configField: "illumio_pce_configuration",
+        batched: true
+    }],
+
+    initialize: function() {},
+
+    /**
+     * Test a hostname against the hostname rules.
+     * Throws when hostname is not a string, mirroring the original inline check.
+     * @param {String} hostname Hostname of the workload
+     * @returns {Boolean} true when the hostname matches the expected format
+     */
+    isValidHostName: function(hostname) {
+        return !!hostname.match(this.VALID_HOSTNAME_REGEX);
+    },
+
+    /**
+     * Short hostname, i.e. everything before the first dot
+     * @param {String} hostname Hostname of the workload
+     * @returns {String} Short hostname
+     */
+    hostNamePart: function(hostname) {
+        return (hostname || "").split(".")[0];
+    },
+
+    /**
+     * Canonical comparison form of a hostname. Lower-cased, "" for nil.
+     * Use mapKey, not this, when the result becomes a property name on a plain object.
+     * @param {String} value Value to normalize
+     * @returns {String} Normalized value
+     */
+    normalize: function(value) {
+        return (value || "").toLowerCase();
+    },
+
+    /**
+     * Object-key form of a hostname, for any plain object used as a lookup or seen-set.
+     *
+     * The prefix is load-bearing. Hostnames go straight into {} as property names, and a
+     * bare lower-cased hostname can collide with Object.prototype: "constructor" reads back
+     * truthy on an empty object, so the previous `if (!seen[key])` guard silently dropped
+     * such a record from the lookup arrays entirely -- it would then be classified unknown.
+     * "__proto__" is worse: assigning to it sets the prototype instead of creating a key,
+     * so it is never remembered. Lower-casing means these two are the only collisions
+     * (toString -> "tostring", valueOf -> "valueof", and so on are harmless), but prefixing
+     * removes the whole class rather than the two known members of it.
+     *
+     * @param {String} value Hostname or short hostname
+     * @returns {String} Safe property name
+     */
+    mapKey: function(value) {
+        return "h:" + this.normalize(value);
+    },
+
+    /**
+     * Build the lookup key used for the per-window incident mapping cache
+     * @param {String} hostname Hostname of the workload
+     * @param {String} href PCE workload href, may be empty for unknown workloads
+     * @returns {String} Lookup key
+     */
+    incidentKey: function(hostname, href) {
+        return this.mapKey(hostname) + "|" + (href || "");
+    },
+
+    /**
+     * Dedupe a window's hostnames and short hostnames case-insensitively.
+     * Original casing is preserved in the output because the IN query matches on it.
+     * @param {Array} windowRecords Array of { hostname, hostNamePart, workload }
+     * @returns {Object} { hostNameParts, hostnames }
+     */
+    collectWindowKeys: function(windowRecords) {
+        var hostNameParts = [];
+        var hostnames = [];
+        var seenParts = {};
+        var seenHostnames = {};
+
+        for (var index = 0; index < windowRecords.length; index++) {
+            // mapKey, not a bare lower-cased hostname -- see mapKey for why
+            var part = this.mapKey(windowRecords[index].hostNamePart);
+            if (!seenParts[part]) {
+                seenParts[part] = true;
+                hostNameParts.push(windowRecords[index].hostNamePart);
+            }
+
+            var host = this.mapKey(windowRecords[index].hostname);
+            if (!seenHostnames[host]) {
+                seenHostnames[host] = true;
+                hostnames.push(windowRecords[index].hostname);
+            }
+        }
+
+        return {
+            hostNameParts: hostNameParts,
+            hostnames: hostnames
+        };
+    },
+
+    /**
+     * Fresh counters for one discovery window
+     * @returns {Object} Zeroed counts
+     */
+    newWindowCounts: function() {
+        return {
+            processed: 0,
+            managed: 0,
+            unmanaged: 0,
+            unknown: 0,
+            duplicate: 0,
+            // Unknown workloads the class mapping's restriction stopped from being created.
+            // Mutually exclusive: a record is attributed to the first gate that rejects it.
+            skipped_restricted: 0,
+            skipped_condition: 0,
+            skipped_limit: 0
+        };
+    },
+
+    /**
+     * Empty workload object, as built at the top of the class field mapping evaluation.
+     * NOTE: "labelDimesion" is misspelled throughout the app and is a load-bearing key
+     * on the workload object. Do not correct it here in isolation.
+     * @returns {Object} Workload seed
+     */
+    newWorkloadSeed: function() {
+        return {
+            labelDimesion: {},
+            // The dimensions configured for this source table, captured before
+            // _updatePCELabelValues can add unmapped ones. evaluateConflict compares only these.
+            mappedLabelKeys: [],
+            ipAddress: {
+                cmdb_value: []
+            }
+        };
+    },
+
+    /**
+     * Append a CMDB IP value to the collected list. Nil values are ignored.
+     * Returns a new array rather than mutating, so the caller must reassign.
+     * @param {Array} list IP addresses collected so far
+     * @param {Object} value Value read from the CMDB record
+     * @param {Boolean} isMultiple true when the value is itself a list of addresses
+     * @returns {Array} New list
+     */
+    appendIpAddress: function(list, value, isMultiple) {
+        if (gs.nil(value)) {
+            return list;
+        }
+        return isMultiple ? list.concat(value) : list.concat([value]);
+    },
+
+    /**
+     * Merge PCE interface IPs with the CMDB public IP (umw0) and CMDB IPs (umw1..umwN)
+     * @param {Array} pceInterfaces [{ name, address }] from the PCE mapping, [] when unmanaged or unknown
+     * @param {String} publicIp CMDB public IP, written to umw0.cmdb_value
+     * @param {Array} cmdbIps CMDB IP addresses
+     * @param {Number} maxIpAddresses Cap on how many CMDB IPs are emitted. Callers pass MAX_IP_ADDRESSES.
+     * @returns {Object} Interface name to { pce_value, cmdb_value }
+     */
+    buildInterfaceObject: function(pceInterfaces, publicIp, cmdbIps, maxIpAddresses) {
+        var interfaceObject = {};
+        var index;
+
+        // set PCE ip address
+        for (index in pceInterfaces) {
+            interfaceObject[pceInterfaces[index]["name"]] = {
+                pce_value: pceInterfaces[index]["address"],
+                cmdb_value: ""
+            };
+        }
+
+        // umw0 always carries the CMDB public IP. When PCE already reported an interface
+        // named umw0 its pce_value must survive the cmdb_value write.
+        if (gs.nil(interfaceObject["umw0"])) {
+            interfaceObject["umw0"] = {
+                pce_value: ""
+            };
+        }
+        interfaceObject["umw0"]["cmdb_value"] = publicIp;
+
+        // set cmdb ip address
+        var cmdbValuesLength = cmdbIps.length;
+        for (var keyCount = 1; keyCount <= maxIpAddresses && keyCount - 1 < cmdbValuesLength; keyCount++) {
+            var key = "umw" + keyCount;
+            var cmdbVal = cmdbIps[keyCount - 1];
+
+            // A nil IP leaves a gap at that index; later IPs are NOT slid up into it.
+            // umwN can also collide with a PCE interface genuinely named umwN -- preserved, not fixed.
+            if (!gs.nil(cmdbVal)) {
+                if (gs.nil(interfaceObject[key])) {
+                    interfaceObject[key] = {
+                        pce_value: ""
+                    };
+                }
+                interfaceObject[key]["cmdb_value"] = cmdbVal;
+            }
+        }
+
+        return interfaceObject;
+    },
+
+    /**
+     * Build the field map for one PCE Workload row
+     * @param {String} knownToPce "managed" or "unmanaged", nil for an unknown workload
+     * @param {String} hostname Hostname of the workload
+     * @param {Object} workload Workload object built from the CMDB record
+     * @param {String} pceConfigId System id of the PCE configuration
+     * @param {Object} mapping PCE mapping object, unused when knownToPce is nil
+     * @returns {Object} Field name to value
+     */
+    buildWorkloadRow: function(knownToPce, hostname, workload, pceConfigId, mapping) {
+        var row = {
+            servicenow_cmdb_identifier: workload.identifier + "",
+            hostname: hostname,
+            illumio_pce_configuration: pceConfigId,
+            source_table: workload["source_table"],
+            conflicts: false,
+            known_to_pce: "unknown"
+        };
+
+        if (!gs.nil(knownToPce)) {
+            row.known_to_pce = knownToPce;
+            row.pce_workload_href = mapping.href;
+            row.ven_href = mapping.ven_href;
+            row.ven_status = mapping.ven_status;
+            row.enforcement_mode = mapping.enforcement_mode;
+            row.ven_version = mapping.ven_version;
+            row.os_id = mapping.os_id;
+        }
+
+        return row;
+    },
+
+    /**
+     * One row per label dimension that has a cmdb_value or a pce_value.
+     *
+     * A dimension with neither value writes no row at all. That is deliberate and long-standing,
+     * but it is worth knowing what it costs: absence is not representable, so a Sync Filter can
+     * ask "which workloads have env=qa" and never "which workloads have no env label". A row
+     * with an empty cmdb_value but a pce_value does exist and IS reachable with cmdb_valueISEMPTY.
+     *
+     * pceConfigSysId and classMappingSysId are denormalised onto every row so that a Sync
+     * Filter's label condition is an index seek on the composite index rather than a join back
+     * through illumio_pce_workload. Nothing reads them during discovery.
+     *
+     * @param {Object} labelDimensions The workload's labelDimesion map
+     * @param {String} workloadSysId System id of the inserted PCE Workload record
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration being discovered
+     * @param {String} classMappingSysId sys_id of the Config Class Mapping for the source table
+     * @returns {Array} Field maps to insert into PCE Workload Field Value
+     */
+    buildFieldValueRows: function(labelDimensions, workloadSysId, pceConfigSysId, classMappingSysId) {
+        var rows = [];
+
+        for (var field in labelDimensions) {
+            var dimension = labelDimensions[field];
+            if (gs.nil(dimension["cmdb_value"]) && gs.nil(dimension["pce_value"])) {
+                continue;
+            }
+
+            var row = {
+                illumio_label_dimension: dimension["label_dimension_sys_id"],
+                illumio_pce_workload: workloadSysId
+            };
+            // Guarded rather than assigned straight into the literal: applyValues setValue()s
+            // every key it is given, and an undefined reaching a reference column would be
+            // written as the string "undefined" -- an unmatchable sys_id -- where leaving the
+            // column empty at least reads as the absence it is.
+            if (!gs.nil(pceConfigSysId)) {
+                row.illumio_pce_configuration = pceConfigSysId;
+            }
+            if (!gs.nil(classMappingSysId)) {
+                row.class_mapping = classMappingSysId;
+            }
+            if (!gs.nil(dimension["cmdb_value"])) {
+                row.cmdb_value = dimension["cmdb_value"];
+            }
+            if (!gs.nil(dimension["pce_value"])) {
+                row.pce_value = dimension["pce_value"];
+            }
+            rows.push(row);
+        }
+
+        return rows;
+    },
+
+    /**
+     * Comparison form of a label dimension or interface value.
+     *
+     * buildFieldValueRows omits a value when gs.nil, and the column then reads back as "",
+     * so nil and "" are the same thing to a comparison of the persisted rows. Advanced field
+     * mappings can also return non-strings, which getValue would have stringified. Matching
+     * both here is what keeps evaluateConflict in step with the rows discovery writes.
+     *
+     * Deliberately NOT normalize(): that lower-cases, and label values compare case-sensitively.
+     * @param {Object} value Raw value from labelDimesion or an interface entry
+     * @returns {String} Value as the database would have stored and compared it
+     */
+    compareValue: function(value) {
+        return gs.nil(value) ? "" : value + "";
+    },
+
+    /**
+     * Decide the conflicts flag for one workload from data already in memory.
+     *
+     * Replaces IllumioUtils.checkConflict, which ran from the two "Illumio Set Conflict"
+     * business rules and re-queried the field value table on every insert. The order of the
+     * tests is checkConflict's order and must stay that way: duplicate is tested before
+     * known_to_pce, so a duplicate unknown workload is false, not true.
+     *
+     * No queries and no retained state -- the caller already holds every input.
+     *
+     * @param {String} knownToPce "managed", "unmanaged", "unknown", or nil
+     * @param {Boolean} isDuplicate true when this workload duplicates an earlier hostname
+     * @param {Object} labelDimensions The workload's labelDimesion map
+     * @param {Array} mappedKeys Label dimension keys configured for this source table
+     * @param {Object} interfaceObject The object buildInterfaceObject returned, unstringified
+     * @returns {Boolean} true when the workload conflicts with the PCE
+     */
+    evaluateConflict: function(knownToPce, isDuplicate, labelDimensions, mappedKeys, interfaceObject) {
+        if (isDuplicate) {
+            return false;
+        }
+        if (gs.nil(knownToPce) || knownToPce == "unknown") {
+            return true;
+        }
+
+        // Configured dimensions only. _updatePCELabelValues can add dimensions to the map that
+        // have no CMDB mapping -- PCE labels matched by href -- and checkConflict excluded
+        // those through mappedFields[sourceTable]. A key with no entry wrote no field value
+        // row, so there was nothing for the original to compare either.
+        for (var index = 0; index < mappedKeys.length; index++) {
+            var dimension = labelDimensions[mappedKeys[index]];
+            if (!dimension) {
+                continue;
+            }
+            if (this.compareValue(dimension["cmdb_value"]) != this.compareValue(dimension["pce_value"])) {
+                return true;
+            }
+        }
+
+        if (knownToPce == "unmanaged") {
+            return this.interfacesConflict(interfaceObject);
+        }
+
+        return false;
+    },
+
+    /**
+     * Interface half of evaluateConflict, for unmanaged workloads only.
+     * The public IP under umw0 must match, and every CMDB address must appear somewhere
+     * among the PCE values -- an address the PCE does not know about is a conflict.
+     * @param {Object} interfaces The object buildInterfaceObject returned
+     * @returns {Boolean} true when the interfaces conflict
+     */
+    interfacesConflict: function(interfaces) {
+        if (!interfaces) {
+            return false;
+        }
+
+        var key;
+        if (!gs.nil(interfaces["umw0"]) && !gs.nil(interfaces["umw0"]["cmdb_value"]) &&
+            interfaces["umw0"]["cmdb_value"] != interfaces["umw0"]["pce_value"]) {
+            return true;
+        }
+
+        // Prefixed for the same reason as mapKey: an address goes straight into {} as a
+        // property name. Not mapKey itself, because that lower-cases and the original
+        // compared addresses as-is.
+        var visitedIPs = {};
+        for (key in interfaces) {
+            if (!gs.nil(interfaces[key]["pce_value"])) {
+                visitedIPs["ip:" + interfaces[key]["pce_value"]] = true;
+            }
+        }
+
+        for (key in interfaces) {
+            if (!gs.nil(interfaces[key]["cmdb_value"]) && !visitedIPs["ip:" + interfaces[key]["cmdb_value"]]) {
+                return true;
+            }
+        }
+
+        return false;
+    },
+
+    /**
+     * Body of the incident raised for a workload
+     * @param {Object} fields { hostname, pce_workload_href, public_ip_address, known_to_pce }
+     * @returns {String} Incident description
+     */
+    buildIncidentDescription: function(fields) {
+        var information = "Hostname: " + fields.hostname;
+        if (!gs.nil(fields.pce_workload_href)) {
+            information += "\n" + "Href: " + fields.pce_workload_href;
+        }
+        if (!gs.nil(fields.public_ip_address)) {
+            information += "\n" + "Public IP Address: " + fields.public_ip_address;
+        }
+        if (!gs.nil(fields.known_to_pce)) {
+            information += "\n" + "Known to PCE: " + fields.known_to_pce;
+        }
+        return information;
+    },
+
+    // ---- job log formatting ----
+    // Every string below is a customer-visible contract, specified in
+    // JIRA/discovery-optimization/optimization-plan.md:199-226. That document must be
+    // updated alongside any change here. These are deliberately kept together and free
+    // of Glide calls so the log format can be checked by eye and asserted without an instance.
+
+    /**
+     * Elapsed milliseconds as the seconds string used throughout the job log
+     * @param {Number} ms Elapsed milliseconds
+     * @returns {String} Seconds to two decimal places
+     */
+    formatDuration: function(ms) {
+        return (ms / 1000).toFixed(2);
+    },
+
+    /**
+     * Human label for the discovery filter mode
+     * @param {String} filterMode "inclusion" or "exclusion_legacy"
+     * @param {String} condition The configured condition, nil when none is set
+     * @returns {String} "Inclusion", "Exclusion (Legacy)" or "Not Found"
+     */
+    filterModeLabel: function(filterMode, condition) {
+        if (gs.nil(condition)) {
+            return "Not Found";
+        }
+        return filterMode === "inclusion" ? "Inclusion" : "Exclusion (Legacy)";
+    },
+
+    /**
+     * Per-table stale-data deletion line. One per entry in STALE_DISCOVERY_DATA,
+     * so adding a table there adds a log step automatically.
+     * @param {String} label Human label for the table, from STALE_DISCOVERY_DATA
+     * @param {Number} ms Elapsed milliseconds for this deletion step
+     * @returns {String} Log line
+     */
+    formatDeletionLog: function(label, ms) {
+        return "Deleted stale " + label + " data (" + this.formatDuration(ms) + "s)";
+    },
+
+    /**
+     * Opening line of a batched deletion step, so the job record shows which table is being
+     * cleared before any batch has finished.
+     * @param {String} label Human label for the table, from STALE_DISCOVERY_DATA
+     * @returns {String} Log line
+     */
+    formatDeletionStartLog: function(label) {
+        return "Started Deleting " + label;
+    },
+
+    /**
+     * Row count for a batched deletion step. Logged before the first batch so the operator
+     * can judge how long the step will take from the batch lines that follow.
+     * @param {Number} total Rows matching the step's query
+     * @returns {String} Log line
+     */
+    formatDeletionTotalLog: function(total) {
+        return "Total records found: " + total;
+    },
+
+    /**
+     * Per-batch progress line. deleted is cumulative across the step, not per batch, so the
+     * two numbers read as a fraction of the work done.
+     * @param {Number} batch 1-based batch number
+     * @param {Number} deleted Rows deleted so far in this step
+     * @param {Number} total Rows the step started with
+     * @param {Number} ms Elapsed milliseconds for this batch
+     * @returns {String} Log line
+     */
+    formatDeletionBatchLog: function(batch, deleted, total, ms) {
+        return "Deleted Batch " + batch + ": " + deleted + "/" + total +
+            " records (" + this.formatDuration(ms) + "s)";
+    },
+
+    formatFilteredLog: function(count, ms, table) {
+        return "Filtered " + count + " items (" + this.formatDuration(ms) + "s) from " + table;
+    },
+
+    formatProcessingLog: function(count, table, batches) {
+        return "Processing " + count + " " + table + " records in " + batches + " batches";
+    },
+
+    /**
+     * Per-window completion line. processedTotal is cumulative across the table, not per batch.
+     * MNWL + UMWL + UNWL can exceed the batch's processed delta, because one CMDB record
+     * matching both a managed and an unmanaged PCE workload inserts two rows.
+     * @param {Number} windowNumber 1-based batch number
+     * @param {Number} processedTotal Records processed so far across all batches
+     * @param {Number} totalRecords Table total
+     * @param {String} table Source table name
+     * @param {Number} ms Elapsed milliseconds for this batch
+     * @param {Object} counts { managed, unmanaged, unknown, duplicate }
+     * @returns {String} Log line
+     */
+    formatBatchLog: function(windowNumber, processedTotal, totalRecords, table, ms, counts) {
+        return "Batch " + windowNumber + " completed: " + processedTotal + "/" + totalRecords +
+            " " + table + " records processed" +
+            " (" + this.formatDuration(ms) + "s)" +
+            " [MNWL: " + counts.managed +
+            ", UMWL: " + counts.unmanaged +
+            ", UNWL: " + counts.unknown +
+            ", DUPWL: " + counts.duplicate + "]";
+    },
+
+    /**
+     * Per-window line for unknown workloads the restriction gate refused to create.
+     *
+     * Logged immediately before the batch line, and only when something was actually
+     * skipped -- an unrestricted class mapping adds no lines to the job log at all.
+     * Reasons are omitted when zero so the line names only what happened.
+     *
+     * @param {Object} counts { skipped_restricted, skipped_condition, skipped_limit }
+     * @returns {String} Log line, or "" when nothing was skipped in this window
+     */
+    formatUnknownSkipLog: function(counts) {
+        var total = counts.skipped_restricted + counts.skipped_condition + counts.skipped_limit;
+        if (total === 0) {
+            return "";
+        }
+
+        var reasons = [];
+        if (counts.skipped_restricted > 0) {
+            reasons.push("Creation disabled: " + counts.skipped_restricted);
+        }
+        if (counts.skipped_condition > 0) {
+            reasons.push("Condition not satisfied: " + counts.skipped_condition);
+        }
+        if (counts.skipped_limit > 0) {
+            reasons.push("Limit reached: " + counts.skipped_limit);
+        }
+
+        return "Skipped " + total + " unknown workload creation(s) (" + reasons.join(", ") + ")";
+    },
+
+    /**
+     * Coerce the class mapping's restriction to one of the three modes the gate understands.
+     *
+     * Anything else reads as allow_all: an empty column on an instance upgraded before the
+     * dictionary entry existed, a stale choice carried by an older update set, a value set
+     * by an import. Failing open leaves discovery behaving exactly as it did before the gate
+     * existed, which is the only safe reading of a configuration we cannot parse.
+     *
+     * @param {String} mode Raw value of restrict_unknown_workload_creation
+     * @returns {String} allow_all, conditional or allow_none
+     */
+    normalizeUnknownMode: function(mode) {
+        return (mode === "conditional" || mode === "allow_none") ? mode : "allow_all";
+    },
+
+    /**
+     * Describe the unknown-workload restriction in force for a source table
+     * @param {String} mode allow_all, conditional or allow_none
+     * @param {Number} limit Ceiling on creations, 0 when uncapped
+     * @returns {String} Log line
+     */
+    unknownRestrictionLabel: function(mode, limit) {
+        var label = "Unknown Workload Creation: ";
+        if (mode === "allow_none") {
+            label += "Disabled";
+        } else if (mode === "conditional") {
+            label += "Conditional";
+        } else {
+            label += "Allow All";
+        }
+        return label + (limit > 0 ? " (limit: " + limit + ")" : "");
+    },
+
+    formatExcludedLog: function(count, table) {
+        return "Excluded " + count + " " + table + " records by the in-memory exclusion filter";
+    },
+
+    /**
+     * Closing message when discovery finishes without handing off to auto sync
+     * @param {Boolean} skipAutoSync true when this run was triggered after a sync
+     * @param {Boolean} autoSyncEnabled Auto sync setting on the PCE configuration
+     * @returns {String} Completion message
+     */
+    completionMessage: function(skipAutoSync, autoSyncEnabled) {
+        if (skipAutoSync) {
+            return "Completed post-sync discovery (auto sync skipped)";
+        }
+        if (!autoSyncEnabled) {
+            return "Completed discovery (auto sync not enabled)";
+        }
+        return "Completed discovery";
+    },
+
+    /**
+     * Final line written to a cancelled job. This is the only log line the user sees after
+     * cancelling, so it has to say where the run actually stopped.
+     * @param {String} stage Where the run stopped, e.g. from cancelledStage
+     * @returns {String} Log line
+     */
+    cancellationMessage: function(stage) {
+        return "Cancelled by user. Discovery stopped " + stage + ".";
+    },
+
+    /**
+     * Stage description for a run cancelled part-way through a source table
+     * @param {String} table Source table being processed
+     * @param {Number} processed Records processed from that table
+     * @param {Number} total Records the table was going to contribute
+     * @returns {String} Stage description for cancellationMessage
+     */
+    cancelledStage: function(table, processed, total) {
+        return "while processing " + table + ", after " + processed + " of " + total + " records";
+    },
+
+    type: "IllumioDiscoveryUtils",
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-15 16:10:05</sys_created_on>
+        <sys_id>486df616c393479050bffa0ed40131f0</sys_id>
+        <sys_mod_count>11</sys_mod_count>
+        <sys_name>IllumioDiscoveryUtils</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_486df616c393479050bffa0ed40131f0</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+    </sys_script_include>
+</record_update>

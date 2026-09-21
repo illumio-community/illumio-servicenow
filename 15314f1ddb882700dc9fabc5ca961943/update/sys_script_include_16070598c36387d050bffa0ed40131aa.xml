@@ -1,0 +1,579 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioSyncRepoUtils</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioSyncRepoUtils</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var IllumioSyncRepoUtils = Class.create();
+
+/**
+ * All database access for Sync Filter evaluation and the sync pipeline.
+ *
+ * Every method is one named query. No parsing, no set algebra, no branching on business meaning
+ * -- those live in IllumioSyncUtils, which touches no database at all. A change to a query shape
+ * lands here; a change to what a filter MEANS lands there.
+ *
+ * GlideRecord throughout, not GlideRecordSecure. That is continuity rather than a decision: the
+ * Sync Filter path has always run on plain GlideRecord (IllumioUtils:1317, 1372, 1390, 1433,
+ * 1548, 1596, 1649, 1671, 1786, 1805). These are system-operated reads of the app's own data on
+ * behalf of a scheduled job, where per-row ACL evaluation would cost on every one of ~1.2M label
+ * rows and change nothing.
+ */
+IllumioSyncRepoUtils.prototype = {
+
+    /**
+     * @param {Object} [syncUtils] IllumioSyncUtils instance. Optional so zero-argument
+     *   construction works; injectable so tests can pass a double.
+     */
+    initialize: function(syncUtils) {
+        this.syncUtils = syncUtils || new IllumioSyncUtils();
+    },
+
+    // ---- sync filter configuration ----
+
+    /**
+     * Active Sync Filters of one type for a PCE Configuration.
+     *
+     * Read into plain objects rather than handed back as a GlideRecord: evaluating a filter opens
+     * further queries, and this cursor would otherwise have to stay alive across all of them.
+     *
+     * `source_table` comes from cmdb_condition_table, which the Sync Filter business rule keeps
+     * in step with class_mapping.source_table -- the same field the condition builder needs on
+     * the form. Falling back to a lookup covers filters saved before that rule existed.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @param {String} type Filter type, "inclusion" or "deletion"
+     * @returns {Array} Array of filter objects
+     */
+    getActiveSyncFilters: function(pceConfigSysId, type) {
+        var filters = [];
+
+        var gr = new GlideRecord(this.syncUtils.SYNC_FILTER_TABLE);
+        gr.addQuery("pce_configuration", pceConfigSysId);
+        gr.addQuery("active", true);
+        gr.addQuery("type", ("" + type).toLowerCase());
+        gr.query();
+
+        while (gr.next()) {
+            filters.push(this._readSyncFilter(gr));
+        }
+
+        return filters;
+    },
+
+    /**
+     * One Sync Filter by sys_id, for the preview UI action which has no type to filter on
+     * @param {String} syncFilterSysId sys_id of the Sync Filter
+     * @returns {Object|null} Filter object, null when the record does not exist
+     */
+    getSyncFilter: function(syncFilterSysId) {
+        var gr = new GlideRecord(this.syncUtils.SYNC_FILTER_TABLE);
+        if (!gr.get(syncFilterSysId)) {
+            return null;
+        }
+        return this._readSyncFilter(gr);
+    },
+
+    /**
+     * Copy a Sync Filter GlideRecord into a plain object
+     * @param {GlideRecord} gr Record positioned on a Sync Filter
+     * @returns {Object} Filter object
+     */
+    _readSyncFilter: function(gr) {
+        var classMappingSysId = gr.getValue("class_mapping");
+        var sourceTable = gr.getValue("cmdb_condition_table");
+
+        if (gs.nil(sourceTable) && !gs.nil(classMappingSysId)) {
+            sourceTable = this.getClassMappingSourceTable(classMappingSysId);
+        }
+
+        return {
+            sys_id: gr.getUniqueValue(),
+            name: gr.getValue("name") || "Unnamed Sync Filter",
+            active: gr.getValue("active") == "1",
+            type: (gr.getValue("type") || "").toLowerCase(),
+            pce_configuration: gr.getValue("pce_configuration"),
+            class_mapping: classMappingSysId,
+            source_table: sourceTable,
+            label_condition: gr.getValue("label_condition"),
+            cmdb_condition: gr.getValue("cmdb_condition"),
+            extent: gr.getValue("extent")
+        };
+    },
+
+    /**
+     * CMDB table a Config Class Mapping points at
+     * @param {String} classMappingSysId sys_id of the Config Class Mapping
+     * @returns {String} Table name, "" when the mapping does not exist
+     */
+    getClassMappingSourceTable: function(classMappingSysId) {
+        var gr = new GlideRecord(this.syncUtils.CLASS_MAPPING_TABLE);
+        if (gr.get(classMappingSysId)) {
+            return gr.getValue("source_table") || "";
+        }
+        return "";
+    },
+
+    // ---- label condition evaluation ----
+
+    /**
+     * Workloads satisfying one DNF term of a label condition.
+     *
+     * One query per term, however many dimensions the term ANDs. The label table is EAV, so the
+     * k conditions of a term live on k different rows; the query unions those row sets with ^NQ
+     * and the COUNT picks out the workloads that contributed a row to all k.
+     *
+     * COUNT >= k is exact in both directions, but the second direction rests on an invariant the
+     * database does not enforce: at most one row per (illumio_pce_workload,
+     * illumio_label_dimension). The PCE guarantees it and buildFieldValueRows cannot produce a
+     * violation, so no unique index was created -- see JIRA/sync-optimization/plan.MD R.7. If it
+     * ever breaks, the symptom is silent OVER-matching here.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @param {String} classMappingSysId sys_id of the Config Class Mapping, nil to span all
+     * @param {Array} subPredicates Sub-predicates of one term, from IllumioSyncUtils
+     * @returns {Array} Matching workload sys_ids
+     */
+    aggregateLabelTermWorkloads: function(pceConfigSysId, classMappingSysId, subPredicates) {
+        var matched = [];
+
+        if (!subPredicates || subPredicates.length === 0) {
+            return matched;
+        }
+
+        var query = this.syncUtils.buildTermQuery(
+            this.syncUtils.buildBaseQuery(pceConfigSysId, classMappingSysId), subPredicates);
+
+        var ga = new GlideAggregate(this.syncUtils.WORKLOAD_FIELD_VALUE_TABLE);
+        ga.addEncodedQuery(query);
+        ga.groupBy(this.syncUtils.WORKLOAD_FIELD);
+        ga.addAggregate("COUNT", this.syncUtils.DIMENSION_FIELD);
+        ga.query();
+
+        while (ga.next()) {
+            var count = parseInt(ga.getAggregate("COUNT", this.syncUtils.DIMENSION_FIELD), 10) || 0;
+            if (count >= subPredicates.length) {
+                matched.push(ga.getValue(this.syncUtils.WORKLOAD_FIELD));
+            }
+        }
+
+        return matched;
+    },
+
+    // ---- CMDB condition evaluation ----
+
+    /**
+     * Page through the CIs matching a CMDB condition, handing the caller one batch of sys_ids
+     * at a time.
+     *
+     * The condition is passed to addEncodedQuery verbatim. The source table is flat -- one row
+     * per CI, real columns -- so the builder's own AND/OR structure is already correct there and
+     * nothing needs parsing. Only the EAV label side needs the COUNT mechanism.
+     *
+     * Batched rather than collected because this set is the one with no useful ceiling: it is
+     * bounded by the size of a CMDB table, not by the workload count. The caller resolves each
+     * batch to workloads and keeps only the survivors, so the full CI list never exists at once.
+     *
+     * @param {String} sourceTable CMDB table name
+     * @param {String} encodedQuery Value of the Sync Filter's cmdb_condition
+     * @param {Number} batchSize sys_ids per callback
+     * @param {Function} callback Called with (Array of CI sys_ids) per batch
+     * @returns {Number} Total CIs matched
+     */
+    eachCmdbCiSysId: function(sourceTable, encodedQuery, batchSize, callback) {
+        var total = 0;
+        var batch = [];
+
+        var gr = new GlideRecord(sourceTable);
+        gr.addEncodedQuery(encodedQuery);
+        gr.query();
+
+        while (gr.next()) {
+            batch.push(gr.getUniqueValue());
+            total++;
+
+            if (batch.length >= batchSize) {
+                callback(batch);
+                batch = [];
+            }
+        }
+
+        if (batch.length > 0) {
+            callback(batch);
+        }
+
+        return total;
+    },
+
+    /**
+     * Workloads discovered from a batch of CMDB CIs.
+     *
+     * NOTE: ciSysIds.join(",") builds the IN clause with no escaping. Safe here because these
+     * are sys_ids, which cannot contain a comma.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @param {Array} ciSysIds CI sys_ids, one batch
+     * @param {String} [sourceTable] CMDB table name, narrows the query when given
+     * @returns {Array} Workload sys_ids
+     */
+    findWorkloadSysIdsBySourceRecords: function(pceConfigSysId, ciSysIds, sourceTable) {
+        var sysIds = [];
+
+        if (!ciSysIds || ciSysIds.length === 0) {
+            return sysIds;
+        }
+
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+        gr.addQuery("illumio_pce_configuration", pceConfigSysId);
+        gr.addQuery("servicenow_cmdb_identifier", "IN", ciSysIds.join(","));
+        gr.addQuery("duplicate", false);
+        if (!gs.nil(sourceTable)) {
+            gr.addQuery("source_table", sourceTable);
+        }
+        gr.query();
+
+        while (gr.next()) {
+            sysIds.push(gr.getUniqueValue());
+        }
+
+        return sysIds;
+    },
+
+    // ---- workload-level filtering ----
+
+    /**
+     * Narrow a filter's matched workloads to the non-duplicates, and to the configured extent.
+     *
+     * Always runs, even with no extent configured, because it is the only place `duplicate` is
+     * checked. The label aggregate deliberately leaves it out: `duplicate` lives on the workload
+     * table, so checking it there would mean a join on every row of every term, against one
+     * chunked pass over the matched workloads here.
+     *
+     * The extent condition building is unchanged from IllumioUtils._filterWorkloadsByExtent --
+     * each entry is "knownToPce" or "knownToPce-enforcementMode", ORed together.
+     *
+     * @param {Array} sysIds Workload sys_ids matched by the filter's conditions
+     * @param {String} extentValue Comma-separated extent value from the Sync Filter, may be nil
+     * @returns {Array} Surviving workload sys_ids
+     */
+    filterWorkloads: function(sysIds, extentValue) {
+        var filtered = [];
+
+        if (!sysIds || sysIds.length === 0) {
+            return filtered;
+        }
+
+        var extentList = gs.nil(extentValue) ? [] : ("" + extentValue).split(",");
+        var chunks = this.syncUtils.chunkArray(sysIds, this.syncUtils.WORKLOAD_CHUNK_SIZE);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+            gr.addQuery("sys_id", "IN", chunks[chunkIndex].join(","));
+            gr.addQuery("duplicate", false);
+            this._addExtentConditions(gr, extentList);
+            gr.query();
+
+            while (gr.next()) {
+                filtered.push(gr.getUniqueValue());
+            }
+        }
+
+        return filtered;
+    },
+
+    /**
+     * OR together the extent entries on a workload query
+     * @param {GlideRecord} gr Workload query to add to
+     * @param {Array} extentList Extent entries, empty to add nothing
+     */
+    _addExtentConditions: function(gr, extentList) {
+        var extentCondition = null;
+
+        for (var index = 0; index < extentList.length; index++) {
+            var parts = extentList[index].split("-");
+            var knownToPce = parts[0];
+
+            // Enforcement modes can themselves contain a dash, so everything after the first
+            // one is the mode.
+            var enforcementMode = parts.length > 1 ? parts.slice(1).join("-") : null;
+
+            if (extentCondition === null) {
+                extentCondition = gr.addQuery("known_to_pce", knownToPce);
+                if (enforcementMode) {
+                    extentCondition.addCondition("enforcement_mode", enforcementMode);
+                }
+            } else {
+                var orCondition = extentCondition.addOrCondition("known_to_pce", knownToPce);
+                if (enforcementMode) {
+                    orCondition.addCondition("enforcement_mode", enforcementMode);
+                }
+            }
+        }
+    },
+
+    // ---- sync pipeline ----
+
+    /**
+     * Every workload of a PCE Configuration that a sync could act on.
+     *
+     * Phase 1 for a configuration with no Sync Filter: the whole eligible population, as
+     * sys_ids only. This is the one place the run holds a list proportional to the workload
+     * count, and it is the same list the pre-rewrite code built at IllumioAutoSyncWithPCE:55-62
+     * -- what changed is that nothing downstream materialises an object per entry.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @param {String} encodedQuery Eligibility conditions, e.g. "duplicate=false^conflicts=true"
+     * @returns {Array} Workload sys_ids, ordered so like kinds sit together
+     */
+    findSyncCandidateSysIds: function(pceConfigSysId, encodedQuery) {
+        var sysIds = [];
+
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+        gr.addQuery("illumio_pce_configuration", pceConfigSysId);
+        if (!gs.nil(encodedQuery)) {
+            gr.addEncodedQuery(encodedQuery);
+        }
+        gr.orderBy("known_to_pce");
+        gr.query();
+
+        while (gr.next()) {
+            sysIds.push(gr.getUniqueValue());
+        }
+
+        return sysIds;
+    },
+
+    /**
+     * Page through workloads by sys_id, one chunk at a time.
+     *
+     * Phase 2 of the sync pipeline. Deliberately hands the caller a positioned GlideRecord
+     * rather than built objects: the caller decides what a row becomes, which is what lets the
+     * sync path and the deletion path share this.
+     *
+     * @param {Array} sysIds Workload sys_ids from phase 1
+     * @param {Number} batchSize Workloads per chunk
+     * @param {String} encodedQuery Extra conditions for the chunk, nil for none
+     * @param {Function} callback Called with (GlideRecord) per workload. Return false to stop.
+     * @returns {Number} Workloads visited
+     */
+    eachWorkloadChunk: function(sysIds, batchSize, encodedQuery, callback) {
+        var visited = 0;
+        var chunks = this.syncUtils.chunkArray(sysIds, batchSize);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            visited += this.eachWorkloadInBatch(chunks[chunkIndex], encodedQuery, callback);
+        }
+
+        return visited;
+    },
+
+    /**
+     * One batch of workloads, one query.
+     *
+     * Split out of eachWorkloadChunk because the pipeline needs the chunk boundary itself: the
+     * label maps it builds are per chunk, so it has to know when a chunk begins and ends rather
+     * than just seeing a stream of rows.
+     *
+     * @param {Array} sysIds Workload sys_ids, one batch, already within IN-clause limits
+     * @param {String} encodedQuery Extra conditions, nil for none
+     * @param {Function} callback Called with (GlideRecord) per workload
+     * @returns {Number} Workloads visited
+     */
+    eachWorkloadInBatch: function(sysIds, encodedQuery, callback) {
+        var visited = 0;
+
+        if (!sysIds || sysIds.length === 0) {
+            return visited;
+        }
+
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+        gr.addQuery("sys_id", "IN", sysIds.join(","));
+        if (!gs.nil(encodedQuery)) {
+            gr.addEncodedQuery(encodedQuery);
+        }
+        gr.query();
+
+        while (gr.next()) {
+            visited++;
+            callback(gr);
+        }
+
+        return visited;
+    },
+
+    /**
+     * Every label value of a batch of workloads, in one query.
+     *
+     * Replaces the per-workload query IllumioUtils.prepareWorkloadObject:1230-1240 ran. The
+     * dimension key is dot-walked, which is one join in this single query rather than a lookup
+     * per row -- the same idiom generateWorkloadCsv:1377 already uses.
+     *
+     * @param {Array} workloadSysIds Workload sys_ids, one batch
+     * @returns {Object} { workloadSysId: { dimensionKey: { cmdb_value: , pce_value: } } }
+     */
+    getLabelValuesByWorkload: function(workloadSysIds) {
+        var byWorkload = {};
+
+        if (!workloadSysIds || workloadSysIds.length === 0) {
+            return byWorkload;
+        }
+
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_FIELD_VALUE_TABLE);
+        gr.addQuery(this.syncUtils.WORKLOAD_FIELD, "IN", workloadSysIds.join(","));
+        gr.query();
+
+        while (gr.next()) {
+            var dimensionKey = gr.illumio_label_dimension.key + "";
+            if (dimensionKey === "") {
+                continue;
+            }
+
+            var workloadSysId = gr.getValue(this.syncUtils.WORKLOAD_FIELD);
+            if (!byWorkload[workloadSysId]) {
+                byWorkload[workloadSysId] = {};
+            }
+
+            byWorkload[workloadSysId][dimensionKey] = {
+                cmdb_value: gr.getValue("cmdb_value"),
+                pce_value: gr.getValue("pce_value")
+            };
+        }
+
+        return byWorkload;
+    },
+
+    /**
+     * PCE label hrefs for a set of (dimension key, label value) pairs.
+     *
+     * Replaces IllumioAutoSyncWithPCE.getUseCreateLabelsList's query-per-label-per-workload,
+     * which at 200k workloads and six dimensions was 1.2M queries against a table of ~100k rows.
+     * Built per chunk and thrown away with it: this table is far too large to cache for a run.
+     *
+     * The conditions are assembled with addQuery/addOrCondition rather than an encoded query
+     * string on purpose. Label values are user data and can contain `^`, `,` and `=` -- every
+     * character an encoded query treats as structure. Passing them as values binds them safely;
+     * building a string would not.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @param {Array} pairs [{ key: , value: }] from IllumioSyncUtils.collectLabelPairs
+     * @returns {Object} { labelPairKey: href } for the pairs that exist on the PCE
+     */
+    getLabelHrefsByPair: function(pceConfigSysId, pairs) {
+        var hrefByPair = {};
+
+        if (!pairs || pairs.length === 0) {
+            return hrefByPair;
+        }
+
+        var batches = this.syncUtils.chunkArray(pairs, this.syncUtils.LABEL_PAIR_BATCH_SIZE);
+
+        for (var batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            var batch = batches[batchIndex];
+
+            var gr = new GlideRecord("x_illu2_illumio_illumio_pce_labels_mapping");
+            gr.addQuery("illumio_pce_configuration", pceConfigSysId);
+
+            var condition = null;
+            for (var pairIndex = 0; pairIndex < batch.length; pairIndex++) {
+                if (condition === null) {
+                    condition = gr.addQuery("key", batch[pairIndex].key);
+                    condition.addCondition("value", batch[pairIndex].value);
+                } else {
+                    var orCondition = condition.addOrCondition("key", batch[pairIndex].key);
+                    orCondition.addCondition("value", batch[pairIndex].value);
+                }
+            }
+
+            gr.query();
+
+            while (gr.next()) {
+                // Keyed by the value as stored. The query is case-insensitive, so both
+                // "Production" and "production" can come back for one pair; the caller looks up
+                // the exact CMDB value, so only an exact match is found. First row wins, which
+                // is what the sequential queryCaseSensitiveGr scan did.
+                var pairKey = this.syncUtils.labelPairKey(gr.getValue("key"), gr.getValue("value"));
+                if (!hrefByPair[pairKey]) {
+                    hrefByPair[pairKey] = gr.getValue("href");
+                }
+            }
+        }
+
+        return hrefByPair;
+    },
+
+    /**
+     * Insert one payload row.
+     *
+     * The table is a parameter, not a constant, because this is the single point at which the
+     * sync path and the deletion path differ: autosync_payload for one, deletion_payload for the
+     * other. Everything upstream is shared.
+     *
+     * @param {String} payloadTable Payload table name
+     * @param {String} payloadJson Serialised payload
+     * @returns {String} sys_id of the inserted row
+     */
+    insertPayloadRow: function(payloadTable, payloadJson) {
+        var gr = new GlideRecord(payloadTable);
+        gr.initialize();
+        gr.setValue("payload", payloadJson);
+        return gr.insert();
+    },
+
+    /**
+     * Delete payload rows.
+     *
+     * Needed because payload rows are now written as the run proceeds rather than all at once
+     * at the end. If a threshold limit cancels the job part-way, the rows already inserted
+     * describe work that must not happen and have to be withdrawn -- the pre-rewrite code got
+     * this for free by discarding an in-memory array.
+     *
+     * @param {String} payloadTable Payload table name
+     * @param {Array} sysIds sys_ids returned by insertPayloadRow
+     * @returns {Number} Rows deleted
+     */
+    deletePayloadRows: function(payloadTable, sysIds) {
+        var deleted = 0;
+
+        if (!sysIds || sysIds.length === 0) {
+            return deleted;
+        }
+
+        var chunks = this.syncUtils.chunkArray(sysIds, this.syncUtils.WORKLOAD_CHUNK_SIZE);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            var gr = new GlideRecord(payloadTable);
+            gr.addQuery("sys_id", "IN", chunks[chunkIndex].join(","));
+            gr.query();
+
+            while (gr.next()) {
+                if (gr.deleteRecord()) {
+                    deleted++;
+                }
+            }
+        }
+
+        return deleted;
+    },
+
+    type: "IllumioSyncRepoUtils"
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-21 12:40:54</sys_created_on>
+        <sys_id>16070598c36387d050bffa0ed40131aa</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>IllumioSyncRepoUtils</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_16070598c36387d050bffa0ed40131aa</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+    </sys_script_include>
+</record_update>

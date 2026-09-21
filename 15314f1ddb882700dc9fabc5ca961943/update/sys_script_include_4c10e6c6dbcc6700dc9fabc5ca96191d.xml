@@ -12,16 +12,55 @@
         <script><![CDATA[gs.include("IllumioConstants");
 var IllumioDiscoverAndMapCMDBServers = Class.create();
 IllumioDiscoverAndMapCMDBServers.prototype = {
-    // Reference to hostname rules http://man7.org/linux/man-pages/man7/hostname.7.html
-    VALID_HOSTNAME_REGEX: "^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]).)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])$",
-    initialize: function() {
-        this.isworkloadinMapping = false;
-        this.utils = new IllumioUtils();
+    // VALID_HOSTNAME_REGEX moved to IllumioDiscoveryUtils along with the check that uses it.
+    // IN_CLAUSE_BATCH_SIZE moved to IllumioDiscoveryRepository with the batched lookups.
+
+    /**
+     * Both dependencies are optional so the four external callers can keep constructing
+     * with no arguments, and tests can pass fakes in their place.
+     * @param {Object} repo IllumioDiscoveryRepository, or a stand-in
+     * @param {Object} discoveryUtils IllumioDiscoveryUtils, or a stand-in
+     */
+    initialize: function(repo, discoveryUtils) {
+        this.repo = repo || new IllumioDiscoveryRepository();
+        this.discoveryUtils = discoveryUtils || new IllumioDiscoveryUtils();
         this.hostnameMap = {
             unmanaged: {},
             managed: {},
             unknown: {},
         };
+
+        // Non-null only while a discovery window is open, and holds everything scoped to
+        // that window: the counters and the pre-fetched incident mappings. The UI action,
+        // business rule and preview callers never open a window, so their lookups fall
+        // through to the repository and their inserts are not counted.
+        this.window = null;
+
+        // Set by _processSourceTable when iteration is aborted, so process() can say which
+        // table the run stopped in and how far it got. Null until then.
+        this.cancelledAt = null;
+
+        // The class mapping's unknown-workload restriction, rebuilt per source table.
+        // Null for the callers that reach addToCustomTable without going through
+        // _processSourceTable, which _allowUnknownCreation reads as "no restriction".
+        this.unknownGate = null;
+    },
+
+    /**
+     * Stop the run if the user has cancelled it, closing the job out with a line saying
+     * where it stopped. Called at phase boundaries; window and delete-batch boundaries are
+     * handled further down, where the abort has to unwind a loop first.
+     * @param {String} stage Where the run stopped, for the final log line
+     * @returns {Boolean} true when the job was cancelled and the caller should return
+     **/
+    _stopIfCancelled: function(stage) {
+        if (!this.repo.isCancelled(this.illumioJobId)) {
+            return false;
+        }
+
+        gs.info("Discovery job {0} cancelled: stopping {1}", [this.illumioJobId, stage]);
+        this.repo.cancelJob(this.illumioJobId, this.discoveryUtils.cancellationMessage(stage));
+        return true;
     },
 
     /**
@@ -29,88 +68,296 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @param {Object} pceConfig - PCE Configuration object
      **/
     _processTable: function(pceConfig) {
-        var workloads = {},
-            retiredWorkloads = {},
-            duplicateWorkloads = [],
-            processedHosts = {};
-        var maxRecords = gs.getProperty("x_illu2_illumio.maximum_ci_records") || 25000;
+        // Shared across every source table, so a hostname seen in the first table is
+        // already "processed" when the second table reaches it
+        var processedHosts = {};
+        var maxRecords = this.repo.getMaxCiRecords();
 
         for (var table in pceConfig.source) {
-            retiredWorkloads[table] = 0;
-            var filterMode = pceConfig.source[table].filter_mode || 'exclusion_legacy';
-            var filterCondition = pceConfig.source[table].exclude_condition;
-
-            gs.info("Started mapping CMDB Servers with PCE from table {0} (filter mode: {1})", [table, filterMode]);
-
-            var filterStartTime = Date.now();
-
-            // Initialize incident condition filter (in-memory for all modes)
-            var incidentConditionFilter = null;
-            if (!gs.nil(pceConfig.source[table].incident_condition)) {
-                incidentConditionFilter = new GlideFilter(pceConfig.source[table].incident_condition, "incidentConditionFilter");
-                if (IS_CASE_SENSITIVE == "false") {
-                    incidentConditionFilter.setCaseSensitive(false);
-                }
+            // _processSourceTable returns early when the run is cancelled mid-table; this
+            // stops the next table from starting behind it
+            if (this.cancelledAt) {
+                return;
             }
 
-            var self = this;
-            var result = this.utils.iterateFilteredCMDBRecords(
-                table, filterMode, filterCondition, maxRecords,
-                function(sourceTableGr) {
-                    var createIncident = false;
-                    if (incidentConditionFilter) {
-                        if (incidentConditionFilter.match(sourceTableGr, true)) {
-                            createIncident = true;
-                        }
-                    }
-
-                    var hostname = self.getValueFromCMDB(sourceTableGr, pceConfig.source[table].host_name);
-                    if (!gs.nil(hostname)) {
-                        var tempWorkload = self._evaluateClassFieldMapping(pceConfig, sourceTableGr, table);
-                        tempWorkload["source_table"] = table;
-                        tempWorkload["host_name"] = hostname;
-                        if (processedHosts[hostname]) {
-                            tempWorkload['create_incident'] = false;
-                            duplicateWorkloads.push(tempWorkload);
-                        } else {
-                            tempWorkload['create_incident'] = createIncident;
-                            workloads[hostname] = tempWorkload;
-                            processedHosts[hostname] = true;
-                        }
-                    } else {
-                        gs.info("[process] No hostname exist for {0} table having record with sys_id: {1}", [table, sourceTableGr.sys_id]);
-                    }
-                },
-                {
-                    sortField: pceConfig.source[table].sort_order,
-                    sortOrder: pceConfig.source[table].order_by
-                }
-            );
-
-            retiredWorkloads[table] = result.excludedCount;
-
-            // Log filter phase summary
-            var modeLabel = filterMode === 'inclusion' ? 'Inclusion' : 'Exclusion (Legacy)';
-            var hasConditions = !gs.nil(filterCondition);
-            var filterLog = '\n-----------------------------------------------------\n'
-                + 'PHASE: Fetching & Filtering CMDB Records\n'
-                + '-----------------------------------------------------\n'
-                + 'CMDB Table: ' + table + '\n'
-                + 'Filter Mode: ' + modeLabel + '\n'
-                + 'Filter Conditions: ' + (hasConditions ? 'Found' : 'Not Found') + '\n'
-                + 'Fetched CMDB items: ' + result.fetchedCount + ' (' + (hasConditions ? 'Filtered' : 'All') + ')\n'
-                + 'Time Elapsed (seconds): ' + ((Date.now() - filterStartTime) / 1000).toFixed(2)
-                + '\n';
-            var jobContent = {
-                logs: filterLog,
-                current_operation: "Mapping CMDB servers to PCE",
-            };
-            this.utils.updateJobRecord(this.illumioJobId, jobContent);
+            this._processSourceTable(pceConfig, table, processedHosts, maxRecords);
         }
-        return {
-            workloads: workloads,
-            duplicateWorkloads: duplicateWorkloads,
+    },
+
+    /**
+     * Walk one source table: count it, page through it, and log a line per batch.
+     *
+     * The two callbacks handed to the repository used to be function expressions declared
+     * inside the for...in loop, closing over six mutable locals. They are now methods taking
+     * an explicit ctx, so the only thing they capture is `self`. ctx is per-table: totalRecords
+     * and processedTotal reset with it, which is what makes the batch log restart at
+     * "0/N" for each table.
+     *
+     * @param {Object} pceConfig PCE Configuration object
+     * @param {String} table Source table name
+     * @param {Object} processedHosts Hostnames already seen, shared across all source tables
+     * @param {Number} maxRecords Cap from the maximum_ci_records property
+     **/
+    _processSourceTable: function(pceConfig, table, processedHosts, maxRecords) {
+        var self = this;
+        var source = pceConfig.source[table];
+        var filterMode = source.filter_mode || 'exclusion_legacy';
+        var filterCondition = source.exclude_condition;
+
+        gs.info("Started mapping CMDB Servers with PCE from table {0} (filter mode: {1})", [table, filterMode]);
+
+        var ctx = {
+            pceConfig: pceConfig,
+            table: table,
+            source: source,
+            processedHosts: processedHosts,
+            incidentFilter: this.repo.buildConditionFilter(source.incident_condition, "incidentConditionFilter"),
+            // Records of the current window, flushed by onWindowComplete. Never more than one window at a time.
+            windowRecords: [],
+            totalRecords: 0,
+            processedTotal: 0,
+            windowStartTime: 0,
+            // Latched at each window boundary, read on the next record. Never unset.
+            cancelled: false
         };
+
+        // Latched here for the same reason as unknownGate below: _createWorkloadFieldValue is
+        // several calls deep from the window loop and never sees ctx. Reassigned per source
+        // table, so every field value row is stamped with the mapping that produced it.
+        this.classMappingSysId = source.class_mapping_sys_id;
+
+        // Built here, not in ctx, because addToCustomTable is three calls deep from the
+        // window loop and never sees ctx. Reassigned per source table, which is what makes
+        // the limit a per-class-mapping ceiling rather than a per-run one.
+        this.unknownGate = {
+            // Normalised, not defaulted: an unreadable mode must BE allow_all, not merely
+            // behave like it, or it misses _allowUnknownCreation's early return and pays the
+            // counting path on every unknown for no reason.
+            mode: this.discoveryUtils.normalizeUnknownMode(source.restrict_unknown_creation),
+            filter: null,
+            // Anything not a positive number -- blank, non-numeric, negative -- is uncapped.
+            limit: source.unknown_creation_limit > 0 ? source.unknown_creation_limit : 0,
+            created: 0
+        };
+        // Only the mode is demoted, never the limit: the two are independent controls, and a
+        // missing condition is no reason to stop honouring a ceiling the user did configure.
+        var unknownConditionMissing = false;
+        if (this.unknownGate.mode === 'conditional') {
+            this.unknownGate.filter = this.repo.buildConditionFilter(
+                source.unknown_condition, "unknownConditionFilter");
+
+            // A conditional mapping with no condition matches every record, which is
+            // allow_all wearing another name. Demote it so the log and the gate agree.
+            if (!this.unknownGate.filter) {
+                this.unknownGate.mode = 'allow_all';
+                unknownConditionMissing = true;
+            }
+        }
+
+        this.repo.log(this.illumioJobId, "Filter Mode: " + this.discoveryUtils.filterModeLabel(filterMode, filterCondition));
+        this.repo.log(this.illumioJobId, this.discoveryUtils.unknownRestrictionLabel(
+            this.unknownGate.mode, this.unknownGate.limit));
+        // After the label, not before: it explains why that line reads Allow All when the
+        // form says Conditional. The label has already stated the limit, if there is one.
+        if (unknownConditionMissing) {
+            this.repo.log(this.illumioJobId, this.discoveryUtils.MISSING_UNKNOWN_CONDITION_LOG);
+        }
+        this.repo.log(this.illumioJobId, "Filtering from " + table);
+
+        var filterStartTime = Date.now();
+        ctx.totalRecords = this.repo.countFilteredCMDBRecords(table, filterMode, filterCondition, maxRecords);
+        var totalBatches = Math.ceil(ctx.totalRecords / this.discoveryUtils.DISCOVERY_WINDOW_SIZE);
+
+        this.repo.log(this.illumioJobId, this.discoveryUtils.formatFilteredLog(ctx.totalRecords, Date.now() - filterStartTime, table));
+        this.repo.log(this.illumioJobId, this.discoveryUtils.formatProcessingLog(ctx.totalRecords, table, totalBatches));
+
+        if (totalBatches > 0) {
+            // Fetching and comparing the first window takes as long as any other batch,
+            // so announce it up front rather than leaving the log silent until it completes
+            this.repo.log(this.illumioJobId, "Starting processing of Batch 1");
+        }
+
+        ctx.windowStartTime = Date.now();
+
+        var result = this.repo.iterateFilteredCMDBRecords(
+            table, filterMode, filterCondition, maxRecords,
+            function(sourceTableGr) {
+                // Returning false is the repository's abort signal: it flushes the open
+                // window and returns. The flag is only ever set at a window boundary, so
+                // this costs a property read per record, not a query.
+                if (ctx.cancelled) {
+                    return false;
+                }
+
+                self._collectRecord(ctx, sourceTableGr);
+            },
+            {
+                sortField: source.sort_order,
+                sortOrder: source.order_by,
+                onWindowComplete: function(windowNumber) {
+                    self._flushWindow(ctx, windowNumber);
+                    // Checked here rather than per record: a window is ~1000 records and ten
+                    // seconds of work, which is as close to immediate as is worth paying for.
+                    ctx.cancelled = self.repo.isCancelled(self.illumioJobId);
+                }
+            }
+        );
+
+        if (ctx.cancelled) {
+            // Nothing logged from here on reaches the job record -- updateJobRecord drops
+            // writes to a cancelled job -- so the stage is handed up to process(), which
+            // closes the job out through the one write that bypasses that guard.
+            this.cancelledAt = this.discoveryUtils.cancelledStage(table, ctx.processedTotal, ctx.totalRecords);
+            gs.info("Stopped mapping {0}: job cancelled after {1} of {2} records", [table, ctx.processedTotal, ctx.totalRecords]);
+            return;
+        }
+
+        // Exclusion (Legacy) filters run in memory during iteration, so the excluded
+        // records are only known once the table has been walked
+        if (result.excludedCount > 0) {
+            this.repo.log(this.illumioJobId, this.discoveryUtils.formatExcludedLog(result.excludedCount, table));
+        }
+    },
+
+    /**
+     * Turn one CMDB record into a pending window record. Called once per row by the
+     * repository's iteration callback; nothing is queried or inserted here.
+     * @param {Object} ctx Per-table state built by _processSourceTable
+     * @param {GlideRecord} sourceTableGr CMDB record
+     **/
+    _collectRecord: function(ctx, sourceTableGr) {
+        var createIncident = false;
+        if (ctx.incidentFilter) {
+            if (ctx.incidentFilter.match(sourceTableGr, true)) {
+                createIncident = true;
+            }
+        }
+
+        var hostname = this.getValueFromCMDB(sourceTableGr, ctx.source.host_name);
+
+        // Trim once, here, before anything else sees the hostname. Stray leading/trailing
+        // whitespace in a CI hostname fails the hostname format check AND never matches a
+        // PCE mapping, since the IN query compares the raw string -- so a padded hostname
+        // was silently classified unknown. Concatenation guards against getValueFromScript
+        // returning a non-string; an advanced field mapping can return anything.
+        if (!gs.nil(hostname)) {
+            hostname = (hostname + "").trim();
+        }
+
+        // A hostname of only whitespace trims to "" and is correctly skipped here
+        if (gs.nil(hostname)) {
+            gs.info("[process] No hostname exist for {0} table having record with sys_id: {1}", [ctx.table, sourceTableGr.sys_id]);
+            return;
+        }
+
+        var tempWorkload = this._evaluateClassFieldMapping(ctx.pceConfig, sourceTableGr, ctx.table);
+        tempWorkload["source_table"] = ctx.table;
+        tempWorkload["host_name"] = hostname;
+
+        // Only the first CI with a given hostname may raise an incident, across all source tables
+        if (ctx.processedHosts[hostname]) {
+            tempWorkload['create_incident'] = false;
+        } else {
+            tempWorkload['create_incident'] = createIncident;
+            ctx.processedHosts[hostname] = true;
+        }
+
+        // Evaluated here rather than at the gate that consumes it, because the gate runs
+        // from _processWindow, which only ever sees this plain object -- the GlideRecord is
+        // gone by then. Same reason create_incident is decided here. Deliberately eager: a
+        // record that turns out to match a PCE workload never needs the answer, but that
+        // cannot be known until after the mapping comparison. The filter is null unless the
+        // mode is conditional, so allow_all and allow_none cost one property read.
+        tempWorkload['unknown_condition_match'] =
+            !this.unknownGate || !this.unknownGate.filter ||
+            this.unknownGate.filter.match(sourceTableGr, true);
+
+        ctx.windowRecords.push({
+            hostname: hostname,
+            hostNamePart: this.discoveryUtils.hostNamePart(hostname),
+            workload: tempWorkload
+        });
+    },
+
+    /**
+     * Compare and insert the collected window, then log the batch line.
+     * processedTotal accumulates across the table, so the logged figure is cumulative
+     * rather than per batch -- see IllumioDiscoveryUtils.formatBatchLog.
+     * @param {Object} ctx Per-table state built by _processSourceTable
+     * @param {Number} windowNumber 1-based batch number, supplied by the repository
+     **/
+    _flushWindow: function(ctx, windowNumber) {
+        // An abort on the first record of a window flushes a window that never collected
+        // anything; a batch line for it would report a batch that never ran. A genuinely
+        // empty window -- every record skipped by _collectRecord -- still logs, as before.
+        if (ctx.cancelled && ctx.windowRecords.length === 0) {
+            return;
+        }
+
+        var counts = this._processWindow(ctx.windowRecords);
+        ctx.windowRecords.length = 0;
+        ctx.processedTotal += counts.processed;
+
+        // Before the batch line, so the reason reads ahead of the totals it explains.
+        // Empty unless this window actually refused a creation.
+        var skipLog = this.discoveryUtils.formatUnknownSkipLog(counts);
+        if (skipLog) {
+            this.repo.log(this.illumioJobId, skipLog);
+        }
+
+        this.repo.log(this.illumioJobId, this.discoveryUtils.formatBatchLog(
+            windowNumber, ctx.processedTotal, ctx.totalRecords, ctx.table,
+            Date.now() - ctx.windowStartTime, counts));
+
+        ctx.windowStartTime = Date.now();
+    },
+
+    /**
+     * Compare and insert a single window of CMDB records. All mapping and incident lookups
+     * for the window are resolved with batched IN queries before the records are processed,
+     * so no per-workload lookup query is issued.
+     * @param {Array} windowRecords Array of { hostname, hostNamePart, workload } for the current window
+     * @returns {Object} Counts for this window, as seeded by IllumioDiscoveryUtils.newWindowCounts
+     */
+    _processWindow: function(windowRecords) {
+        var counts = this.discoveryUtils.newWindowCounts();
+
+        if (windowRecords.length === 0) {
+            return counts;
+        }
+
+        var index;
+        var keys = this.discoveryUtils.collectWindowKeys(windowRecords);
+
+        var managedMappings = this.repo.findWorkloadMappings(this.pceConfigId, keys.hostNameParts, true);
+        var unmanagedMappings = this.repo.findWorkloadMappings(this.pceConfigId, keys.hostNameParts, false);
+
+        // Assigned last, so a throw inside findIncidentMappings cannot leave a half-built
+        // window open. counts is held by reference: _countInsert increments it through
+        // this.window, and the object returned below is the same one.
+        this.window = {
+            counts: counts,
+            incidentMap: this.repo.findIncidentMappings(this.pceConfigId, keys.hostnames)
+        };
+
+        try {
+            for (index = 0; index < windowRecords.length; index++) {
+                // mapKey, not a bare lower-cased hostname -- must stay in step with the key
+                // repo.findWorkloadMappings writes, see IllumioDiscoveryUtils.mapKey
+                var key = this.discoveryUtils.mapKey(windowRecords[index].hostNamePart);
+                this.addToCustomTable(windowRecords[index].hostname, windowRecords[index].workload, {
+                    managed: managedMappings[key],
+                    unmanaged: unmanagedMappings[key]
+                });
+                counts.processed++;
+            }
+        } finally {
+            // finally, not a trailing assignment: an exception escaping the loop must not
+            // leak this window's incident cache into the next batch
+            this.window = null;
+        }
+
+        return counts;
     },
 
     /**
@@ -122,17 +369,16 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
     _evaluateClassFieldMapping: function(pceConfig, sourceTableGr, table) {
 
         // initialize object
-        var tempWorkload = {
-            labelDimesion: {},
-            ipAddress: {
-                cmdb_value: []
-            },
-        };
+        var tempWorkload = this.discoveryUtils.newWorkloadSeed();
         for (var field in pceConfig.source[table].label_dimensions) {
             tempWorkload["labelDimesion"][field] = {
                 "cmdb_value": this.getValueFromCMDB(sourceTableGr, pceConfig.source[table].label_dimensions[field]),
                 "label_dimension_sys_id": pceConfig.source[table].label_dimensions[field]["label_dimension_sys_id"]
             };
+            // Same list IllumioGetPCEConfiguration.getMappedFields(cfg)[table] returned to the
+            // business rules, but read from the config already in memory. Captured here, before
+            // _updatePCELabelValues can add PCE-only dimensions to labelDimesion.
+            tempWorkload["mappedLabelKeys"].push(field);
         }
 
         // set ip addresses
@@ -140,15 +386,11 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         var ipAddressObjects = pceConfig.source[table].ip_address;
 
         for (var ipIndex in ipAddressObjects) {
-            var value = this.getValueFromCMDB(sourceTableGr, ipAddressObjects[ipIndex]);
-            if (!gs.nil(value)) {
-
-                // check if value contains multiple ip addresses
-                if (ipAddressObjects[ipIndex].is_multiple)
-                    tempWorkload["ipAddress"]["cmdb_value"] = tempWorkload["ipAddress"]["cmdb_value"].concat(value);
-                else
-                    tempWorkload["ipAddress"]["cmdb_value"].push(value);
-            }
+            // appendIpAddress skips nil values and returns a new array, so reassign
+            tempWorkload["ipAddress"]["cmdb_value"] = this.discoveryUtils.appendIpAddress(
+                tempWorkload["ipAddress"]["cmdb_value"],
+                this.getValueFromCMDB(sourceTableGr, ipAddressObjects[ipIndex]),
+                ipAddressObjects[ipIndex].is_multiple);
         }
 
         // set cmdb identifiers
@@ -163,316 +405,214 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      */
     process: function(illumioJobId) {
         this.illumioJobId = illumioJobId;
-        this.pceConfigId = this.utils.getConfigurationId(illumioJobId);
+        this.pceConfigId = this.repo.getConfigurationId(illumioJobId);
 
-        // Detect post-sync discovery from the job's initial log marker
-        var jobGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
-        jobGr.get(illumioJobId);
-        this._skipAutoSync = (jobGr.getValue('logs') || '').indexOf('[POST_SYNC]') !== -1;
-        if (this._skipAutoSync) {
+        // Detect post-sync discovery from the job's initial log marker.
+        // Local, not an instance field: nothing outside this method ever read it.
+        var skipAutoSync = this.repo.isPostSyncJob(illumioJobId);
+        if (skipAutoSync) {
             gs.info('[IllumioDiscoverAndMapCMDBServers] Post-sync discovery detected. Auto sync will be skipped.');
         }
 
-        var jobContent;
+        // Declared outside the try because the catch reads it. It is still undefined
+        // there when getPceConfiguration throws -- see the Bug 4 guard.
+        var pceConfig;
         try {
             /* Read the PCE configuration for custom table and fields */
-            var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(this.pceConfigId);
+            pceConfig = this.repo.getPceConfiguration(this.pceConfigId);
 
             // check if configuration is available
             if (gs.nil(pceConfig)) {
                 gs.error("Failed to fetch PCE configuration");
-                jobContent = {
-                    logs: "Failed to fetch PCE configuration ",
-                    current_operation: "Mapping Discovery",
-                    job_status: "failed",
-                    job_completed: new GlideDateTime(),
-                };
-                this.utils.updateJobRecord(this.illumioJobId, jobContent);
+                this.repo.failJob(this.illumioJobId, "Failed to fetch PCE configuration ");
                 return;
             }
 
             // check if field mappings are configured
             if (gs.nil(pceConfig.source)) {
                 gs.error("No PCE field mapping configured for PCE Configuration named {0}", pceConfig["name"]);
-                jobContent = {
-                    logs: "No PCE field mapping configured ",
-                    current_operation: "Mapping Discovery",
-                    job_status: "failed",
-                    job_completed: new GlideDateTime(),
-                };
-                this.utils.updateJobRecord(this.illumioJobId, jobContent);
+                this.repo.failJob(this.illumioJobId, "No PCE field mapping configured ");
                 return;
             }
 
-            // Update scheduled job status to Fetching CMDB Servers
-            jobContent = {
-                logs: "Fetching CMDB servers",
-                current_operation: "Fetching CMDB servers",
-            };
-            this.utils.updateJobRecord(this.illumioJobId, jobContent);
+            this.repo.updateJob(this.illumioJobId, {
+                logs: "PHASE - START: Fetching, Filtering & Comparing CMDB Records",
+                current_operation: "Fetching, Filtering & Comparing CMDB Records",
+            });
 
+            if (this._stopIfCancelled("before clearing stale discovery data")) {
+                return;
+            }
 
             gs.info("Deleting existing custom table data for PCE Configuration {0}", pceConfig["name"]);
 
-            // Remove all entries from field value table
-            var workloadFieldValueGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload_field_value");
-            workloadFieldValueGr.addQuery("illumio_pce_workload.illumio_pce_configuration", this.pceConfigId);
-            workloadFieldValueGr.query();
-            workloadFieldValueGr.deleteMultiple();
-
-            // Remove all entries from custom table
-            var illumioServersGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload");
-            illumioServersGr.addQuery("illumio_pce_configuration", this.pceConfigId);
-            illumioServersGr.query();
-            illumioServersGr.deleteMultiple();
+            this.repo.deleteStaleDiscoveryData(this.pceConfigId, this.illumioJobId);
 
             gs.info("Existing custom table data deleted for PCE Configuration {0}", pceConfig["name"]);
 
+            if (this._stopIfCancelled("while clearing stale discovery data")) {
+                return;
+            }
+
             var startTime = Date.now();
+            this._processTable(pceConfig);
 
-            // Update scheduled job status
-            jobContent = {
-                logs: "Mapping CMDB servers to PCE",
-                current_operation: "Mapping CMDB servers to PCE",
-            };
-            this.utils.updateJobRecord(this.illumioJobId, jobContent);
-
-            // prepare workload objects
-            this.utils.updateJobRecord(this.illumioJobId, {
-                logs: "Started: Fetching & Filtering CMDB Records",
-            });
-            var allWorkloads = this._processTable(pceConfig);
-
-            this.utils.updateJobRecord(this.illumioJobId, {
-                logs: "Started: Comparing CMDB & PCE Data",
-            });
-            var compareStartTime = Date.now();
-
-            // create PCE Workloads
-            for (var workload in allWorkloads["workloads"]) {
-                this.addToCustomTable(workload, allWorkloads["workloads"][workload]);
+            // Also the gate on auto sync: a cancelled run must not go on to push workloads
+            // to the PCE. cancelledAt is set when a source table aborted part-way; the
+            // fallback covers a cancel landing between tables.
+            if (this._stopIfCancelled(this.cancelledAt || "while fetching, filtering and comparing CMDB records")) {
+                return;
             }
 
-            // create duplicate PCE Workloads
-            for (var item in allWorkloads["duplicateWorkloads"]) {
-                this.addToCustomTable(
-                    allWorkloads["duplicateWorkloads"][item].host_name,
-                    allWorkloads["duplicateWorkloads"][item]
-                );
-            }
-
-            var managedCount = Object.keys(this.hostnameMap.managed).length;
-            var unmanagedCount = Object.keys(this.hostnameMap.unmanaged).length;
-            var unknownCount = Object.keys(this.hostnameMap.unknown).length;
-            var duplicateCount = allWorkloads.duplicateWorkloads.length;
-            var compareLog = '\n-----------------------------------------------------\n'
-                + 'PHASE: Comparing CMDB & PCE Data\n'
-                + '-----------------------------------------------------\n'
-                + 'Total Workloads: ' + (managedCount + unmanagedCount + unknownCount) + '\n'
-                + 'Managed: ' + managedCount + '\n'
-                + 'Unmanaged: ' + unmanagedCount + '\n'
-                + 'Unknown: ' + unknownCount + '\n'
-                + 'Duplicates: ' + duplicateCount + '\n'
-                + 'Time Elapsed (seconds): ' + ((Date.now() - compareStartTime) / 1000).toFixed(2)
-                + '\n';
-            this.utils.updateJobRecord(this.illumioJobId, {
-                logs: compareLog,
-                current_operation: "Comparing CMDB & PCE Data",
-            });
+            this.repo.log(this.illumioJobId, "PHASE - END: Fetching, Filtering & Comparing CMDB Records");
 
             /* Sync with PCE - only if autoSync is enabled AND not a post-sync discovery */
             var autoSyncEnabled = !!pceConfig.autoSync;
-            this.utils.updateJobRecord(this.illumioJobId, {
-                logs: "Auto sync enabled: " + autoSyncEnabled + ", Post-sync discovery: " + this._skipAutoSync,
-            });
+            this.repo.log(this.illumioJobId,
+                "Auto sync enabled: " + autoSyncEnabled + ", Post-sync discovery: " + skipAutoSync);
 
-            if (autoSyncEnabled && !this._skipAutoSync) {
+            if (autoSyncEnabled && !skipAutoSync) {
                 /* Update scheduled job status */
-                jobContent = {
+                this.repo.updateJob(this.illumioJobId, {
                     logs: "Synchronizing workloads to PCE ",
                     current_operation: "Synchronizing workloads to PCE",
                     job_type: "data sync",
-                };
-                this.utils.updateJobRecord(this.illumioJobId, jobContent);
+                });
 
                 // Start Synchronizing with PCE
                 gs.info("Synchronizing with PCE");
-                var autoSync = new IllumioAutoSyncWithPCE();
-                autoSync.process(this.illumioJobId);
+                this.repo.runAutoSync(this.illumioJobId);
             } else {
-                var completionMsg;
-                if (this._skipAutoSync) {
-                    completionMsg = "Completed post-sync discovery (auto sync skipped)";
-                } else if (!autoSyncEnabled) {
-                    completionMsg = "Completed discovery (auto sync not enabled)";
-                } else {
-                    completionMsg = "Completed discovery";
-                }
-
-                jobContent = {
-                    logs: completionMsg,
-                    current_operation: completionMsg,
-                    job_status: "completed",
-                    job_completed: new GlideDateTime(),
-                };
-                this.utils.updateJobRecord(this.illumioJobId, jobContent);
+                this.repo.completeJob(this.illumioJobId,
+                    this.discoveryUtils.completionMessage(skipAutoSync, autoSyncEnabled));
             }
 
             var endTime = Date.now();
             var timeTaken = endTime - startTime;
             gs.info("Time taken to finish mapping {0} milliseconds for PCE Configuration {1}", [timeTaken, pceConfig["name"]]);
         } catch (e) {
+            // pceConfig is still undefined when getPceConfiguration itself threw, and reading
+            // ["name"] off it raised a TypeError from INSIDE this catch -- before failJob ran,
+            // leaving the job stuck in "running" forever. That is the failure mode this guard
+            // removes, so the guard must stay ahead of the gs.error call.
+            var configName = pceConfig ? pceConfig["name"] : "(unknown)";
 
-            gs.error("Exception occurred while mapping data for PCE Configuration {0} Error{1}", [pceConfig["name"], e]);
-            jobContent = {
-                logs: "Exception occurred while mapping data " + e,
-                current_operation: "Mapping Discovery",
-                job_status: "failed",
-                job_completed: new GlideDateTime(),
-            };
-            this.utils.updateJobRecord(this.illumioJobId, jobContent);
+            gs.error("Exception occurred while mapping data for PCE Configuration {0} Error{1}", [configName, e]);
+            this.repo.failJob(this.illumioJobId, "Exception occurred while mapping data " + e);
         }
     },
 
     /**
-     * Validate hostname
-     * @param {String} hostname Hostname of the workload
+     * Log a malformed hostname WITHOUT skipping the record.
+     *
+     * The old message said "Skipped adding hostname ... as it is invalid", but nothing ever
+     * skipped: the return value was discarded and the record was inserted anyway. Anyone
+     * grepping that line during an incident was being told the opposite of what happened.
+     *
+     * Not skipping is deliberate and must stay that way. Discovery truncates the workload
+     * table first (see STALE_DISCOVERY_DATA), so dropping a record here does not merely fail
+     * to refresh it -- it removes it from ServiceNow entirely, and IllumioDeletionHandler
+     * reconciliation can then read that absence as "no longer in CMDB" and make it a
+     * deletion candidate on the PCE side.
+     *
+     * @param {String} hostname Hostname of the workload, already trimmed by _collectRecord
      */
     _isValidHostName: function(hostname) {
         try {
-            if (!hostname.match(this.VALID_HOSTNAME_REGEX)) {
-                gs.error("Skipped adding hostname {0} to the x_illu2_illumio_illumio_pce_workload table as it is invalid.", hostname);
-                return;
+            if (!this.discoveryUtils.isValidHostName(hostname)) {
+                gs.error("Hostname {0} does not match the expected hostname format; adding it anyway.", hostname);
             }
         } catch (e) {
+            // Only reachable when hostname is not a string -- _collectRecord has already
+            // excluded nil -- so this is a genuine data-shape failure worth failing the job on
             gs.error("Skipped adding hostname {0} to the x_illu2_illumio_illumio_pce_workload table due to exception. Error{1}", [hostname, e]);
-            var jobContent = {
-                logs: "Skipped adding hostname " +
-                    hostname +
-                    " to the x_illu2_illumio_illumio_pce_workload table due to exception. " +
-                    e,
-                current_operation: "Mapping Discovery",
-                job_status: "failed",
-                job_completed: new GlideDateTime(),
-            };
-            this.utils.updateJobRecord(this.illumioJobId, jobContent);
+            this.repo.failJob(this.illumioJobId, "Skipped adding hostname " + hostname +
+                " to the x_illu2_illumio_illumio_pce_workload table due to exception. " + e);
             return;
         }
     },
 
     /**
-     * Get the Workload Mapping record for given hostname and workload type
-     * @param {String} hostNamePart hostname
-     * @param {Boolean} workloadType type of workload
-     * @returns {GlideRecord} GlideRecord of Workload Mapping
-     */
-    _fetchWorkloadMapping: function(hostNamePart, workloadType) {
-
-        var workloadsMappingGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workloads_mapping");
-        workloadsMappingGr.addQuery("agent", workloadType);
-        workloadsMappingGr.addQuery("illumio_pce_configuration", this.pceConfigId);
-        workloadsMappingGr.setLimit(1);
-        workloadsMappingGr.addQuery("hostname", hostNamePart).addOrCondition("hostname", "STARTSWITH", hostNamePart + ".");
-        workloadsMappingGr.query();
-
-        return workloadsMappingGr;
-    },
-
-    /**
-     * Queries the workload in mappings table and initialize and insert a record in the workloads table
-     * @param {boolean} workloadType true if workload is managed, false if workload is unmanaged, null if workload is unknown
+     * Initialize and insert a workload record from a pre-fetched Workload Mapping.
+     *
+     * Returns whether this hostname was known to PCE as this workload type. That Boolean
+     * replaces the old isworkloadinMapping instance flag, which addToCustomTable had to
+     * reset before each record and read back after two calls -- state at a distance for
+     * something that never outlives one record.
+     *
+     * @param {boolean} workloadType true if workload is managed, false if workload is unmanaged
      * @param {string} hostname hostname of the workload
-     * @param {GlideRecord} sourceTableGr GlideRecord of the CMDB table
+     * @param {Object} sourceTableGr Workload object built from the CMDB record
+     * @param {Object} workloadMapping Mapping object resolved for the window, undefined when the hostname is not known to PCE
+     * @returns {Boolean} true when a mapping existed and a workload row was inserted
      */
-    _queryWorkload: function(workloadType, hostname, sourceTableGr) {
+    _processKnownWorkload: function(workloadType, hostname, sourceTableGr, workloadMapping) {
+        if (!workloadMapping) {
+            return false;
+        }
 
-        var illumioServersGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload");
-        var workload = "managed";
+        var workload = workloadType ? "managed" : "unmanaged";
+        var hostNamePart = this.discoveryUtils.hostNamePart(hostname);
+        var illumioServersGr = this._initializeObject(
+            workload, this.repo.newWorkloadRecord(), hostname, sourceTableGr, workloadMapping);
+
+        // Set interfaces in the PCE Workload table
+        var interfacesIPs = [];
         if (!workloadType) {
-            workload = "unmanaged";
+            interfacesIPs = JSON.parse(workloadMapping.interfaces);
+        }
+        var interfaceObject = this._setInterfaceObject(illumioServersGr, sourceTableGr, interfacesIPs);
+
+        // If PCE IP Address is not null then add it to PCE workloads custom table.
+        // Compared against the literal string "null" -- public_ip is read as
+        // getValue("public_ip") || "", so an absent PCE public IP writes "" here
+        // rather than being skipped. Preserved deliberately.
+        var mappingIP = workloadMapping.public_ip;
+        if (mappingIP != "null") {
+            illumioServersGr.public_ip_address = mappingIP;
         }
 
-        // fetch workload mapping record
-        var hostNamePart = hostname.split(".")[0];
-        var workloadsMappingGr = this._fetchWorkloadMapping(hostNamePart, workloadType);
-
-        if (workloadsMappingGr.next()) {
-            this.isworkloadinMapping = true;
-            illumioServersGr = this._initializeObject(workload, illumioServersGr, hostname, sourceTableGr, workloadsMappingGr);
-
-            // Set interfaces in the PCE Workload table
-            var interfacesIPs = [];
-            if (!workloadType) {
-                interfacesIPs = JSON.parse(workloadsMappingGr.getValue("interfaces"));
-            }
-            this._setInterfaceObject(illumioServersGr, sourceTableGr, interfacesIPs);
-
-            // If PCE IP Address is not null then add it to PCE workloads custom table
-            var mappingIP = workloadsMappingGr.public_ip;
-            if (mappingIP != "null") {
-                illumioServersGr.public_ip_address = mappingIP;
-            }
-
-            illumioServersGr = this._insertObject(hostNamePart, illumioServersGr, sourceTableGr);
-
-            // add field values for configured Label Dimensions
-            try {
-                var workloadLabels = JSON.parse(workloadsMappingGr.getValue("labels"));
-                this._updatePCELabelValues(sourceTableGr, workloadLabels);
-            } catch (err) {
-                gs.error("Error while parsing labels from workloadMapping record {0}. Error{1}", [workloadsMappingGr.labels, err]);
-                var jobContent = {
-                    logs: "Error while parsing labels from workloadMapping record" + workloadsMappingGr.labels + ". " + err,
-                    current_operation: "Mapping Discovery",
-                    job_status: "failed",
-                    job_completed: new GlideDateTime(),
-                };
-                this.utils.updateJobRecord(this.illumioJobId, jobContent);
-            }
-
-            this._createWorkloadFieldValue(illumioServersGr, sourceTableGr);
+        // Resolve PCE label values BEFORE the insert. This used to run after _insertObject,
+        // which is why the "Illumio Set Conflict" rule on the workload table could never see a
+        // label mismatch -- it queried a field value table that had no rows yet, and the whole
+        // label comparison fell to the second rule on the child table. _insertObject now decides
+        // conflicts itself, so labelDimesion has to carry pce_value by the time it runs.
+        // Only sourceTableGr.labelDimesion is touched here; the GlideRecord is not.
+        try {
+            var workloadLabels = JSON.parse(workloadMapping.labels);
+            this._updatePCELabelValues(sourceTableGr, workloadLabels);
+        } catch (err) {
+            gs.error("Error while parsing labels from workloadMapping record {0}. Error{1}", [workloadMapping.labels, err]);
+            this.repo.failJob(this.illumioJobId,
+                "Error while parsing labels from workloadMapping record" + workloadMapping.labels + ". " + err);
         }
-        return illumioServersGr;
+
+        illumioServersGr = this._insertObject(hostNamePart, illumioServersGr, sourceTableGr, interfaceObject);
+
+        // add field values for configured Label Dimensions -- needs the inserted sys_id
+        this._createWorkloadFieldValue(illumioServersGr, sourceTableGr);
+
+        return true;
     },
 
     /**
      * Prepare interface object
      * @param {GlideRecord} illumioServersGr GlideRecord of PCE Workload table
      * @param {Object} sourceTableGr Workload object
-     * @param {Object} interfacesIPs Interface object from PCE 
+     * @param {Object} interfacesIPs Interface object from PCE
+     * @returns {Object} The interface object, so _insertObject can compare it without
+     *                   re-parsing the JSON that was just stringified onto the record
      */
     _setInterfaceObject: function(illumioServersGr, sourceTableGr, interfacesIPs) {
-        var interfaceObject = {};
-
-        // set PCE ip address
-        for (var index in interfacesIPs) {
-            interfaceObject[interfacesIPs[index]["name"]] = {
-                pce_value: interfacesIPs[index]["address"],
-                cmdb_value: ""
-            };
-        }
-
-        // set umw0 cmdb value
-        interfaceObject["umw0"] = !gs.nil(interfaceObject["umw0"]) ? interfaceObject["umw0"] : {
-            "pce_value": ''
-        };
-        interfaceObject["umw0"]["cmdb_value"] = sourceTableGr.ipAddress.public_ip_address;
-
-        // set cmdb ip address
-        var cmdbValuesLength = sourceTableGr.ipAddress.cmdb_value.length;
-        for (var keyCount = 1; keyCount <= MAX_IP_ADDRESSES && keyCount - 1 < cmdbValuesLength; keyCount++) {
-            var key = "umw" + keyCount;
-            var cmdbVal = sourceTableGr.ipAddress.cmdb_value[keyCount - 1];
-            if (!gs.nil(cmdbVal)) {
-                if (gs.nil(interfaceObject[key]))
-                    interfaceObject[key] = {
-                        pce_value: ""
-                    };
-                interfaceObject[key]["cmdb_value"] = cmdbVal;
-            }
-        }
+        var interfaceObject = this.discoveryUtils.buildInterfaceObject(
+            interfacesIPs,
+            sourceTableGr.ipAddress.public_ip_address,
+            sourceTableGr.ipAddress.cmdb_value,
+            MAX_IP_ADDRESSES);
 
         illumioServersGr.setValue("interfaces", JSON.stringify(interfaceObject));
+
+        return interfaceObject;
     },
 
     /**
@@ -481,31 +621,16 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @param {Object} sourceTableGr Workload object
      */
     _createWorkloadFieldValue: function(illumioServersGr, sourceTableGr) {
-        // Set CMDB and PCE values for Label Dimensions
+        // Set CMDB and PCE values for Label Dimensions.
+        // The PCE Configuration and Class Mapping are denormalised onto every row so a Sync
+        // Filter's label condition can be an index seek on this table rather than a join back
+        // through the workload. Both are run-level, not record-level: the config for the whole
+        // run, the mapping for the source table currently being processed.
+        var rows = this.discoveryUtils.buildFieldValueRows(
+            sourceTableGr["labelDimesion"], illumioServersGr.getUniqueValue(),
+            this.pceConfigId, this.classMappingSysId);
 
-        var labelDimesionData = sourceTableGr["labelDimesion"];
-        for (var field in labelDimesionData) {
-			if (gs.nil(labelDimesionData[field]["cmdb_value"]) && gs.nil(labelDimesionData[field]["pce_value"]))
-				continue;
-			
-            var workloadFieldValueGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload_field_value");
-            workloadFieldValueGr.initialize();
-            workloadFieldValueGr.setValue("illumio_label_dimension", labelDimesionData[field]["label_dimension_sys_id"]);
-
-            if (!gs.nil(labelDimesionData[field]["cmdb_value"]))
-                workloadFieldValueGr.setValue(
-                    "cmdb_value",
-                    labelDimesionData[field]["cmdb_value"]
-                );
-            workloadFieldValueGr.setValue("illumio_pce_workload", illumioServersGr.getUniqueValue());
-
-            if (!gs.nil(labelDimesionData[field]["pce_value"]))
-                workloadFieldValueGr.setValue(
-                    "pce_value",
-                    labelDimesionData[field]["pce_value"]
-                );
-            workloadFieldValueGr.insert();
-        }
+        this.repo.insertWorkloadFieldValues(rows);
     },
 
     /**
@@ -514,36 +639,34 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @param {JSON} workloadLabels Object of workloads with labels
      */
     _updatePCELabelValues: function(sourceTableGr, pceWorkloadLabels) {
-        var labelsMappingGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_labels_mapping");
-
         // Set PCE values for Label Dimensions
         for (var labelIndex = 0; labelIndex < pceWorkloadLabels.length; labelIndex++) {
-            labelsMappingGr.initialize();
-            labelsMappingGr.addQuery("illumio_pce_configuration", this.pceConfigId);
-            labelsMappingGr.addQuery("href", pceWorkloadLabels[labelIndex].href);
-            labelsMappingGr.setLimit(1);
-            labelsMappingGr.query();
+            var label = this.repo.findLabelMappingByHref(this.pceConfigId, pceWorkloadLabels[labelIndex].href);
 
-            /* If PCE label exists with same href	*/
-            if (labelsMappingGr.next()) {
-                var labelDimensionKey = labelsMappingGr.getValue("key");
+            /* If PCE label exists with same href */
+            if (label) {
+                var labelDimensionKey = label.key;
                 if (gs.nil(sourceTableGr["labelDimesion"][labelDimensionKey])) {
                     sourceTableGr["labelDimesion"][labelDimensionKey] = {
-                        label_dimension_sys_id: this.utils.fetchLabelDimensionSysId(labelDimensionKey, this.pceConfigId)
+                        label_dimension_sys_id: this.repo.fetchLabelDimensionSysId(labelDimensionKey, this.pceConfigId)
                     };
                 }
-                sourceTableGr["labelDimesion"][labelDimensionKey]["pce_value"] = labelsMappingGr.getValue("value");
+                sourceTableGr["labelDimesion"][labelDimensionKey]["pce_value"] = label.value;
             }
         }
     },
 
     /**
-     * Initialize the GlideRecord of the Workload
-     * @param {boolean} workload true if the workload is managed, false if unmanaged, null if unknown
+     * Populate the Workload GlideRecord from the pre-fetched mapping.
+     * The field map is built by IllumioDiscoveryUtils.buildWorkloadRow and applied through
+     * repo.applyValues, so conflicts / ven_* / os_id now go through setValue where they
+     * were previously direct property assignments. Equivalent for GlideRecord, but
+     * VERIFY ON THE INSTANCE that conflicts lands as 0 and not the string "false".
+     * @param {boolean} workload "managed" / "unmanaged", nil when the workload is unknown
      * @param {GlideRecord} illumioServersGr GlideRecord of the Workload
      * @param {string} hostname Hostname of the workload
-     * @param {GlideRecord} sourceTableGr GlideRecord of the CMDB table
-     * @param {GlideRecord} workloadsMappingGr GlideRecord of the workloads mapping table
+     * @param {Object} sourceTableGr Workload object built from the CMDB record
+     * @param {Object} workloadMapping Mapping object from the workloads mapping table
      * @returns GlideRecord of the object
      */
     _initializeObject: function(
@@ -551,28 +674,11 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         illumioServersGr,
         hostname,
         sourceTableGr,
-        workloadsMappingGr
+        workloadMapping
     ) {
         illumioServersGr.initialize();
-        illumioServersGr.setValue("servicenow_cmdb_identifier", sourceTableGr.identifier + "");
-        illumioServersGr.setValue("hostname", hostname);
-        illumioServersGr.setValue("illumio_pce_configuration", this.pceConfigId);
-        illumioServersGr.setValue("source_table", sourceTableGr["source_table"]);
-
-        illumioServersGr.conflicts = false;
-        illumioServersGr.setValue("known_to_pce", "unknown");
-
-        if (!gs.nil(workload)) {
-            illumioServersGr.setValue("known_to_pce", workload);
-            illumioServersGr.setValue("pce_workload_href", workloadsMappingGr.getValue("href"));
-            illumioServersGr.ven_href = workloadsMappingGr.getValue("ven_href");
-            illumioServersGr.ven_status = workloadsMappingGr.getValue("ven_status");
-            illumioServersGr.enforcement_mode = workloadsMappingGr.getValue("enforcement_mode");
-            illumioServersGr.ven_version = workloadsMappingGr.getValue("ven_version");
-            illumioServersGr.os_id = workloadsMappingGr.getValue("os_id");
-        }
-
-        return illumioServersGr;
+        return this.repo.applyValues(illumioServersGr, this.discoveryUtils.buildWorkloadRow(
+            workload, hostname, sourceTableGr, this.pceConfigId, workloadMapping));
     },
 
     /**
@@ -582,131 +688,205 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      */
     createOrUpdateIncident: function(illumioServersGr, incidentSysId) {
 
-        var incidentGr = new GlideRecord('incident');
-        if (!incidentGr.get(incidentSysId)) {
-            incidentGr.initialize();
-        }
-        
-        var information = "Hostname: " + illumioServersGr.getValue("hostname");
-        if (!gs.nil(illumioServersGr.getValue("pce_workload_href"))) {
-            information += "\n" + "Href: " + illumioServersGr.getValue("pce_workload_href"); 
-        }
+        var information = this.discoveryUtils.buildIncidentDescription({
+            hostname: illumioServersGr.getValue("hostname"),
+            pce_workload_href: illumioServersGr.getValue("pce_workload_href"),
+            public_ip_address: illumioServersGr.getValue("public_ip_address"),
+            known_to_pce: illumioServersGr.getValue("known_to_pce")
+        });
 
-        if (!gs.nil(illumioServersGr.getValue("public_ip_address"))) {
-            information += "\n" + "Public IP Address: " + illumioServersGr.getValue("public_ip_address"); 
-        }
-        
-        if (!gs.nil(illumioServersGr.getValue("known_to_pce"))) {
-            information += "\n" + "Known to PCE: " + illumioServersGr.getValue("known_to_pce"); 
-        }
-        
-         
-        incidentGr.setValue("short_description",illumioServersGr.getDisplayValue("illumio_pce_configuration") +": "+ illumioServersGr.getValue("hostname"));
-        incidentGr.setValue("description", information);
-        incidentGr.setValue("cmdb_ci",illumioServersGr.getValue("servicenow_cmdb_identifier"));
-        incidentGr.update();
+        // update() on an uninserted record inserts, so this upserts
+        var newIncidentSysId = this.repo.upsertIncident(incidentSysId, {
+            short_description: illumioServersGr.getDisplayValue("illumio_pce_configuration") + ": " + illumioServersGr.getValue("hostname"),
+            description: information,
+            cmdb_ci: illumioServersGr.getValue("servicenow_cmdb_identifier")
+        });
 
         if (gs.nil(incidentSysId)) {
-            incidentMappingGr = new GlideRecordSecure("x_illu2_illumio_illumio_incident_mapping");
-            incidentMappingGr.initialize();
-            incidentMappingGr.setValue("href", illumioServersGr.getValue("pce_workload_href"));
-            incidentMappingGr.setValue("hostname", illumioServersGr.getValue("hostname"));
-            incidentMappingGr.setValue("incident", incidentGr.getUniqueValue());
-            incidentMappingGr.setValue("illumio_pce_configuration", illumioServersGr.getValue("illumio_pce_configuration"));
-            incidentMappingGr.insert();
-            return incidentGr.getUniqueValue();
+            this.repo.insertIncidentMapping({
+                href: illumioServersGr.getValue("pce_workload_href"),
+                hostname: illumioServersGr.getValue("hostname"),
+                incident: newIncidentSysId,
+                illumio_pce_configuration: illumioServersGr.getValue("illumio_pce_configuration")
+            });
+
+            // Keep the per-window incident cache in step with the mapping we just created
+            if (this.window) {
+                var cacheKey = this.discoveryUtils.incidentKey(illumioServersGr.getValue("hostname"), illumioServersGr.getValue("pce_workload_href"));
+                this.window.incidentMap[cacheKey] = newIncidentSysId;
+            }
         }
-        return incidentGr.getUniqueValue();
+        return newIncidentSysId;
     },
 
     /**
      * Populate incident if it's already created
-     * @param {GlideRecord} illumioServerGr 
+     * @param {GlideRecord} illumioServerGr
      */
     getIncident: function(illumioServerGr) {
-        var incidentMappingGr = new GlideRecordSecure("x_illu2_illumio_illumio_incident_mapping");
-        incidentMappingGr.addQuery("illumio_pce_configuration", this.pceConfigId);
-        var href = illumioServerGr.getValue("pce_workload_href");
-        if (gs.nil(href)){
-            incidentMappingGr.addNullQuery("href");
+        // During discovery the mappings for the whole window are pre-fetched, so no query is needed
+        if (this.window) {
+            return this.window.incidentMap[this.discoveryUtils.incidentKey(illumioServerGr.getValue("hostname"), illumioServerGr.getValue("pce_workload_href"))];
         }
-        else{
-            incidentMappingGr.addQuery("href", href);
-        }
-        incidentMappingGr.addQuery("hostname", illumioServerGr.getValue("hostname"));
-        incidentMappingGr.setLimit(1);
-        incidentMappingGr.query();
-        if (incidentMappingGr.next()) {
-            return incidentMappingGr.getValue("incident");
-        }
+
+        return this.repo.findIncidentMapping(this.pceConfigId,
+            illumioServerGr.getValue("hostname"), illumioServerGr.getValue("pce_workload_href"));
     },
 
 
     /**
-     * Insert PCE Workload record
+     * Insert PCE Workload record.
+     *
+     * This is the single insert point for managed, unmanaged and unknown workloads alike, and
+     * the only place `duplicate` is decided -- which is why conflicts is computed here rather
+     * than in the two callers. conflicts is set before the insert, so there is still exactly
+     * one write per workload and no follow-up update.
+     *
      * @param {string} hostNamePart Hostname of the workload or part of the hostname
      * @param {GlideRecord} illumioServersGr GlideRecord of the workload
+     * @param {Object} sourceTableGr Workload object
+     * @param {Object} interfaceObject Interface object from _setInterfaceObject, nil when the
+     *                 caller has no interfaces to compare
      * @returns GlideRecord of the Workload
      */
-    _insertObject: function(hostNamePart, illumioServersGr, sourceTableGr) {
-        hostNamePart = hostNamePart.toLowerCase();
+    _insertObject: function(hostNamePart, illumioServersGr, sourceTableGr, interfaceObject) {
+        // Key for this.hostnameMap. Written and read only in this method, so the
+        // mapKey prefix is self-contained -- see IllumioDiscoveryUtils.mapKey
+        hostNamePart = this.discoveryUtils.mapKey(hostNamePart);
 
         if (!gs.nil(this.hostnameMap[illumioServersGr.getValue("known_to_pce")][hostNamePart])) {
             illumioServersGr.setValue("duplicate_of", this.hostnameMap[illumioServersGr.getValue("known_to_pce")][hostNamePart]);
             illumioServersGr.duplicate = true;
-            illumioServersGr.insert();
+            // buildWorkloadRow already seeded conflicts false, which is the answer for a
+            // duplicate -- checkConflict returned false for one before it looked at anything else.
+            this.repo.insertRecord(illumioServersGr);
+            this._countInsert("duplicate");
             return illumioServersGr;
         }
 
         // Check if incident already exists
         var incidentSysId = this.getIncident(illumioServersGr);
-       
+
         //creation of new incident
         if (sourceTableGr['create_incident'] || !gs.nil(incidentSysId)) {
             illumioServersGr.setValue("incident", this.createOrUpdateIncident(illumioServersGr, incidentSysId)); //creating new incident for given workload
         }
 
         illumioServersGr.duplicate = false;
-        var sysId = illumioServersGr.insert();
+        illumioServersGr.setValue("conflicts", this.discoveryUtils.evaluateConflict(
+            illumioServersGr.getValue("known_to_pce"),
+            false,
+            sourceTableGr["labelDimesion"],
+            sourceTableGr["mappedLabelKeys"],
+            interfaceObject));
+
+        var sysId = this.repo.insertRecord(illumioServersGr);
         this.hostnameMap[illumioServersGr.getValue("known_to_pce")][hostNamePart] = sysId;
+        this._countInsert(illumioServersGr.getValue("known_to_pce"));
 
         return illumioServersGr;
     },
 
     /**
-     * Queries the mapping table and add the workloads to PCE workloads table
+     * Tally a workload against the counters of the window being processed.
+     * No-op outside discovery, where no window counters exist.
+     * @param {String} category Any key of IllumioDiscoveryUtils.newWindowCounts -- one of the
+     *                 inserted categories (managed, unmanaged, unknown, duplicate) or one of
+     *                 the skipped_* reasons recorded by _allowUnknownCreation
+     */
+    _countInsert: function(category) {
+        if (this.window && this.window.counts.hasOwnProperty(category)) {
+            this.window.counts[category]++;
+        }
+    },
+
+    /**
+     * Add the workload to PCE workloads table using the mappings resolved for the current window
      * @param {string} hostname Hostname of the workload
      * @param {GlideRecord} sourceTableGr GlideRecord of the CMDB table
+     * @param {Object} workloadMappings { managed, unmanaged } mapping objects for this hostname
      */
-    addToCustomTable: function(hostname, sourceTableGr) {
+    addToCustomTable: function(hostname, sourceTableGr, workloadMappings) {
         try {
-            // initialize variables
-            this.isworkloadinMapping = false;
-
             // validate hostname
             this._isValidHostName(hostname);
 
-            //query managed workload
-            this._queryWorkload(true, hostname, sourceTableGr);
-
-            //query unmanaged workload
-            this._queryWorkload(false, hostname, sourceTableGr);
+            // A hostname can match both a managed and an unmanaged PCE workload, which
+            // inserts two rows -- so both calls always run and the results are OR-ed.
+            // Written as two statements, not `a() || b()`, because || short-circuits.
+            var matchedManaged = this._processKnownWorkload(true, hostname, sourceTableGr, workloadMappings.managed);
+            var matchedUnmanaged = this._processKnownWorkload(false, hostname, sourceTableGr, workloadMappings.unmanaged);
 
             // handle record if it's not present in PCE Workload Mapping table
-            if (!this.isworkloadinMapping) {
+            if (!matchedManaged && !matchedUnmanaged && this._allowUnknownCreation(hostname, sourceTableGr)) {
                 this._createUnknownWorkload(hostname, sourceTableGr);
             }
         } catch (e) {
             gs.error("[addToCustomTable] Exception while adding hostname {0} to workloads list. Error{1}", [hostname, e]);
-            var jobContent = {
-                logs: "Exception while adding hostname " + hostname + " to workloads list. Exception: " + e,
-                current_operation: "Mapping Discovery",
-                job_status: "failed",
-                job_completed: new GlideDateTime(),
-            };
-            this.utils.updateJobRecord(this.illumioJobId, jobContent);
+            this.repo.failJob(this.illumioJobId,
+                "Exception while adding hostname " + hostname + " to workloads list. Exception: " + e);
             return;
         }
+    },
+
+    /**
+     * Decide whether this unknown workload may be created, per the class mapping's gate.
+     *
+     * Called only once a record is known to match no PCE workload, which is the latest
+     * point the answer can be reached and the earliest it is needed -- a refusal here skips
+     * the record insert, the field value inserts and any incident.
+     *
+     * Order is deliberate. The condition is tested before the limit so a record the user
+     * never wanted does not consume a slot, and is not mis-reported as hitting the ceiling.
+     *
+     * Duplicates are exempt from the limit in both directions: they neither consume a slot
+     * nor are blocked once it is exhausted. A duplicate is not a new workload -- IllumioAutoSyncWithPCE
+     * queries `duplicate=false`, so it never reaches the PCE, and _insertObject returns before
+     * the incident block, so it never raises one either. The consequence worth knowing is that
+     * the limit caps distinct unknown hostnames, not rows: a limit of 100 can still produce
+     * more than 100 workload rows if duplicate hostnames follow their primaries.
+     *
+     * @param {String} hostname Hostname of the workload
+     * @param {Object} workload Workload object built by _collectRecord
+     * @returns {Boolean} true when the workload may be created
+     */
+    _allowUnknownCreation: function(hostname, workload) {
+        var gate = this.unknownGate;
+
+        // The unconfigured default, and the path every existing class mapping takes.
+        // Returns before touching the hostname map so it costs one comparison.
+        // !gate covers the UI action, business rule and preview callers, which reach
+        // addToCustomTable without ever running _processSourceTable.
+        if (!gate || (gate.mode === 'allow_all' && gate.limit === 0)) {
+            return true;
+        }
+
+        if (gate.mode === 'allow_none') {
+            this._countInsert('skipped_restricted');
+            return false;
+        }
+
+        if (gate.mode === 'conditional' && !workload['unknown_condition_match']) {
+            this._countInsert('skipped_condition');
+            return false;
+        }
+
+        // The same key _insertObject reads to set duplicate_of, checked here so the decision
+        // is made before any record is built. hostnameMap is run-global while gate.created
+        // resets per source table, so a hostname first created in an earlier table arrives
+        // here as a duplicate and rides along rather than charging this table's limit.
+        var key = this.discoveryUtils.mapKey(this.discoveryUtils.hostNamePart(hostname));
+        if (!gs.nil(this.hostnameMap.unknown[key])) {
+            return true;
+        }
+
+        if (gate.limit > 0 && gate.created >= gate.limit) {
+            this._countInsert('skipped_limit');
+            return false;
+        }
+
+        gate.created++;
+        return true;
     },
 
     /**
@@ -715,8 +895,8 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @param {Object} sourceTableGr Workload object
      */
     _createUnknownWorkload: function(hostname, sourceTableGr) {
-        var hostNamePart = hostname.split(".")[0];
-        var illumioServersGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload");
+        var hostNamePart = this.discoveryUtils.hostNamePart(hostname);
+        var illumioServersGr = this.repo.newWorkloadRecord();
         illumioServersGr = this._initializeObject(
             null,
             illumioServersGr,
@@ -724,8 +904,10 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             sourceTableGr
         );
 
-        this._setInterfaceObject(illumioServersGr, sourceTableGr, []);
-        this._insertObject(hostNamePart, illumioServersGr, sourceTableGr);
+        // No reorder needed here: an unknown workload has no PCE labels to resolve, and
+        // evaluateConflict returns true on known_to_pce before it reaches the label comparison.
+        var interfaceObject = this._setInterfaceObject(illumioServersGr, sourceTableGr, []);
+        this._insertObject(hostNamePart, illumioServersGr, sourceTableGr, interfaceObject);
         this._createWorkloadFieldValue(illumioServersGr, sourceTableGr);
     },
 
@@ -743,49 +925,26 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
     },
 
     /**
-     * Evaluate script
+     * Evaluate an advanced field mapping's script against a CMDB record.
+     * Kept on the orchestrator as a thin passthrough; the Glide work is in the repository.
      * @param {GlideRecord} sourceGr GlideRecord of the CMDB table
-     * @param {Object} fieldMapping Object of Class Field Mapping 
-     * @returns {object} value from script
+     * @param {Object} fieldMapping Object of Class Field Mapping
+     * @returns {Object} value from script
      */
     getValueFromScript: function(sourceGr, fieldMapping) {
-        try {
-            var fieldMappingGr = new GlideRecordSecure("x_illu2_illumio_illumio_class_field_mapping");
-            if (fieldMappingGr.get(fieldMapping["mappingSysId"])) {
-                var evaluator = new GlideScopedEvaluator();
-                evaluator.putVariable('sourceGr', sourceGr);
-                evaluator.putVariable('answer', null);
-                evaluator.evaluateScript(fieldMappingGr, 'script', null);
-                return evaluator.getVariable('answer');
-            }
-        } catch (e) {
-            gs.error("[getValueFromScript] Error while fetching value from cmdb record", e);
-        }
-        return "";
+        return this.repo.evaluateFieldScript(sourceGr, fieldMapping);
     },
 
     /**
      * Gets the value of the field that is having dot walking enable.
-     * @param {String} sourceGr GlideRecord to get the field value from.
+     * Public: the Preview Discovery Filter Mode UI action calls this directly, so the
+     * signature is frozen. Delegates to the repository.
+     * @param {GlideRecord} sourceGr GlideRecord to get the field value from.
      * @param {String} fieldName Name of the field to get the value from.
      * @returns {String} Value of the field.
      **/
     getValueFromDotWalkableField: function(sourceGr, fieldName) {
-        try {
-            if (gs.nil(sourceGr) || gs.nil(fieldName)) return "";
-            var dotWalkableFieldArray = fieldName.split(".");
-            var tempGR = sourceGr; //to use the temporary variable to avoid changing into the existing one
-            var fIndex;
-            for (fIndex = 0; fIndex < dotWalkableFieldArray.length - 1; fIndex++) {
-                if (gs.nil(tempGR[dotWalkableFieldArray[fIndex]])) return "";
-                tempGR = tempGR[dotWalkableFieldArray[fIndex]].getRefRecord();
-                if (!tempGR.isValidRecord()) return "";
-            }
-            return tempGR[dotWalkableFieldArray[fIndex]] + "";
-        } catch (e) {
-            gs.error("[getValueFromDotWalkableField] Error while fetching value from cmdb record", e);
-        }
-        return "";
+        return this.repo.readDotWalkableField(sourceGr, fieldName);
     },
 
     type: "IllumioDiscoverAndMapCMDBServers",
@@ -794,14 +953,14 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:26:01</sys_created_on>
         <sys_id>4c10e6c6dbcc6700dc9fabc5ca96191d</sys_id>
-        <sys_mod_count>426</sys_mod_count>
+        <sys_mod_count>435</sys_mod_count>
         <sys_name>IllumioDiscoverAndMapCMDBServers</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4c10e6c6dbcc6700dc9fabc5ca96191d</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-02 14:42:42</sys_updated_on>
+        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>4c10e6c6dbcc6700dc9fabc5ca96191d</id>

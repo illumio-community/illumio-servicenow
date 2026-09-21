@@ -1,14 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?><record_update>
     <sys_ui_section caption="" section_id="2413a27097304210b7daf896f053af57" sys_domain="global" table="x_illu2_illumio_illumio_config_class_mapping" version="3" view="">
         <sys_ui_annotation action="INSERT_OR_UPDATE">
+            <is_plain_text>true</is_plain_text>
+            <name/>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:57</sys_created_on>
+            <sys_id>01099c36c3134b9050bffa0ed401314f</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:57</sys_updated_on>
+            <text>An Application Cross-Scope Access record targeting this table needs adding manually.</text>
+            <type display_value="Info Box Blue">753f88a80f930000b12e6903cfe01206</type>
+        </sys_ui_annotation>
+        <sys_ui_annotation action="INSERT_OR_UPDATE">
             <is_plain_text>false</is_plain_text>
             <name/>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>d36f460ac3c7031050bffa0ed4013110</sys_id>
+            <sys_created_on>2026-09-16 17:28:57</sys_created_on>
+            <sys_id>c9099c36c3134b9050bffa0ed401314e</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:57</sys_updated_on>
             <text>&lt;style&gt;
         ol {
             list-style-type: disc;
@@ -36,172 +48,163 @@
 &lt;/li&gt;
 &lt;li&gt;&lt;strong&gt;Conditions for Excluding Workloads:&lt;/strong&gt; CMDB records that fall into this condition will be excluded.&lt;/li&gt;
 &lt;li&gt;&lt;strong&gt;Conditions for Creating Incidents:&lt;/strong&gt; Create Incident for the workloads that fall into this condition.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Restrict Unknown Workload Creation: &lt;/strong&gt;Control how many Unknown workloads appear in Illumio PCE Workloads table post discovery.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Conditions for Restricting Unknown Workload Creation:&lt;/strong&gt; Conditions for &lt;strong&gt;Restrict Unknown Workload Creation&lt;/strong&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Maximum Unknown Workload Creation:&lt;/strong&gt; Specify a cap when &lt;strong&gt;Restrict Unknown Workload Creation&lt;/strong&gt; allows fully or conditionally&lt;strong&gt;.&lt;/strong&gt; Negative values will be considered as 0 which will prevent creation of unknown workloads.&lt;/li&gt;
 &lt;/ol&gt;</text>
             <type display_value="Info Box Blue">753f88a80f930000b12e6903cfe01206</type>
         </sys_ui_annotation>
-        <sys_ui_annotation action="INSERT_OR_UPDATE">
-            <is_plain_text>true</is_plain_text>
-            <name/>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>d76f460ac3c7031050bffa0ed4013111</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
-            <text>An Application Cross-Scope Access record targeting this table needs adding manually.</text>
-            <type display_value="Info Box Blue">753f88a80f930000b12e6903cfe01206</type>
-        </sys_ui_annotation>
         <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>d36f460ac3c7031050bffa0ed4013110</element>
+            <element>c9099c36c3134b9050bffa0ed401314e</element>
             <position>0</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>ef6f460ac3c7031050bffa0ed4013154</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>dd099c36c3134b9050bffa0ed401316d</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type>annotation</type>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>01099c36c3134b9050bffa0ed401314f</element>
+            <position>1</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>99099c36c3134b9050bffa0ed401316e</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type>annotation</type>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>illumio_pce_configuration</element>
-            <position>1</position>
+            <position>2</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>676f460ac3c7031050bffa0ed4013156</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>55099c36c3134b9050bffa0ed401316f</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>.begin_split</element>
-            <position>2</position>
+            <position>3</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>236f460ac3c7031050bffa0ed4013157</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>11099c36c3134b9050bffa0ed4013170</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type>.begin_split</type>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>source_table</element>
-            <position>3</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>eb6f460ac3c7031050bffa0ed4013157</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_ui_formatter/>
-            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
-            <sys_user/>
-            <type/>
-        </sys_ui_element>
-        <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>d76f460ac3c7031050bffa0ed4013111</element>
             <position>4</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>a76f460ac3c7031050bffa0ed4013158</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>d9099c36c3134b9050bffa0ed4013170</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
-            <type>annotation</type>
+            <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>user_configurable_sort_order</element>
             <position>5</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>636f460ac3c7031050bffa0ed4013159</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>95099c36c3134b9050bffa0ed4013171</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
-            <sys_user/>
-            <type/>
-        </sys_ui_element>
-        <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>order</element>
-            <position>6</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>2f6f460ac3c7031050bffa0ed4013159</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_ui_formatter/>
-            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
-            <sys_user/>
-            <type/>
-        </sys_ui_element>
-        <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>filter_mode</element>
-            <position>7</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>e76f460ac3c7031050bffa0ed401315a</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_ui_formatter/>
-            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
-            <sys_user/>
-            <type/>
-        </sys_ui_element>
-        <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>.split</element>
-            <position>8</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>a36f460ac3c7031050bffa0ed401315b</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_ui_formatter/>
-            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
-            <sys_user/>
-            <type>.split</type>
-        </sys_ui_element>
-        <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>active</element>
-            <position>9</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>6f6f460ac3c7031050bffa0ed401315b</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_ui_formatter/>
-            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>order_by_column_name</element>
-            <position>10</position>
+            <position>6</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>2b6f460ac3c7031050bffa0ed401315c</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>51099c36c3134b9050bffa0ed4013172</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type/>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>order</element>
+            <position>7</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>1d099c36c3134b9050bffa0ed4013172</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type/>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>filter_mode</element>
+            <position>8</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>d5099c36c3134b9050bffa0ed4013173</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type/>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>.split</element>
+            <position>9</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>91099c36c3134b9050bffa0ed4013174</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type>.split</type>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>active</element>
+            <position>10</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>5d099c36c3134b9050bffa0ed4013174</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
@@ -209,13 +212,13 @@
             <element>.end_split</element>
             <position>11</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>e36f460ac3c7031050bffa0ed401315d</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>19099c36c3134b9050bffa0ed4013175</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type>.end_split</type>
         </sys_ui_element>
@@ -223,13 +226,13 @@
             <element>conditions_for_excluding_workloads</element>
             <position>12</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>af6f460ac3c7031050bffa0ed401315d</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>d1099c36c3134b9050bffa0ed4013176</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
@@ -237,13 +240,55 @@
             <element>conditions_for_creating_incidents</element>
             <position>13</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-02 07:55:10</sys_created_on>
-            <sys_id>6b6f460ac3c7031050bffa0ed401315e</sys_id>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>9d099c36c3134b9050bffa0ed4013176</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-02 07:55:10</sys_updated_on>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type/>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>restrict_unknown_workload_creation</element>
+            <position>14</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>59099c36c3134b9050bffa0ed4013177</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type/>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>conditions_for_unknown_workload_creation_limit</element>
+            <position>15</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>15099c36c3134b9050bffa0ed4013178</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
+            <sys_user/>
+            <type/>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>maximum_unknown_workload_creation</element>
+            <position>16</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-16 17:28:58</sys_created_on>
+            <sys_id>dd099c36c3134b9050bffa0ed4013178</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_config_class_mapping" sys_domain="global" view="Default view">2413a27097304210b7daf896f053af57</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-16 17:28:58</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>

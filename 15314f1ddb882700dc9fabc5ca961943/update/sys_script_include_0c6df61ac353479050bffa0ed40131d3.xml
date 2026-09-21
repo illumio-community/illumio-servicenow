@@ -1,0 +1,760 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioDiscoveryRepository</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioDiscoveryRepository</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioDiscoveryRepository = Class.create();
+IllumioDiscoveryRepository.prototype = {
+    // Maximum number of elements ServiceNow can safely take in a single IN clause
+    IN_CLAUSE_BATCH_SIZE: 500,
+
+    WORKLOAD_TABLE: "x_illu2_illumio_illumio_pce_workload",
+    WORKLOAD_FIELD_VALUE_TABLE: "x_illu2_illumio_illumio_pce_workload_field_value",
+    WORKLOAD_MAPPING_TABLE: "x_illu2_illumio_illumio_pce_workloads_mapping",
+    INCIDENT_MAPPING_TABLE: "x_illu2_illumio_illumio_incident_mapping",
+    LABELS_MAPPING_TABLE: "x_illu2_illumio_illumio_pce_labels_mapping",
+    LABEL_DIMENSION_TABLE: "x_illu2_illumio_illumio_label_dimension",
+    CLASS_FIELD_MAPPING_TABLE: "x_illu2_illumio_illumio_class_field_mapping",
+    JOB_TABLE: "x_illu2_illumio_illumio_scheduled_jobs",
+
+    /**
+     * Both dependencies are optional so the zero-argument construction used by every
+     * existing caller keeps working. Constructing here rather than lazily is safe only
+     * while IllumioDiscoveryUtils constructs nothing and IllumioUtils.initialize stays
+     * empty -- nothing reachable from either may construct this class back.
+     * @param {Object} [utils] IllumioUtils instance
+     * @param {Object} [discoveryUtils] IllumioDiscoveryUtils instance
+     */
+    initialize: function(utils, discoveryUtils) {
+        this.utils = utils || new IllumioUtils();
+        this.discoveryUtils = discoveryUtils || new IllumioDiscoveryUtils();
+    },
+
+    // ---- job & configuration ----
+
+    getMaxCiRecords: function() {
+        return gs.getProperty("x_illu2_illumio.maximum_ci_records") || 25000;
+    },
+
+    getConfigurationId: function(jobId) {
+        return this.utils.getConfigurationId(jobId);
+    },
+
+    getPceConfiguration: function(pceConfigId) {
+        return new IllumioGetPCEConfiguration().getConfiguration(pceConfigId);
+    },
+
+    /**
+     * Detect post-sync discovery from the job's initial log marker
+     * @param {String} jobId sys_id of the scheduled job
+     * @returns {Boolean} true when this run was triggered after a sync
+     */
+    isPostSyncJob: function(jobId) {
+        var jobGr = new GlideRecordSecure(this.JOB_TABLE);
+        jobGr.get(jobId);
+        return (jobGr.getValue("logs") || "").indexOf("[POST_SYNC]") !== -1;
+    },
+
+    /**
+     * Append a line to the job log. updateJobRecord stays in IllumioUtils because the
+     * async-polling business rule and IllumioAutoSyncWithPCE also call it.
+     * @param {String} jobId sys_id of the scheduled job
+     * @param {String} message Log line
+     */
+    log: function(jobId, message) {
+        this.utils.updateJobRecord(jobId, {
+            logs: message
+        });
+    },
+
+    /**
+     * Write arbitrary fields to the job record. For the two phase transitions that set
+     * current_operation or job_type alongside the log line and so fit neither log nor
+     * failJob nor completeJob. Prefer those three where they apply.
+     * @param {String} jobId sys_id of the scheduled job
+     * @param {Object} content Field name to value
+     */
+    updateJob: function(jobId, content) {
+        this.utils.updateJobRecord(jobId, content);
+    },
+
+    /**
+     * Mark the job failed. Replaces six duplicated failure blocks in the orchestrator.
+     * @param {String} jobId sys_id of the scheduled job
+     * @param {String} message Log line explaining the failure
+     */
+    failJob: function(jobId, message) {
+        this.utils.updateJobRecord(jobId, {
+            logs: message,
+            current_operation: "Mapping Discovery",
+            job_status: "failed",
+            job_completed: new GlideDateTime(),
+        });
+    },
+
+    /**
+     * Mark the job completed
+     * @param {String} jobId sys_id of the scheduled job
+     * @param {String} message Completion message, used as both log line and current operation
+     */
+    completeJob: function(jobId, message) {
+        this.utils.updateJobRecord(jobId, {
+            logs: message,
+            current_operation: message,
+            job_status: "completed",
+            job_completed: new GlideDateTime(),
+        });
+    },
+
+    /**
+     * Has the user cancelled this job?
+     *
+     * One get on the job table by sys_id, so it is cheap enough to call at a window or
+     * delete-batch boundary -- roughly once every ten seconds of work -- but not per record.
+     * Callers with no job (the preview UI action, background scripts) pass nil and are never
+     * cancellable.
+     * @param {String} jobId sys_id of the scheduled job, nil when there is no job
+     * @returns {Boolean} true when the job has been cancelled
+     */
+    isCancelled: function(jobId) {
+        if (gs.nil(jobId)) {
+            return false;
+        }
+
+        return this.utils.isJobCancelled(jobId);
+    },
+
+    /**
+     * Record where a cancelled run stopped and close the job out.
+     * Goes through finalizeCancelledJob rather than log/completeJob because updateJobRecord
+     * drops every write once the job is cancelled -- see IllumioUtils.finalizeCancelledJob.
+     * @param {String} jobId sys_id of the scheduled job
+     * @param {String} message Final log line
+     */
+    cancelJob: function(jobId, message) {
+        this.utils.finalizeCancelledJob(jobId, message);
+    },
+
+    /**
+     * Hand off to the PCE sync. Constructed lazily on purpose: IllumioAutoSyncWithPCE
+     * constructs IllumioUtils back, and the existing codebase relies on that cycle
+     * staying lazy rather than running at initialize time.
+     * @param {String} jobId sys_id of the scheduled job
+     */
+    runAutoSync: function(jobId) {
+        new IllumioAutoSyncWithPCE().process(jobId);
+    },
+
+    /**
+     * Build a GlideFilter for one of the class mapping's CMDB-side conditions.
+     *
+     * Was buildIncidentConditionFilter; generalised when the unknown-workload gate needed
+     * the same construction. The body is unchanged apart from taking the filter's name.
+     *
+     * @param {String} condition Encoded query condition, nil when none is configured
+     * @param {String} filterName Name given to the GlideFilter, for platform logging
+     * @returns {GlideFilter|null} Filter, or null when no condition is set
+     */
+    buildConditionFilter: function(condition, filterName) {
+        if (gs.nil(condition)) {
+            return null;
+        }
+        var conditionFilter = new GlideFilter(condition, filterName);
+
+        // IS_CASE_SENSITIVE is a system property and therefore a STRING, not a boolean
+        if (IS_CASE_SENSITIVE == "false") {
+            conditionFilter.setCaseSensitive(false);
+        }
+        return conditionFilter;
+    },
+
+    // ---- moved from IllumioUtils ----
+    // These are NOT delegates. The originals are deleted from IllumioUtils, because no
+    // caller outside the discovery flow referenced them. Bodies are unchanged apart from
+    // the rewiring noted on each.
+
+    /**
+     * Delete the previous discovery run's data for a PCE Configuration, one table at a time.
+     * Each table is logged separately so the job record shows which step is running and how long it took.
+     * Moved from IllumioUtils:1617. Rewired: STALE_DISCOVERY_DATA now lives on
+     * IllumioDiscoveryUtils, the log string is now a formatter, and updateJobRecord is
+     * reached through this.utils since it stays shared.
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @param {String} jobId sys_id of the scheduled job to log against
+     */
+    deleteStaleDiscoveryData: function(pceConfigId, jobId) {
+        var steps = this.discoveryUtils.STALE_DISCOVERY_DATA;
+
+        for (var index = 0; index < steps.length; index++) {
+            if (this.isCancelled(jobId)) {
+                return;
+            }
+
+            var step = steps[index];
+            var stepStartTime = Date.now();
+
+            if (step.batched) {
+                this._deleteStaleInBatches(step, pceConfigId, jobId);
+            } else {
+                this._staleDeleteRecord(step, pceConfigId, false);
+            }
+
+            this.log(jobId, this.discoveryUtils.formatDeletionLog(step.label, Date.now() - stepStartTime));
+        }
+    },
+
+    /**
+     * Clear one stale-data table in DELETE_BATCH_SIZE chunks, logging progress after each.
+     *
+     * Progress is assumed rather than measured. _staleDeleteRecord is a plain GlideRecord
+     * delete -- no ACLs, no business rules, nothing to veto it -- so a call that returns
+     * without throwing has removed its batch. Counting after every batch to confirm that
+     * would be guarding against a broken platform, and the unbatched steps in this same list
+     * never did.
+     *
+     * One thing to know when reading a job log: deleteMultiple has been seen on this instance
+     * to ignore the setLimit and clear the whole matched set in one call. The later batches
+     * then delete nothing while their lines still count up to the total. The giveaway is the
+     * timing -- milliseconds each, against the first batch's seconds.
+     *
+     * @param {Object} step Entry from STALE_DISCOVERY_DATA
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @param {String} jobId sys_id of the scheduled job to log against
+     */
+    _deleteStaleInBatches: function(step, pceConfigId, jobId) {
+        var total = this._countStaleRows(step, pceConfigId);
+
+        this.log(jobId, this.discoveryUtils.formatDeletionStartLog(step.label));
+        this.log(jobId, this.discoveryUtils.formatDeletionTotalLog(total));
+
+        // Exact, not a ceiling: each pass clears one batch, so this is how many it takes.
+        var batches = Math.ceil(total / this.discoveryUtils.DELETE_BATCH_SIZE);
+        var deleted = 0;
+
+        for (var batch = 1; batch <= batches; batch++) {
+            var batchStartTime = Date.now();
+            
+            if (this.isCancelled(jobId)) {
+                gs.info('[IllumioDiscoveryRepository] Job ' + jobId + ' cancelled; stopped deleting ' +
+                    step.label + ' after ' + deleted + ' of ' + total + ' records.');
+                return;
+            }
+
+            this._staleDeleteRecord(step, pceConfigId, true);
+            deleted = Math.min(deleted + this.discoveryUtils.DELETE_BATCH_SIZE, total);
+
+            this.log(jobId, this.discoveryUtils.formatDeletionBatchLog(
+                batch, deleted, total, Date.now() - batchStartTime));
+        }
+    },
+
+    /**
+     * GlideRecord positioned on one stale-data step's rows, ready to delete.
+     * GlideRecord rather than GlideRecordSecure: this is a system operated call clearing the
+     * app's own data, so ACLs would not matter and cost per row.
+     * @param {Object} step Entry from STALE_DISCOVERY_DATA
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @returns {GlideRecord} Queried record, not yet deleted
+     */
+    _staleDeleteRecord: function(step, pceConfigId, limit) {
+        var gr = new GlideRecord(step.table);
+        gr.setWorkflow(false);
+        gr.autoSysFields(false);
+        gr.addQuery(step.configField, pceConfigId);
+        if (limit) {
+            gr.setLimit(this.discoveryUtils.DELETE_BATCH_SIZE);
+        }
+        gr.deleteMultiple();
+    },
+
+    /**
+     * Rows still matching a stale-data step.
+     * @param {Object} step Entry from STALE_DISCOVERY_DATA
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @returns {Number} Row count
+     */
+    _countStaleRows: function(step, pceConfigId) {
+        var ga = new GlideAggregate(step.table);
+        ga.addAggregate("COUNT");
+        ga.addQuery(step.configField, pceConfigId);
+        ga.query();
+
+        return ga.next() ? (parseInt(ga.getAggregate("COUNT"), 10) || 0) : 0;
+    },
+
+    /**
+     * Count the CMDB records discovery will page through for a table.
+     * Only DB-level filters are applied, so for exclusion_legacy this is an upper bound —
+     * records dropped by the in-memory GlideFilter are still counted here. The number of
+     * windows is exact either way, since pagination happens at DB level.
+     * Moved verbatim from IllumioUtils:1644.
+     * @param {String} sourceTable CMDB table name
+     * @param {String} filterMode 'inclusion' or 'exclusion_legacy'
+     * @param {String} condition Encoded query condition string
+     * @param {Number} maxRecords Maximum records discovery will process
+     * @returns {Number} Record count, capped at maxRecords
+     */
+    countFilteredCMDBRecords: function(sourceTable, filterMode, condition, maxRecords) {
+        var countGa = new GlideAggregate(sourceTable);
+        this.applyDiscoveryFilter(countGa, filterMode, condition);
+        countGa.addAggregate('COUNT');
+        countGa.query();
+
+        var total = 0;
+        if (countGa.next()) {
+            total = parseInt(countGa.getAggregate('COUNT'), 10) || 0;
+        }
+
+        return Math.min(total, parseInt(maxRecords, 10));
+    },
+
+    /**
+     * Apply discovery filter condition to a GlideRecord based on filter mode.
+     * For inclusion/exclusion_optimized, adds an encoded query to the GlideRecord (DB-level).
+     * For exclusion_legacy, returns a GlideFilter for in-memory evaluation.
+     * Moved from IllumioUtils:1667; the GlideFilter construction is unchanged.
+     * @param {GlideRecord} gr GlideRecord to apply the filter to
+     * @param {String} filterMode 'inclusion' or 'exclusion_legacy'
+     * @param {String} condition Encoded query condition string
+     * @returns {GlideFilter|null} GlideFilter for legacy mode, null for inclusion
+     */
+    applyDiscoveryFilter: function(gr, filterMode, condition) {
+        if (gs.nil(condition)) {
+            return null;
+        }
+        if (filterMode === 'inclusion') {
+            gr.addEncodedQuery(condition);
+            return null;
+        }
+        var excludeFilter = new GlideFilter(condition, "excludeConditionFilter");
+        if (IS_CASE_SENSITIVE == "false") {
+            excludeFilter.setCaseSensitive(false);
+        }
+        return excludeFilter;
+    },
+
+    /**
+     * Iterate over CMDB records with discovery filter mode and batched pagination.
+     * Applies DB-level or in-memory filtering based on filterMode, then calls
+     * the callback for each record that passes the filter.
+     * Moved from IllumioUtils:1696. Rewired: DISCOVERY_WINDOW_SIZE now lives on
+     * IllumioDiscoveryUtils. Callers are the discovery orchestrator and the
+     * "Preview Discovery Filter Mode" UI action.
+     * @param {String} sourceTable CMDB table name (e.g. 'cmdb_ci_server')
+     * @param {String} filterMode 'inclusion' or 'exclusion_legacy'
+     * @param {String} condition Encoded query condition string
+     * @param {Number} maxRecords Maximum records to process
+     * @param {Function} callback Called with (GlideRecord) for each passing record. Return false to stop iteration.
+     * @param {Object} [options] Optional config: { sortField: String, sortOrder: 'ASC'|'DESC', onWindowComplete: Function }
+     *   onWindowComplete is called with (windowNumber, windowCount) once every window has been consumed,
+     *   allowing the caller to flush anything it buffered for that window.
+     * @returns {Object} { fetchedCount: Number, excludedCount: Number }
+     */
+    iterateFilteredCMDBRecords: function(sourceTable, filterMode, condition, maxRecords, callback, options) {
+        options = options || {};
+        var gr = new GlideRecord(sourceTable);
+        gr.setLimit(maxRecords);
+
+        var excludeFilter = this.applyDiscoveryFilter(gr, filterMode, condition);
+
+        if (options.sortField) {
+            if (options.sortOrder === 'ASC') {
+                gr.orderBy(options.sortField);
+            } else {
+                gr.orderByDesc(options.sortField);
+            }
+        }
+
+        var fetchedCount = 0;
+        var excludedCount = 0;
+        var recordIndex = 0;
+        var windowSize = this.discoveryUtils.DISCOVERY_WINDOW_SIZE;
+        var windowNumber = 0;
+
+        while (recordIndex < maxRecords) {
+            if (maxRecords - recordIndex >= windowSize)
+                gr.chooseWindow(recordIndex, recordIndex + windowSize);
+            else gr.chooseWindow(recordIndex, maxRecords);
+
+            gr.query();
+
+            if (!gr.hasNext()) {
+                break;
+            }
+
+            windowNumber++;
+            var windowCount = 0;
+
+            while (gr.next()) {
+                if (excludeFilter) {
+                    if (excludeFilter.match(gr, true)) {
+                        excludedCount++;
+                        continue;
+                    }
+                }
+
+                fetchedCount++;
+                windowCount++;
+                var shouldContinue = callback(gr);
+                if (shouldContinue === false) {
+                    if (options.onWindowComplete) {
+                        options.onWindowComplete(windowNumber, windowCount);
+                    }
+                    return {
+                        fetchedCount: fetchedCount,
+                        excludedCount: excludedCount
+                    };
+                }
+            }
+
+            if (options.onWindowComplete) {
+                options.onWindowComplete(windowNumber, windowCount);
+            }
+
+            recordIndex += windowSize;
+        }
+
+        return {
+            fetchedCount: fetchedCount,
+            excludedCount: excludedCount
+        };
+    },
+
+    /**
+     * Fetch label dimension sys_id. Moved verbatim from IllumioUtils:1047;
+     * the discovery orchestrator was its only caller.
+     * @param {String} labelDimensionKey key of the label dimension
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @returns {String} sys_id of the label dimension
+     */
+    fetchLabelDimensionSysId: function(labelDimensionKey, pceConfigId) {
+        var ldGr = new GlideRecordSecure(this.LABEL_DIMENSION_TABLE);
+        ldGr.addQuery("illumio_pce_configuration", pceConfigId);
+        ldGr.addQuery("key", labelDimensionKey);
+        ldGr.setLimit(1);
+        ldGr.query();
+        if (ldGr.next())
+            return ldGr.getUniqueValue();
+        return "";
+    },
+
+    // ---- discovery lookups ----
+
+    /**
+     * Resolve the PCE Workload Mappings for a whole window's short hostnames in chunked IN queries.
+     *
+     * Matches on hostname_part -- the PCE hostname up to its first dot, derived when the mapping
+     * table is built -- so a CMDB `wl-1` still reaches a PCE workload stored as `wl-1.corp.local`.
+     * That is the same set the per-workload query this replaced matched with
+     * `hostname=wl-1 OR hostname STARTSWITH wl-1.`; moving the prefix onto the stored side makes
+     * it an equality, which is what lets the lookup stay a batched IN.
+     *
+     * NOTE: chunk.join(",") builds the IN clause with no escaping, so a hostname containing
+     * a comma would corrupt it. Pre-existing behaviour, preserved deliberately.
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @param {Array} hostNameParts Short hostnames to look up
+     * @param {Boolean} isManaged true for managed, false for unmanaged
+     * @returns {Object} mapKey(short hostname) -> mapping object
+     */
+    findWorkloadMappings: function(pceConfigId, hostNameParts, isManaged) {
+        var mappings = {};
+        var exact = {};
+        var chunks = this.utils._chunkArray(hostNameParts, this.IN_CLAUSE_BATCH_SIZE);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            var gr = new GlideRecordSecure(this.WORKLOAD_MAPPING_TABLE);
+            gr.addQuery("illumio_pce_configuration", pceConfigId);
+            gr.addQuery("agent", isManaged);
+            gr.addQuery("hostname_part", "IN", chunks[chunkIndex].join(","));
+            gr.query();
+
+            while (gr.next()) {
+                var key = this.discoveryUtils.mapKey(gr.getValue("hostname_part"));
+
+                // wl-1.corp.local and wl-1.dev.local both reduce to wl-1, so one short hostname
+                // can return several rows. A workload stored under the bare short name is an
+                // exact match and always wins; among FQDN variants the first one does, as the
+                // setLimit(1) query this replaced did -- it had no orderBy, so its pick was
+                // arbitrary anyway.
+                // normalize, not a bare getValue: an empty hostname column reads back null,
+                // and a CMDB hostname of ".foo" is not nil, so it reaches the IN as "" and
+                // can match such a row -- null.indexOf would then fail the whole window.
+                var isExact = this.discoveryUtils.normalize(gr.getValue("hostname")).indexOf(".") === -1;
+                if (mappings[key] && (exact[key] || !isExact)) {
+                    continue;
+                }
+                exact[key] = isExact;
+
+                mappings[key] = {
+                    href: gr.getValue("href"),
+                    ven_href: gr.getValue("ven_href"),
+                    ven_status: gr.getValue("ven_status"),
+                    enforcement_mode: gr.getValue("enforcement_mode"),
+                    ven_version: gr.getValue("ven_version"),
+                    os_id: gr.getValue("os_id"),
+                    interfaces: gr.getValue("interfaces"),
+                    labels: gr.getValue("labels"),
+
+                    // "" rather than null, so the downstream != "null" check cannot
+                    // assign a null public IP onto the workload record
+                    public_ip: gr.getValue("public_ip") || ""
+                };
+            }
+        }
+
+        return mappings;
+    },
+
+    /**
+     * Resolve the Incident Mappings for a whole window's hostnames in chunked IN queries
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @param {Array} hostnames Hostnames to look up
+     * @returns {Object} incidentKey(hostname, href) -> incident sys_id
+     */
+    findIncidentMappings: function(pceConfigId, hostnames) {
+        var incidents = {};
+        var chunks = this.utils._chunkArray(hostnames, this.IN_CLAUSE_BATCH_SIZE);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            var gr = new GlideRecordSecure(this.INCIDENT_MAPPING_TABLE);
+            gr.addQuery("illumio_pce_configuration", pceConfigId);
+            gr.addQuery("hostname", "IN", chunks[chunkIndex].join(","));
+            gr.query();
+
+            while (gr.next()) {
+                var key = this.discoveryUtils.incidentKey(gr.getValue("hostname"), gr.getValue("href"));
+                if (!incidents[key]) {
+                    incidents[key] = gr.getValue("incident");
+                }
+            }
+        }
+
+        return incidents;
+    },
+
+    /**
+     * Single incident-mapping lookup, for the callers that never open a discovery window
+     * (the Create Incident UI action and the Populate Href business rule).
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @param {String} hostname Hostname of the workload
+     * @param {String} href PCE workload href, nil for an unknown workload
+     * @returns {String|undefined} incident sys_id when a mapping exists
+     */
+    findIncidentMapping: function(pceConfigId, hostname, href) {
+        var incidentMappingGr = new GlideRecordSecure(this.INCIDENT_MAPPING_TABLE);
+        incidentMappingGr.addQuery("illumio_pce_configuration", pceConfigId);
+        if (gs.nil(href)) {
+            incidentMappingGr.addNullQuery("href");
+        } else {
+            incidentMappingGr.addQuery("href", href);
+        }
+        incidentMappingGr.addQuery("hostname", hostname);
+        incidentMappingGr.setLimit(1);
+        incidentMappingGr.query();
+        if (incidentMappingGr.next()) {
+            return incidentMappingGr.getValue("incident");
+        }
+    },
+
+    /**
+     * Resolve a PCE label by href, one query per label.
+     * Kept as-is: this is the last remaining N+1 in the discovery flow
+     * (optimization-plan.md:166) but it is CORRECT. See findLabelMappingsByHref for the
+     * optional batched replacement.
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @param {String} href Label href from the PCE workload mapping
+     * @returns {Object|null} { key, value } when the label exists
+     */
+    findLabelMappingByHref: function(pceConfigId, href) {
+        var gr = new GlideRecordSecure(this.LABELS_MAPPING_TABLE);
+        gr.addQuery("illumio_pce_configuration", pceConfigId);
+        gr.addQuery("href", href);
+        gr.setLimit(1);
+        gr.query();
+        if (gr.next()) {
+            return {
+                key: gr.getValue("key"),
+                value: gr.getValue("value")
+            };
+        }
+        return null;
+    },
+
+    /**
+     * OPTIONAL / performance only -- not wired in by the core refactor.
+     * One chunked IN query for a whole window's label hrefs, replacing the per-label
+     * query above. Closes the last N+1 (~20,000 queries -> ~40). The existing
+     * per-label code is correct; this is purely a speed change.
+     * @param {String} pceConfigId sys_id of the PCE Configuration
+     * @param {Array} hrefs Label hrefs to look up
+     * @returns {Object} href -> { key, value }
+     */
+    findLabelMappingsByHref: function(pceConfigId, hrefs) {
+        var labels = {};
+        var chunks = this.utils._chunkArray(hrefs, this.IN_CLAUSE_BATCH_SIZE);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            var gr = new GlideRecordSecure(this.LABELS_MAPPING_TABLE);
+            gr.addQuery("illumio_pce_configuration", pceConfigId);
+            gr.addQuery("href", "IN", chunks[chunkIndex].join(","));
+            gr.query();
+
+            while (gr.next()) {
+                var href = gr.getValue("href");
+                if (!labels.hasOwnProperty(href)) {
+                    labels[href] = {
+                        key: gr.getValue("key"),
+                        value: gr.getValue("value")
+                    };
+                }
+            }
+        }
+
+        return labels;
+    },
+
+    // ---- writes ----
+
+    newWorkloadRecord: function() {
+        var gr = new GlideRecordSecure(this.WORKLOAD_TABLE);
+        gr.initialize();
+        return gr;
+    },
+
+    /**
+     * Copy a plain field map onto a GlideRecord
+     * @param {GlideRecord} gr Target record
+     * @param {Object} row Field name to value
+     * @returns {GlideRecord} The same record, for chaining
+     */
+    applyValues: function(gr, row) {
+        for (var field in row) {
+            if (row.hasOwnProperty(field)) {
+                gr.setValue(field, row[field]);
+            }
+        }
+        return gr;
+    },
+
+    insertRecord: function(gr) {
+        return gr.insert();
+    },
+
+    /**
+     * Insert the PCE Workload Field Value rows for one workload
+     * @param {Array} rows Field maps from IllumioDiscoveryUtils.buildFieldValueRows
+     */
+    insertWorkloadFieldValues: function(rows) {
+        for (var index = 0; index < rows.length; index++) {
+            var gr = new GlideRecordSecure(this.WORKLOAD_FIELD_VALUE_TABLE);
+            gr.initialize();
+            this.applyValues(gr, rows[index]);
+            gr.insert();
+        }
+    },
+
+    /**
+     * Create or update the incident for a workload.
+     * update() on an uninserted GlideRecord inserts, which is how a new incident is
+     * created here -- preserved from the original.
+     * @param {String} incidentSysId sys_id of an existing incident, nil to create one
+     * @param {Object} fields { short_description, description, cmdb_ci }
+     * @returns {String} sys_id of the incident
+     */
+    upsertIncident: function(incidentSysId, fields) {
+        var incidentGr = new GlideRecord("incident");
+        if (!incidentGr.get(incidentSysId)) {
+            incidentGr.initialize();
+        }
+        incidentGr.setValue("short_description", fields.short_description);
+        incidentGr.setValue("description", fields.description);
+        incidentGr.setValue("cmdb_ci", fields.cmdb_ci);
+        incidentGr.update();
+        return incidentGr.getUniqueValue();
+    },
+
+    /**
+     * Insert an Incident Mapping row. Replaces the undeclared implicit global the
+     * original used for this record, which leaked into Rhino's global scope and shared
+     * a name with a local in the Populate Href business rule.
+     * @param {Object} fields Field map for the mapping record
+     * @returns {String} sys_id of the inserted row
+     */
+    insertIncidentMapping: function(fields) {
+        var gr = new GlideRecordSecure(this.INCIDENT_MAPPING_TABLE);
+        gr.initialize();
+        this.applyValues(gr, fields);
+        return gr.insert();
+    },
+
+    // ---- CMDB field reads ----
+
+    /**
+     * Evaluate an advanced (script-based) class field mapping
+     * @param {GlideRecord} sourceGr GlideRecord of the CMDB table
+     * @param {Object} fieldMapping Object of Class Field Mapping
+     * @returns {Object} value from script
+     */
+    evaluateFieldScript: function(sourceGr, fieldMapping) {
+        try {
+            var fieldMappingGr = new GlideRecordSecure(this.CLASS_FIELD_MAPPING_TABLE);
+            if (fieldMappingGr.get(fieldMapping["mappingSysId"])) {
+                var evaluator = new GlideScopedEvaluator();
+                evaluator.putVariable('sourceGr', sourceGr);
+                evaluator.putVariable('answer', null);
+                evaluator.evaluateScript(fieldMappingGr, 'script', null);
+                return evaluator.getVariable('answer');
+            }
+        } catch (e) {
+            gs.error("[getValueFromScript] Error while fetching value from cmdb record", e);
+        }
+        return "";
+    },
+
+    /**
+     * Gets the value of the field that is having dot walking enable.
+     * @param {GlideRecord} sourceGr GlideRecord to get the field value from.
+     * @param {String} fieldName Name of the field to get the value from.
+     * @returns {String} Value of the field.
+     */
+    readDotWalkableField: function(sourceGr, fieldName) {
+        try {
+            if (gs.nil(sourceGr) || gs.nil(fieldName)) return "";
+            var dotWalkableFieldArray = fieldName.split(".");
+            var tempGR = sourceGr; //to use the temporary variable to avoid changing into the existing one
+            var fIndex;
+            for (fIndex = 0; fIndex < dotWalkableFieldArray.length - 1; fIndex++) {
+                if (gs.nil(tempGR[dotWalkableFieldArray[fIndex]])) return "";
+                tempGR = tempGR[dotWalkableFieldArray[fIndex]].getRefRecord();
+                if (!tempGR.isValidRecord()) return "";
+            }
+            return tempGR[dotWalkableFieldArray[fIndex]] + "";
+        } catch (e) {
+            gs.error("[getValueFromDotWalkableField] Error while fetching value from cmdb record", e);
+        }
+        return "";
+    },
+
+    type: "IllumioDiscoveryRepository",
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-15 16:10:05</sys_created_on>
+        <sys_id>0c6df61ac353479050bffa0ed40131d3</sys_id>
+        <sys_mod_count>11</sys_mod_count>
+        <sys_name>IllumioDiscoveryRepository</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_0c6df61ac353479050bffa0ed40131d3</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-16 18:09:16</sys_updated_on>
+    </sys_script_include>
+</record_update>
