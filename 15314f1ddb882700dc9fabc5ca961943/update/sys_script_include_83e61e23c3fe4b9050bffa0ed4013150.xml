@@ -1,0 +1,742 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioTestUtils</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioTestUtils</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var IllumioTestUtils = Class.create();
+IllumioTestUtils.prototype = {
+    initialize: function() {},
+
+    constants: function() {
+        return {
+            pceConfigSysId: 'f926c944c316031050bffa0ed40131aa',
+            table: 'cmdb_ci_server',
+            prefix: '202607271619',
+            seedCount: 8000,
+            values: [
+              { field: 'os',          data: ['HP-UX', 'FreeBSD', 'z/OS', 'macOS'] },
+              { field: 'environment', data: ['Development', 'UAT', 'Pre-Prod', 'Sandbox'] },
+              { field: 'os_version',  data: ['11i v3', '14.1', '2.5', 'Ventura 13.4'] },
+              { field: 'os_domain',   data: ['corp.na', 'corp.mena', 'corp.anz', 'corp.nordic'] },
+              { field: 'cpu_type',    data: ['PA-RISC', 'AMD EPYC', 'IBM z16', 'Apple M2'] }
+            ]
+        };
+    },
+
+    /**
+     * Seed dummy CI records into a CMDB table for regression testing.
+     *
+     * Creates `count` records distributed evenly across batches. The number of
+     * batches is determined by the length of each `data` array in `values` (all
+     * must be the same length). Each batch gets `count / numBatches` records,
+     * with any remainder added to the first batches.
+     *
+     * Every record gets a unique hostname: `<prefix>-<NNN>` (zero-padded to 3+
+     * digits), which serves as the primary key for later querying and cleanup.
+     *
+     * Example:
+     *   seed('cmdb_ci_server', 100, 'regtest-REG-1720500000', [
+     *     { field: 'os',          data: ['Windows', 'Linux', 'macOS'] },
+     *     { field: 'environment', data: ['Production', 'Development', 'Staging'] }
+     *   ])
+     *   // Creates 100 CIs across 3 batches (34, 33, 33), each batch getting
+     *   // the corresponding os + environment combination.
+     *
+     * @param {String} table   - API name of the CI table (e.g. 'cmdb_ci_server')
+     * @param {Number} count   - Total number of records to create
+     * @param {String} prefix  - Hostname prefix for test isolation (e.g. 'regtest-REG-1720500000')
+     * @param {Array}  values  - Array of { field: String, data: String[] } objects.
+     *                           `field` is the column name on `table`.
+     *                           `data` is an array of values, one per batch.
+     *                           All `data` arrays must be the same length.
+     *
+     * @returns {Object} {
+     *   total:   Number,          // total records created
+     *   batches: [                 // one entry per batch
+     *     {
+     *       index:  Number,        // 0-based batch index
+     *       sysIds: String[],      // sys_ids of created records
+     *       values: Object         // { field: value } applied to this batch
+     *     }
+     *   ]
+     * }
+     *
+     * @throws {Error} if `values` is empty, `data` arrays differ in length,
+     *                  or `count` < number of batches
+     */
+    seed: function(table, count, prefix, values) {
+        if (!values || values.length === 0) {
+            throw new Error('values must be a non-empty array');
+        }
+
+        var numBatches = values[0].data.length;
+
+        for (var v = 0; v < values.length; v++) {
+            if (values[v].data.length !== numBatches) {
+                throw new Error(
+                    'All data arrays must be the same length. ' +
+                    '"' + values[v].field + '" has ' + values[v].data.length +
+                    ' entries but expected ' + numBatches
+                );
+            }
+        }
+
+        if (count < numBatches) {
+            throw new Error('count (' + count + ') must be >= number of batches (' + numBatches + ')');
+        }
+
+        var baseSize = Math.floor(count / numBatches);
+        var remainder = count % numBatches;
+        var padWidth = Math.max(3, String(count).length);
+        var globalIndex = 1;
+        var batches = [];
+
+        for (var b = 0; b < numBatches; b++) {
+            var batchSize = baseSize + (b < remainder ? 1 : 0);
+            var batchValues = {};
+            for (var vi = 0; vi < values.length; vi++) {
+                batchValues[values[vi].field] = values[vi].data[b];
+            }
+
+            var sysIds = [];
+            for (var i = 0; i < batchSize; i++) {
+                var hostname = prefix + '-' + this._zeroPad(globalIndex, padWidth);
+                var gr = new GlideRecord(table);
+                gr.initialize();
+                gr.setValue('name', hostname);
+
+                for (var field in batchValues) {
+                    gr.setValue(field, batchValues[field]);
+                }
+
+                var sysId = gr.insert();
+                if (sysId) {
+                    sysIds.push(sysId + '');
+                } else {
+                    gs.warn('[IllumioTestUtils.seed] Failed to insert record #' + globalIndex + ' into ' + table);
+                }
+
+                globalIndex++;
+            }
+
+            batches.push({
+                index: b,
+                sysIds: sysIds,
+                values: batchValues
+            });
+
+            gs.info('[IllumioTestUtils.seed] Batch ' + b + ': created ' + sysIds.length + ' records in ' + table);
+        }
+
+        var total = 0;
+        for (var t = 0; t < batches.length; t++) {
+            total += batches[t].sysIds.length;
+        }
+
+        gs.info('[IllumioTestUtils.seed] Done. Total: ' + total + ' records in ' + table + ' with prefix "' + prefix + '"');
+
+        return {
+            total: total,
+            batches: batches
+        };
+    },
+
+    /**
+     * Count records in a table whose `name` field starts with the given prefix.
+     *
+     * Useful for verifying that `seed()` created the expected number of records
+     * before running cleanup.
+     *
+     * @param {String} table  - API name of the table (e.g. 'cmdb_ci_server')
+     * @param {String} prefix - The hostname prefix used during seeding (e.g. 'regtest-seed-test')
+     * @returns {Number} count of matching records
+     */
+    count: function(table, prefix) {
+        var ga = new GlideAggregate(table);
+        ga.addQuery('name', 'STARTSWITH', prefix);
+        ga.addAggregate('COUNT');
+        ga.query();
+
+        var total = 0;
+        if (ga.next()) {
+            total = parseInt(ga.getAggregate('COUNT'), 10);
+        }
+
+        gs.info('[IllumioTestUtils.count] Found ' + total + ' records in ' + table + ' with prefix "' + prefix + '"');
+        return total;
+    },
+
+    /**
+     * Delete all records from a table whose `name` field starts with the given prefix.
+     *
+     * Intended for cleaning up records created by `seed()`. Deletes one record
+     * at a time (not bulk) so that business rules and cascading deletes fire normally.
+     *
+     * @param {String} table  - API name of the table (e.g. 'cmdb_ci_server')
+     * @param {String} prefix - The hostname prefix used during seeding (e.g. 'regtest-seed-test')
+     * @returns {Number} count of deleted records
+     */
+    cleanup: function(table, prefix) {
+        var gr = new GlideRecord(table);
+        gr.addQuery('name', 'STARTSWITH', prefix);
+        gr.query();
+
+        var deleted = 0;
+        while (gr.next()) {
+            gr.deleteRecord();
+            deleted++;
+        }
+
+        gs.info('[IllumioTestUtils.cleanup] Deleted ' + deleted + ' records from ' + table + ' with prefix "' + prefix + '"');
+        return deleted;
+    },
+
+    /**
+     * Validate that all workloads matched by active inclusion sync filters for a
+     * PCE Configuration have been successfully synced.
+     *
+     * Reads all active inclusion sync filters, calls getWorkloadsBySyncFilter for
+     * each, deduplicates the workload sys_ids, then checks every matched workload
+     * has conflicts=false and known_to_pce is 'managed' or 'unmanaged'.
+     *
+     * @param {String} pceConfigId - sys_id of the PCE Configuration record
+     * @returns {Object} {
+     *   passed:       Boolean,     // true if all matched workloads are synced correctly
+     *   total:        Number,      // total unique workloads matched across all filters
+     *   synced:       Number,      // workloads with conflicts=false and known_to_pce in (managed, unmanaged)
+     *   failures:     Array,       // details of each failing workload: { sys_id, hostname, conflicts, known_to_pce }
+     *   filterBreakdown: Array     // per-filter summary: { filterSysId, filterName, workloadCount }
+     * }
+     */
+    validateSyncFilters: function(pceConfigId) {
+        var utils = new IllumioUtils();
+        var result = {
+            passed: false,
+            total: 0,
+            synced: 0,
+            failures: [],
+            filterBreakdown: []
+        };
+
+        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        sfGr.addQuery('pce_configuration', pceConfigId);
+        sfGr.addQuery('type', 'inclusion');
+        sfGr.addQuery('active', true);
+        sfGr.query();
+
+        var allSysIds = {};
+
+        while (sfGr.next()) {
+            var filterSysId = sfGr.getUniqueValue();
+            var filterName = sfGr.getValue('name');
+
+            var filterResult = utils.getWorkloadsBySyncFilter(filterSysId);
+            var filterCount = 0;
+
+            if (filterResult.success) {
+                for (var i = 0; i < filterResult.workloads.length; i++) {
+                    var sysId = filterResult.workloads[i].sys_id;
+                    allSysIds[sysId] = true;
+                    filterCount++;
+                }
+            }
+
+            result.filterBreakdown.push({
+                filterSysId: filterSysId,
+                filterName: filterName,
+                workloadCount: filterCount
+            });
+
+            gs.info('[IllumioTestUtils.validateSyncFilters] Filter "' + filterName + '": ' + filterCount + ' workloads');
+        }
+
+        var uniqueSysIds = Object.keys(allSysIds);
+        result.total = uniqueSysIds.length;
+
+        if (uniqueSysIds.length === 0) {
+            gs.info('[IllumioTestUtils.validateSyncFilters] No workloads matched any inclusion filter');
+            result.passed = true;
+            return result;
+        }
+
+        var wlGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
+        wlGr.addQuery('sys_id', 'IN', uniqueSysIds.join(','));
+        wlGr.query();
+
+        while (wlGr.next()) {
+            var conflicts = wlGr.getValue('conflicts');
+            var knownToPce = wlGr.getValue('known_to_pce');
+
+            if (conflicts == 'false' && (knownToPce == 'managed' || knownToPce == 'unmanaged')) {
+                result.synced++;
+            } else {
+                result.failures.push({
+                    sys_id: wlGr.getUniqueValue(),
+                    hostname: wlGr.getValue('hostname'),
+                    conflicts: conflicts,
+                    known_to_pce: knownToPce
+                });
+            }
+        }
+
+        result.passed = result.failures.length === 0;
+
+        gs.info('[IllumioTestUtils.validateSyncFilters] Result: ' + result.synced + '/' + result.total + ' synced. ' +
+            (result.passed ? 'PASSED' : 'FAILED — ' + result.failures.length + ' workload(s) with issues'));
+
+        return result;
+    },
+
+    /**
+     * Validate sync filter behavior for a PCE Configuration after discovery+sync.
+     *
+     * Assesses BOTH sides of the filter boundary:
+     *   1. INCLUDED workloads (matched by any active inclusion filter) should have
+     *      been synced: conflicts=false, known_to_pce = 'managed' or 'unmanaged'.
+     *   2. EXCLUDED workloads (all other workloads for this config, not matched by
+     *      any filter) should be untouched: known_to_pce = 'unknown'.
+     *
+     * This two-sided check ensures the filter is both letting the right workloads
+     * through AND blocking the ones it should.
+     *
+     * @param {String} pceConfigId - sys_id of the PCE Configuration record
+     * @param {String} prefix     - Hostname prefix to scope the assessment to only
+     *                              seeded workloads (e.g. 'regtest-seed-test'). Only
+     *                              workloads whose hostname starts with this prefix
+     *                              are evaluated; all others are ignored.
+     * @returns {Object} {
+     *   passed:           Boolean,  // true only if BOTH included and excluded checks pass
+     *   included: {
+     *     total:          Number,   // unique workloads matched across all filters
+     *     synced:         Number,   // matched workloads correctly synced
+     *     failures:       Array     // matched workloads NOT synced: { sys_id, hostname, conflicts, known_to_pce }
+     *   },
+     *   excluded: {
+     *     total:          Number,   // workloads NOT matched by any filter
+     *     untouched:      Number,   // excluded workloads correctly left alone
+     *     failures:       Array     // excluded workloads that were synced when they shouldn't have been
+     *   },
+     *   filterBreakdown:  Array     // per-filter summary: { filterSysId, filterName, workloadCount }
+     * }
+     */
+    validateSyncFiltersFullAssessment: function(pceConfigId, prefix) {
+        var utils = new IllumioUtils();
+        var result = {
+            passed: false,
+            included: { total: 0, synced: 0, failures: [] },
+            excluded: { total: 0, untouched: 0, failures: [] },
+            filterBreakdown: []
+        };
+
+        // Step 1: Collect all workload sys_ids matched by inclusion filters
+        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        sfGr.addQuery('pce_configuration', pceConfigId);
+        sfGr.addQuery('type', 'inclusion');
+        sfGr.addQuery('active', true);
+        sfGr.query();
+
+        var includedSysIds = {};
+
+        while (sfGr.next()) {
+            var filterSysId = sfGr.getUniqueValue();
+            var filterName = sfGr.getValue('name');
+
+            var filterResult = utils.getWorkloadsBySyncFilter(filterSysId);
+            var filterCount = 0;
+
+            if (filterResult.success) {
+                for (var i = 0; i < filterResult.workloads.length; i++) {
+                    var wl = filterResult.workloads[i];
+                    if (wl.hostname && (wl.hostname + '').indexOf(prefix) === 0) {
+                        includedSysIds[wl.sys_id] = true;
+                        filterCount++;
+                    }
+                }
+            }
+
+            result.filterBreakdown.push({
+                filterSysId: filterSysId,
+                filterName: filterName,
+                workloadCount: filterCount
+            });
+
+            gs.info('[validateSyncFiltersFullAssessment] Filter "' + filterName + '": ' + filterCount + ' workloads');
+        }
+
+        // Step 2: Query workloads scoped to the prefix and split into included vs excluded
+        var allWlGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
+        allWlGr.addQuery('illumio_pce_configuration', pceConfigId);
+        allWlGr.addQuery('duplicate', false);
+        allWlGr.addQuery('hostname', 'STARTSWITH', prefix);
+        allWlGr.query();
+
+        while (allWlGr.next()) {
+            var wlSysId = allWlGr.getUniqueValue();
+            var hostname = allWlGr.getValue('hostname');
+            var conflicts = allWlGr.getValue('conflicts');
+            var knownToPce = allWlGr.getValue('known_to_pce');
+
+            if (includedSysIds[wlSysId]) {
+                // INCLUDED: should be synced (known_to_pce=managed|unmanaged, conflicts=false/0)
+                result.included.total++;
+                if ((knownToPce == 'managed' || knownToPce == 'unmanaged') && (conflicts == 'false' || conflicts == '0' || conflicts == false)) {
+                    result.included.synced++;
+                } else {
+                    result.included.failures.push({
+                        sys_id: wlSysId,
+                        hostname: hostname,
+                        conflicts: conflicts,
+                        known_to_pce: knownToPce
+                    });
+                }
+            } else {
+                // EXCLUDED: should be untouched (known_to_pce=unknown)
+                result.excluded.total++;
+                if (knownToPce == 'unknown') {
+                    result.excluded.untouched++;
+                } else {
+                    result.excluded.failures.push({
+                        sys_id: wlSysId,
+                        hostname: hostname,
+                        conflicts: conflicts,
+                        known_to_pce: knownToPce
+                    });
+                }
+            }
+        }
+
+        result.passed = result.included.failures.length === 0 && result.excluded.failures.length === 0;
+
+        gs.info('[validateSyncFiltersFullAssessment] INCLUDED: ' + result.included.synced + '/' + result.included.total + ' synced correctly');
+        gs.info('[validateSyncFiltersFullAssessment] EXCLUDED: ' + result.excluded.untouched + '/' + result.excluded.total + ' untouched correctly');
+        gs.info('[validateSyncFiltersFullAssessment] Result: ' + (result.passed ? 'PASSED' :
+            'FAILED — ' + result.included.failures.length + ' included not synced, ' +
+            result.excluded.failures.length + ' excluded wrongly synced'));
+
+        return result;
+    },
+
+    /**
+     * Extract config class mapping and field-to-label-dimension mapping for a
+     * given PCE config + table combination.
+     *
+     * Returns which CI fields are mapped to label dimensions (and their
+     * label_dimension sys_ids) so callers can decide whether to create label
+     * filter items or workload field filter items.
+     *
+     * @param {String} pceConfigId - sys_id of the PCE Configuration
+     * @param {String} table       - CMDB source table (e.g. 'cmdb_ci_server')
+     * @returns {Object|null} null if no mapping found, otherwise:
+     *   {
+     *     classMappingSysId: String,
+     *     labelFields: {
+     *       '<fieldName>': { labelDimensionSysId: String, sysDictSysId: String },
+     *       ...
+     *     }
+     *   }
+     */
+    getConfigFieldMappings: function(pceConfigId, table) {
+        var configClassGr = new GlideRecord('x_illu2_illumio_illumio_config_class_mapping');
+        configClassGr.addQuery('illumio_pce_configuration', pceConfigId);
+        configClassGr.addQuery('source_table', table);
+        configClassGr.addActiveQuery();
+        configClassGr.query();
+
+        if (!configClassGr.next()) {
+            gs.warn('[IllumioTestUtils.getConfigFieldMappings] No config class mapping for table ' + table);
+            return null;
+        }
+
+        var classMappingSysId = configClassGr.getUniqueValue();
+        var labelFields = {};
+
+        var mappingGr = new GlideRecord('x_illu2_illumio_illumio_class_field_mapping');
+        mappingGr.addQuery('illumio_config_class_mapping', classMappingSysId);
+        mappingGr.addQuery('type', 'label_dimension');
+        mappingGr.addQuery('advanced', false);
+        mappingGr.addActiveQuery();
+        mappingGr.query();
+
+        while (mappingGr.next()) {
+            var fieldName = mappingGr.getValue('ci_field');
+            if (gs.nil(fieldName)) continue;
+
+            labelFields[fieldName] = {
+                labelDimensionSysId: mappingGr.getValue('illumio_label_dimension')
+            };
+        }
+
+        gs.info('[IllumioTestUtils.getConfigFieldMappings] Found ' +
+            Object.keys(labelFields).length + ' label-mapped fields for ' + table);
+
+        return {
+            classMappingSysId: classMappingSysId,
+            labelFields: labelFields
+        };
+    },
+
+    /**
+     * Resolve the sys_dictionary sys_id for a given table + field name.
+     *
+     * Walks up the table hierarchy (cmdb_ci_server → cmdb_ci_computer →
+     * cmdb_ci → ...) because fields like 'os' are defined on parent tables.
+     *
+     * @param {String} table   - Starting table name (e.g. 'cmdb_ci_server')
+     * @param {String} element - Column/field name (e.g. 'os')
+     * @returns {String|null} sys_id from sys_dictionary, or null if not found
+     */
+    getSysDictionarySysId: function(table, element) {
+        var currentTable = table;
+        while (!gs.nil(currentTable)) {
+            var dictGr = new GlideRecord('sys_dictionary');
+            dictGr.addQuery('name', currentTable);
+            dictGr.addQuery('element', element);
+            dictGr.query();
+            if (dictGr.next()) {
+                return dictGr.getUniqueValue();
+            }
+
+            var tblGr = new GlideRecord('sys_db_object');
+            tblGr.addQuery('name', currentTable);
+            tblGr.query();
+            if (tblGr.next() && !gs.nil(tblGr.getValue('super_class'))) {
+                currentTable = tblGr.super_class.name + '';
+            } else {
+                currentTable = null;
+            }
+        }
+
+        gs.warn('[IllumioTestUtils.getSysDictionarySysId] No sys_dictionary entry for ' + table + '.' + element);
+        return null;
+    },
+
+    /**
+     * Create a complete sync filter with groups and filter items, derived
+     * automatically from the PCE config's class/field mappings and the
+     * provided values array.
+     *
+     * Creates one group per batch (values[0].data.length groups). Each group
+     * gets one filter item per field. If a field is label-mapped in the PCE
+     * config, a label filter item is created; otherwise a workload field
+     * filter item is created.
+     *
+     * @param {String} pceConfigId - sys_id of the PCE Configuration
+     * @param {String} table       - CMDB source table (e.g. 'cmdb_ci_server')
+     * @param {String} prefix      - Test prefix (used for naming filter/groups)
+     * @param {String} type        - 'inclusion' or 'deletion'
+     * @param {Array}  values      - Same format as seed(): [{ field, data[] }]
+     * @returns {Object} {
+     *   syncFilterSysId: String,
+     *   groupCount:      Number,
+     *   labelItemCount:  Number,
+     *   fieldItemCount:  Number,
+     *   groups:          Array  // [{ sysId, name, items: [{type, field, value}] }]
+     * }
+     */
+    createSyncFilter: function(pceConfigId, table, prefix, type, values) {
+        if (!values || values.length === 0) {
+            throw new Error('values must be a non-empty array');
+        }
+
+        var numGroups = values[0].data.length;
+        for (var v = 0; v < values.length; v++) {
+            if (values[v].data.length !== numGroups) {
+                throw new Error('All data arrays must be the same length');
+            }
+        }
+
+        var mappings = this.getConfigFieldMappings(pceConfigId, table);
+        if (!mappings) {
+            throw new Error('No config class mapping found for table ' + table);
+        }
+
+        // Pre-resolve sys_dictionary sys_ids for non-label fields
+        var sysDictCache = {};
+        for (var vi = 0; vi < values.length; vi++) {
+            var field = values[vi].field;
+            if (!mappings.labelFields[field]) {
+                sysDictCache[field] = this.getSysDictionarySysId(table, field);
+                if (!sysDictCache[field]) {
+                    throw new Error('No sys_dictionary entry found for ' + table + '.' + field);
+                }
+            }
+        }
+
+        // Create sync filter
+        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        sfGr.initialize();
+        sfGr.setValue('name', prefix + '-filter');
+        sfGr.setValue('pce_configuration', pceConfigId);
+        sfGr.setValue('type', type);
+        sfGr.setValue('active', true);
+        var sfSysId = sfGr.insert();
+
+        if (!sfSysId) {
+            throw new Error('Failed to create sync filter');
+        }
+
+        gs.info('[IllumioTestUtils.createSyncFilter] Created sync filter: ' + sfSysId);
+
+        var groups = [];
+        var totalLabelItems = 0;
+        var totalFieldItems = 0;
+
+        for (var g = 0; g < numGroups; g++) {
+            var groupGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter_group');
+            groupGr.initialize();
+            groupGr.setValue('name', prefix + '-group-' + g);
+            groupGr.setValue('sync_filter', sfSysId);
+            groupGr.setValue('active', true);
+            var groupSysId = groupGr.insert();
+
+            var items = [];
+
+            for (var fi = 0; fi < values.length; fi++) {
+                var fld = values[fi].field;
+                var val = values[fi].data[g];
+
+                if (mappings.labelFields[fld]) {
+                    var lfiGr = new GlideRecord('x_illu2_illumio_illumio_label_filter_item');
+                    lfiGr.initialize();
+                    lfiGr.setValue('illumio_sync_filter', sfSysId);
+                    lfiGr.setValue('sync_filter_group', groupSysId);
+                    lfiGr.setValue('label_dimension', mappings.labelFields[fld].labelDimensionSysId);
+                    lfiGr.setValue('label_value', val);
+                    lfiGr.setValue('active', true);
+                    lfiGr.insert();
+                    totalLabelItems++;
+                    items.push({ type: 'label', field: fld, value: val });
+                } else {
+                    var wfGr = new GlideRecord('x_illu2_illumio_illumio_workload_field_filter_item');
+                    wfGr.initialize();
+                    wfGr.setValue('illumio_sync_filter', sfSysId);
+                    wfGr.setValue('sync_filter_group', groupSysId);
+                    wfGr.setValue('source_table', mappings.classMappingSysId);
+                    wfGr.setValue('source_field', sysDictCache[fld]);
+                    wfGr.setValue('source_value', val);
+                    wfGr.setValue('active', true);
+                    wfGr.insert();
+                    totalFieldItems++;
+                    items.push({ type: 'workload_field', field: fld, value: val });
+                }
+            }
+
+            groups.push({ sysId: groupSysId, name: prefix + '-group-' + g, items: items });
+        }
+
+        gs.info('[IllumioTestUtils.createSyncFilter] Created ' + numGroups + ' groups, ' +
+            totalLabelItems + ' label items, ' + totalFieldItems + ' field items');
+
+        return {
+            syncFilterSysId: sfSysId,
+            groupCount: numGroups,
+            labelItemCount: totalLabelItems,
+            fieldItemCount: totalFieldItems,
+            groups: groups
+        };
+    },
+
+    /**
+     * Delete a sync filter and all its child records (groups, label filter
+     * items, workload field filter items). Deletes bottom-up to respect
+     * referential integrity.
+     *
+     * @param {String} syncFilterSysId - sys_id of the sync filter to delete
+     * @returns {Object} { groups: Number, labelItems: Number, fieldItems: Number }
+     */
+    cleanupSyncFilter: function(syncFilterSysId) {
+        var counts = { groups: 0, labelItems: 0, fieldItems: 0 };
+
+        // Find all groups for this filter
+        var groupGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter_group');
+        groupGr.addQuery('sync_filter', syncFilterSysId);
+        groupGr.query();
+
+        var groupSysIds = [];
+        while (groupGr.next()) {
+            groupSysIds.push(groupGr.getUniqueValue());
+        }
+
+        // Delete label filter items for all groups
+        if (groupSysIds.length > 0) {
+            var lfiGr = new GlideRecord('x_illu2_illumio_illumio_label_filter_item');
+            lfiGr.addQuery('sync_filter_group', 'IN', groupSysIds.join(','));
+            lfiGr.query();
+            while (lfiGr.next()) {
+                lfiGr.deleteRecord();
+                counts.labelItems++;
+            }
+
+            // Delete workload field filter items for all groups
+            var wfGr = new GlideRecord('x_illu2_illumio_illumio_workload_field_filter_item');
+            wfGr.addQuery('sync_filter_group', 'IN', groupSysIds.join(','));
+            wfGr.query();
+            while (wfGr.next()) {
+                wfGr.deleteRecord();
+                counts.fieldItems++;
+            }
+
+            // Delete groups
+            var delGroupGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter_group');
+            delGroupGr.addQuery('sync_filter', syncFilterSysId);
+            delGroupGr.query();
+            while (delGroupGr.next()) {
+                delGroupGr.deleteRecord();
+                counts.groups++;
+            }
+        }
+
+        // Delete the sync filter itself
+        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        if (sfGr.get(syncFilterSysId)) {
+            sfGr.deleteRecord();
+        }
+
+        gs.info('[IllumioTestUtils.cleanupSyncFilter] Deleted: ' + counts.groups + ' groups, ' +
+            counts.labelItems + ' label items, ' + counts.fieldItems + ' field items');
+
+        return counts;
+    },
+
+    _zeroPad: function(num, width) {
+        var s = String(num);
+        while (s.length < width) {
+            s = '0' + s;
+        }
+        return s;
+    },
+
+    type: "IllumioTestUtils"
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-08-25 14:04:08</sys_created_on>
+        <sys_id>83e61e23c3fe4b9050bffa0ed4013150</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>IllumioTestUtils</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_83e61e23c3fe4b9050bffa0ed4013150</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-08-25 14:04:08</sys_updated_on>
+    </sys_script_include>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>83e61e23c3fe4b9050bffa0ed4013150</id>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-08-25 14:04:07</sys_created_on>
+        <sys_id>1a271663c3fe4b9050bffa0ed40131c7</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-08-25 14:04:07</sys_updated_on>
+        <table>sys_script_include</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>
