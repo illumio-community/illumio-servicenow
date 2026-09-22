@@ -25,6 +25,9 @@ var TABLE_API = "/api/now/table/";
 var SCHEDULED_JOB_TABLE = "x_illu2_illumio_illumio_scheduled_jobs";
 var ASYNC_JOB_TABLE = "x_illu2_illumio_illumio_pce_async_jobs";
 var AUTOSYNC_PAYLOAD_TABLE = "x_illu2_illumio_illumio_autosync_payload";
+// P0-1. Deletion carries its workloads in payload rows now rather than in the ECC message, the
+// same way auto sync already did.
+var DELETION_PAYLOAD_TABLE = "x_illu2_illumio_illumio_deletion_payload";
 var PCE_WORKLOADS_TABLE = "x_illu2_illumio_illumio_pce_workload";
 var PCE_WORKLOADS_MAPPING_TABLE = "x_illu2_illumio_illumio_pce_workloads_mapping";
 var PCE_LABELS_MAPPING_TABLE = "x_illu2_illumio_illumio_pce_labels_mapping";
@@ -39,14 +42,14 @@ var DEFAULT_RETRY_PARAMS = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>09d16579873dc550d7a34046cebb3592</sys_id>
-        <sys_mod_count>20</sys_mod_count>
+        <sys_mod_count>21</sys_mod_count>
         <sys_name>IllumioMIDConstants</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_09d16579873dc550d7a34046cebb3592</sys_update_name>
-        <sys_updated_by>hetang.modi</sys_updated_by>
-        <sys_updated_on>2025-01-29 08:09:29</sys_updated_on>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

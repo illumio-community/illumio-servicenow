@@ -357,102 +357,134 @@ IllumioUpdateWorkloads.prototype = {
                 var totalWorkloads = 0;
                 var skippedDeletion = parseInt(this.skipped) || 0;
 
-                var vensToUnpair = JSON.parse(this.vensToUnpair || '[]');
-                if (vensToUnpair.length > 0) {
-                    this.logger._debug("Unpairing " + vensToUnpair.length + " VEN(s) before deletion");
-                    totalWorkloads += vensToUnpair.length;
+                // P0-1: the workloads arrive in deletion payload rows now rather than inside
+                // the ECC message, which used to carry both lists as JSON and grew with the
+                // number of matched workloads. Rows are read and deleted one at a time, the same
+                // way the updateCreate branch above consumes autosync payload rows.
+                //
+                // Unpair and delete are disjoint sets -- a managed workload unpairs its VEN, an
+                // unmanaged one is deleted -- so doing both inside each row rather than all
+                // unpairs before all deletes reorders nothing that depends on the other.
+                var deletionRowSysIds = (this.payloadSysIds + '').split(',');
 
-                    var unpairUrl = "/api/v2/orgs/" + this.pceOrgId + "/vens/unpair";
-                    var unpairChunks = [];
-                    var ui;
-                    for (ui = 0; ui < vensToUnpair.length; ui += this.batchSize) {
-                        unpairChunks.push(vensToUnpair.slice(ui, ui + this.batchSize));
+                for (var pr = 0; pr < deletionRowSysIds.length; pr++) {
+                    var deletionRowSysId = deletionRowSysIds[pr];
+                    if (!deletionRowSysId) {
+                        continue;
                     }
 
-                    for (var ub = 0; ub < unpairChunks.length; ub++) {
-                        if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
-                            this.logger._debug("[unpair]: Job is cancelled");
-                            return;
-                        }
-
-                        jobContent = {
-                            logs: 'Unpairing VENs - batch ' + (ub + 1) + ' of ' + unpairChunks.length + ' (' + unpairChunks[ub].length + ' VENs)',
-                            current_operation: 'Unpairing VENs (batch ' + (ub + 1) + '/' + unpairChunks.length + ')'
-                        };
-                        this._updateJobRecord(this.jobSysId, jobContent);
-
-                        var unpairBody = {
-                            "vens": unpairChunks[ub].map(function(venHref) {
-                                return {"href": venHref};
-                            }),
-                            "firewall_restore": "default"
-                        };
-
-                        var unpairResponse = this.pceHttpClient.put(unpairUrl, '', null, unpairBody);
-                        if (unpairResponse.hasError) {
-                            this.logger._error("IllumioUpdateWorkloads: Failed to unpair VENs (batch " + (ub + 1) + "). Response status code: " + unpairResponse.status);
-                            jobContent = {
-                                job_status: 'failed',
-                                logs: 'Failed to unpair VENs (batch ' + (ub + 1) + '). Response status code: ' + unpairResponse.status,
-                                job_completed: this.snowDateFormat.format(new Date()) + ""
-                            };
-                            this._updateJobRecord(this.jobSysId, jobContent);
-                            return;
-                        }
-                        this.logger._debug("Successfully unpaired batch " + (ub + 1) + ": " + unpairChunks[ub].length + " VEN(s)");
-                        unpairedVens += unpairChunks[ub].length;
-                    }
-                }
-
-                var retiredWorkloads = JSON.parse(this.retiredWorkloads || '{}');
-                var allHref = [];
-                for (var hrefKey in retiredWorkloads) {
-                    allHref.push({"href": hrefKey});
-                }
-                totalWorkloads += allHref.length;
-
-                if (allHref.length > 0) {
-                    var deleteUrl = "/api/v2/orgs/" + this.pceOrgId + "/workloads/bulk_delete";
-                    var deleteChunks = [];
-                    var di;
-                    for (di = 0; di < allHref.length; di += this.batchSize) {
-                        deleteChunks.push(allHref.slice(di, di + this.batchSize));
+                    var grDeletionPayload = new GlideRecord(DELETION_PAYLOAD_TABLE);
+                    if (!grDeletionPayload.get(deletionRowSysId)) {
+                        this.logger._error(
+                            'Could not get the deletion payload having sys id: ' +
+                            deletionRowSysId
+                        );
+                        continue;
                     }
 
-                    var notDeletedWorkloads = 0;
-                    for (var db = 0; db < deleteChunks.length; db++) {
-                        if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
-                            this.logger._debug("[delete]: Job is cancelled");
-                            return;
+                    var deletionPayload = JSON.parse(grDeletionPayload.payload);
+                    this.snHttpClient.deleteMethod(
+                        TABLE_API + DELETION_PAYLOAD_TABLE + '/' + deletionRowSysId,
+                        ''
+                    );
+
+                    var vensToUnpair = deletionPayload.vensToUnpair || [];
+                    if (vensToUnpair.length > 0) {
+                        this.logger._debug("Unpairing " + vensToUnpair.length + " VEN(s) before deletion");
+                        totalWorkloads += vensToUnpair.length;
+
+                        var unpairUrl = "/api/v2/orgs/" + this.pceOrgId + "/vens/unpair";
+                        var unpairChunks = [];
+                        var ui;
+                        for (ui = 0; ui < vensToUnpair.length; ui += this.batchSize) {
+                            unpairChunks.push(vensToUnpair.slice(ui, ui + this.batchSize));
                         }
 
-                        jobContent = {
-                            logs: 'Deleting workloads from PCE - batch ' + (db + 1) + ' of ' + deleteChunks.length + ' (' + deleteChunks[db].length + ' workloads)',
-                            current_operation: 'Deleting workloads (batch ' + (db + 1) + '/' + deleteChunks.length + ')'
-                        };
-                        this._updateJobRecord(this.jobSysId, jobContent);
-
-                        var deleteResponse = this.pceHttpClient.put(deleteUrl, '', null, deleteChunks[db]);
-                        if (deleteResponse.hasError) {
-                            this.logger._error("IllumioUpdateWorkloads: Failed to delete workloads (batch " + (db + 1) + "). Response status code: " + deleteResponse.status);
-                            jobContent = {
-                                job_status: 'failed',
-                                logs: 'Failed to delete workloads (batch ' + (db + 1) + '). Response status code: ' + deleteResponse.status,
-                                job_completed: this.snowDateFormat.format(new Date()) + ""
-                            };
-                            this._updateJobRecord(this.jobSysId, jobContent);
-                            return;
-                        }
-
-                        if (deleteResponse.data && deleteResponse.data.length) {
-                            for (var dr = 0; dr < deleteResponse.data.length; dr++) {
-                                notDeletedWorkloads++;
-                                this.logger._error("IllumioUpdateWorkloads: Failed to delete workload: " + deleteResponse.data[dr]["href"]);
+                        for (var ub = 0; ub < unpairChunks.length; ub++) {
+                            if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+                                this.logger._debug("[unpair]: Job is cancelled");
+                                return;
                             }
+
+                            jobContent = {
+                                logs: 'Unpairing VENs - batch ' + (ub + 1) + ' of ' + unpairChunks.length + ' (' + unpairChunks[ub].length + ' VENs)',
+                                current_operation: 'Unpairing VENs (batch ' + (ub + 1) + '/' + unpairChunks.length + ')'
+                            };
+                            this._updateJobRecord(this.jobSysId, jobContent);
+
+                            var unpairBody = {
+                                "vens": unpairChunks[ub].map(function(venHref) {
+                                    return {"href": venHref};
+                                }),
+                                "firewall_restore": "default"
+                            };
+
+                            var unpairResponse = this.pceHttpClient.put(unpairUrl, '', null, unpairBody);
+                            if (unpairResponse.hasError) {
+                                this.logger._error("IllumioUpdateWorkloads: Failed to unpair VENs (batch " + (ub + 1) + "). Response status code: " + unpairResponse.status);
+                                jobContent = {
+                                    job_status: 'failed',
+                                    logs: 'Failed to unpair VENs (batch ' + (ub + 1) + '). Response status code: ' + unpairResponse.status,
+                                    job_completed: this.snowDateFormat.format(new Date()) + ""
+                                };
+                                this._updateJobRecord(this.jobSysId, jobContent);
+                                return;
+                            }
+                            this.logger._debug("Successfully unpaired batch " + (ub + 1) + ": " + unpairChunks[ub].length + " VEN(s)");
+                            unpairedVens += unpairChunks[ub].length;
                         }
-                        this.logger._debug("Delete batch " + (db + 1) + " complete: " + deleteChunks[db].length + " sent");
                     }
-                    deletedWorkloads = allHref.length - notDeletedWorkloads;
+
+                    var retiredWorkloads = deletionPayload.retiredWorkloads || {};
+                    var allHref = [];
+                    for (var hrefKey in retiredWorkloads) {
+                        allHref.push({"href": hrefKey});
+                    }
+                    totalWorkloads += allHref.length;
+
+                    if (allHref.length > 0) {
+                        var deleteUrl = "/api/v2/orgs/" + this.pceOrgId + "/workloads/bulk_delete";
+                        var deleteChunks = [];
+                        var di;
+                        for (di = 0; di < allHref.length; di += this.batchSize) {
+                            deleteChunks.push(allHref.slice(di, di + this.batchSize));
+                        }
+
+                        var notDeletedWorkloads = 0;
+                        for (var db = 0; db < deleteChunks.length; db++) {
+                            if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+                                this.logger._debug("[delete]: Job is cancelled");
+                                return;
+                            }
+
+                            jobContent = {
+                                logs: 'Deleting workloads from PCE - batch ' + (db + 1) + ' of ' + deleteChunks.length + ' (' + deleteChunks[db].length + ' workloads)',
+                                current_operation: 'Deleting workloads (batch ' + (db + 1) + '/' + deleteChunks.length + ')'
+                            };
+                            this._updateJobRecord(this.jobSysId, jobContent);
+
+                            var deleteResponse = this.pceHttpClient.put(deleteUrl, '', null, deleteChunks[db]);
+                            if (deleteResponse.hasError) {
+                                this.logger._error("IllumioUpdateWorkloads: Failed to delete workloads (batch " + (db + 1) + "). Response status code: " + deleteResponse.status);
+                                jobContent = {
+                                    job_status: 'failed',
+                                    logs: 'Failed to delete workloads (batch ' + (db + 1) + '). Response status code: ' + deleteResponse.status,
+                                    job_completed: this.snowDateFormat.format(new Date()) + ""
+                                };
+                                this._updateJobRecord(this.jobSysId, jobContent);
+                                return;
+                            }
+
+                            if (deleteResponse.data && deleteResponse.data.length) {
+                                for (var dr = 0; dr < deleteResponse.data.length; dr++) {
+                                    notDeletedWorkloads++;
+                                    this.logger._error("IllumioUpdateWorkloads: Failed to delete workload: " + deleteResponse.data[dr]["href"]);
+                                }
+                            }
+                            this.logger._debug("Delete batch " + (db + 1) + " complete: " + deleteChunks[db].length + " sent");
+                        }
+                        deletedWorkloads += allHref.length - notDeletedWorkloads;
+                    }
                 }
 
                 var failedWorkloads = totalWorkloads - deletedWorkloads - unpairedVens;
@@ -1108,7 +1140,7 @@ IllumioUpdateWorkloads.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>c4a87d4adb4c6700dc9fabc5ca96191c</sys_id>
-        <sys_mod_count>106</sys_mod_count>
+        <sys_mod_count>107</sys_mod_count>
         <sys_name>IllumioUpdateWorkloads</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -1116,6 +1148,6 @@ IllumioUpdateWorkloads.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_c4a87d4adb4c6700dc9fabc5ca96191c</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-08-25 11:30:26</sys_updated_on>
+        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

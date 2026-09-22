@@ -39,16 +39,26 @@ IllumioDiscoveryUtils.prototype = {
     // Tables cleared at the start of a discovery run, in deletion order.
     // Adding a table here adds a deletion log step automatically.
     //
+    // Every step is scoped to the PCE Configuration being discovered, never to the whole table.
+    // A run clears its own stale data and leaves every other configuration's alone.
+    //
     // `batched` splits the delete into DELETE_BATCH_SIZE chunks and logs progress after each
     // one. Without it the step is a single deleteMultiple that reports nothing until it
-    // finishes -- which on the workload table is minutes of apparent silence.
+    // finishes -- which on the workload table is minutes of apparent silence. The field value
+    // step is deliberately not batched yet.
     //
-    // Not set on the field value step on purpose: its configField dot-walks, so every batch
-    // would re-join the workload table, and the progress count would pay that join too.
+    // The field value step matches on its own illumio_pce_configuration column rather than
+    // dot-walking through illumio_pce_workload. The dot-walk was an inner join, so a row whose
+    // workload reference was empty or pointed at a deleted workload never matched and survived
+    // every subsequent run -- permanently, since nothing else can reach it either. The direct
+    // column has no such blind spot and no join.
+    //
+    // It depends on R5 having stamped the column. Rows written before R5 have it empty and are
+    // NOT reachable by this step; they are cleared once by the R15 fix script.
     STALE_DISCOVERY_DATA: [{
         label: "workload field value",
         table: "x_illu2_illumio_illumio_pce_workload_field_value",
-        configField: "illumio_pce_workload.illumio_pce_configuration"
+        configField: "illumio_pce_configuration"
     }, {
         label: "workload",
         table: "x_illu2_illumio_illumio_pce_workload",
@@ -667,13 +677,13 @@ IllumioDiscoveryUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>486df616c393479050bffa0ed40131f0</sys_id>
-        <sys_mod_count>11</sys_mod_count>
+        <sys_mod_count>12</sys_mod_count>
         <sys_name>IllumioDiscoveryUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_486df616c393479050bffa0ed40131f0</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+        <sys_updated_on>2026-09-22 08:05:50</sys_updated_on>
     </sys_script_include>
 </record_update>

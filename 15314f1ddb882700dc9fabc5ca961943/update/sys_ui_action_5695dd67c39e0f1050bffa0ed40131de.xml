@@ -72,11 +72,28 @@ if (typeof window === 'undefined') {
         var utils = new IllumioUtils();
         var payload = utils.prepareDeletionPayload(configSysId);
 
+        // P0-1 makes prepareDeletionPayload write rows to the deletion payload table, so from
+        // here on every path that does NOT dispatch has to withdraw them. Before P0-1 nothing
+        // was persisted until the ECC message was built and bailing out was free.
+        var withdrawPayload = function() {
+            var syncUtils = new IllumioSyncUtils();
+            var withdrawn = new IllumioSyncRepoUtils(syncUtils)
+                .deletePayloadRows(syncUtils.DELETION_PAYLOAD_TABLE, payload.payloadSysIds);
+            if (withdrawn > 0) {
+                gs.info('[StartWorkloadDeletion] Withdrew ' + withdrawn + ' payload record(s)');
+            }
+        };
+
         if (!payload.success) {
             gs.addErrorMessage(payload.message);
             action.setRedirectURL(redirectUrl);
         } else if (payload.cancelJob) {
+            // prepareDeletionPayload has already withdrawn its own rows in this case.
             gs.addErrorMessage(payload.message);
+            action.setRedirectURL(redirectUrl);
+        } else if (!payload.payloadSysIds || payload.payloadSysIds.length === 0) {
+            gs.addErrorMessage('No workloads are eligible for deletion or unpair. ' +
+                payload.message);
             action.setRedirectURL(redirectUrl);
         } else {
             // Check for running jobs
@@ -86,6 +103,7 @@ if (typeof window === 'undefined') {
             runningJobs.addAggregate('COUNT');
             runningJobs.query();
             if (runningJobs.next() && parseInt(runningJobs.getAggregate('COUNT')) > 0) {
+                withdrawPayload();
                 gs.addErrorMessage('Another job is already running for this PCE Configuration. Please wait for it to complete.');
                 action.setRedirectURL(redirectUrl);
             } else {
@@ -110,6 +128,7 @@ if (typeof window === 'undefined') {
                 var jobSysId = scheduledJobGr.insert();
 
                 if (gs.nil(jobSysId)) {
+                    withdrawPayload();
                     gs.addErrorMessage('Failed to create scheduled job for deletion.');
                     action.setRedirectURL(redirectUrl);
                 } else {
@@ -120,8 +139,11 @@ if (typeof window === 'undefined') {
                         operation: 'delete',
                         partialSucc: payload.thresholdExceeded ? 'true' : 'false',
                         skipped: payload.skippedCount + '',
-                        workloads_to_delete: JSON.stringify(payload.retiredWorkloads),
-                        vens_to_unpair: JSON.stringify(payload.vensToUnpair),
+                        // P0-1: the workloads themselves live in
+                        // x_illu2_illumio_illumio_deletion_payload now and the message carries
+                        // only the row sys_ids. It used to carry both lists as JSON, which grew
+                        // with the number of matched workloads inside a single ECC record.
+                        payloadSysIds: payload.payloadSysIds + '',
                         pce_url: pceConfig.pceUrl,
                         pce_secret: pceConfig.pceSecret,
                         pce_username: pceConfig.pceUsername,
@@ -140,6 +162,7 @@ if (typeof window === 'undefined') {
                     if (dispatched) {
                         gs.addInfoMessage('Deletion process started. ' + payload.deletionCount + ' workload(s) for deletion, ' + payload.unpairCount + ' for unpair. Track progress in Scheduled Jobs.');
                     } else {
+                        withdrawPayload();
                         scheduledJobGr.get(jobSysId);
                         scheduledJobGr.job_status = 'failed';
                         scheduledJobGr.job_completed = new GlideDateTime();
@@ -170,7 +193,7 @@ if (typeof window === 'undefined') {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>5695dd67c39e0f1050bffa0ed40131de</sys_id>
-        <sys_mod_count>19</sys_mod_count>
+        <sys_mod_count>20</sys_mod_count>
         <sys_name>Start Workload Deletion</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -178,7 +201,7 @@ if (typeof window === 'undefined') {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_5695dd67c39e0f1050bffa0ed40131de</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-08-03 14:57:54</sys_updated_on>
+        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_conf</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

@@ -382,16 +382,22 @@ IllumioSyncRepoUtils.prototype = {
      * @param {Array} sysIds Workload sys_ids, one batch, already within IN-clause limits
      * @param {String} encodedQuery Extra conditions, nil for none
      * @param {Function} callback Called with (GlideRecord) per workload
+     * @param {Boolean} [secure] Read through ACLs. The scheduled sync runs as the job and does
+     *   not, which is the default and what it always did; the deletion path is driven by a user
+     *   pressing a button and read through GlideRecordSecure before it moved onto this helper, so
+     *   it passes true rather than quietly widening what that user can destroy.
      * @returns {Number} Workloads visited
      */
-    eachWorkloadInBatch: function(sysIds, encodedQuery, callback) {
+    eachWorkloadInBatch: function(sysIds, encodedQuery, callback, secure) {
         var visited = 0;
 
         if (!sysIds || sysIds.length === 0) {
             return visited;
         }
 
-        var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+        var gr = secure ?
+            new GlideRecordSecure(this.syncUtils.WORKLOAD_TABLE) :
+            new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
         gr.addQuery("sys_id", "IN", sysIds.join(","));
         if (!gs.nil(encodedQuery)) {
             gr.addEncodedQuery(encodedQuery);
@@ -567,13 +573,13 @@ IllumioSyncRepoUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-21 12:40:54</sys_created_on>
         <sys_id>16070598c36387d050bffa0ed40131aa</sys_id>
-        <sys_mod_count>0</sys_mod_count>
+        <sys_mod_count>1</sys_mod_count>
         <sys_name>IllumioSyncRepoUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_16070598c36387d050bffa0ed40131aa</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
     </sys_script_include>
 </record_update>

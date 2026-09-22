@@ -1212,6 +1212,17 @@ IllumioUtils.prototype = {
      *   {Boolean}  applyThreshold  Enforce the configured workload/label creation limits
      *   {Object}   [wlLimitObject] Limit object, fetched when omitted
      *   {Function} appendRow       Called with (workloadObject) per surviving workload
+     *   {Function} [buildShell]    Builds one row object from its GlideRecord. Defaults to
+     *                              prepareWorkloadShell. Return null to drop the record -- that
+     *                              happens before threshold accounting, so an ineligible workload
+     *                              never spends budget.
+     *   {Boolean}  [skipLabelData] Skip the label pass entirely. The deletion path reads three
+     *                              columns off the record and never looks at a label, so without
+     *                              this it would pay two extra queries per chunk plus a
+     *                              selectLabelData call per workload to build maps it discards.
+     *   {String}   [operation]     Fixed threshold operation ("delete"). Defaults to create/update
+     *                              chosen per workload from known_to_pce.
+     *   {Boolean}  [secure]        Read the chunk through ACLs. The deletion path does.
      * @returns {Object} { processed, skippedCritical, skippedLimit, cancelJob, limitExceeded, logMessage }
      */
     runWorkloadChunks: function(params) {
@@ -1233,7 +1244,10 @@ IllumioUtils.prototype = {
         }
 
         var configSysId = params.pceConfigSysId;
-        var mappedFields = new IllumioGetPCEConfiguration().getMappedFields(configSysId);
+        // Only the default shell builder needs the field mappings; a caller supplying its own
+        // builder would be paying for a configuration read it never consults.
+        var mappedFields = params.buildShell ?
+            null : new IllumioGetPCEConfiguration().getMappedFields(configSysId);
         var criticalLabels = params.skipCriticalLabels ? this.getDataFromTable(configSysId) : {};
         var wlLimitObject = params.wlLimitObject ||
             new IllumioThresholdLimit().getThresholdLimit(configSysId);
@@ -1252,28 +1266,45 @@ IllumioUtils.prototype = {
 
             repo.eachWorkloadInBatch(chunks[chunkIndex], params.chunkQuery, function(workloadGr) {
                 try {
-                    shells.push(self.prepareWorkloadShell(workloadGr, mappedFields));
+                    var shell = params.buildShell ?
+                        params.buildShell(workloadGr) :
+                        self.prepareWorkloadShell(workloadGr, mappedFields);
+
+                    // A builder returns null for a record it wants dropped, and does its own
+                    // tallying. Dropping here rather than inside appendRow is what keeps the
+                    // eligibility test ahead of threshold accounting.
+                    if (!shell) {
+                        return;
+                    }
+
+                    shells.push(shell);
                     shellSysIds.push(workloadGr.getUniqueValue());
                 } catch (shellEx) {
                     gs.error('[runWorkloadChunks] Skipped workload ' + workloadGr.getUniqueValue() +
                         ': ' + shellEx);
                 }
-            });
+            }, params.secure);
 
             if (shells.length === 0) {
                 continue;
             }
 
-            // Pass two: the label half, in bulk for the whole chunk.
-            var labelValuesByWorkload = repo.getLabelValuesByWorkload(shellSysIds);
+            // Pass two: the label half, in bulk for the whole chunk. Skipped wholesale by callers
+            // that do not act on labels -- see skipLabelData.
+            var labelValuesByWorkload = {};
             var labelDataByWorkload = {};
-            for (var shellIndex = 0; shellIndex < shells.length; shellIndex++) {
-                labelDataByWorkload[shells[shellIndex].sys_id] = syncUtils.selectLabelData(
-                    labelValuesByWorkload[shells[shellIndex].sys_id] || {},
-                    shells[shellIndex].updateFields);
+            var hrefByPair = {};
+
+            if (!params.skipLabelData) {
+                labelValuesByWorkload = repo.getLabelValuesByWorkload(shellSysIds);
+                for (var shellIndex = 0; shellIndex < shells.length; shellIndex++) {
+                    labelDataByWorkload[shells[shellIndex].sys_id] = syncUtils.selectLabelData(
+                        labelValuesByWorkload[shells[shellIndex].sys_id] || {},
+                        shells[shellIndex].updateFields);
+                }
+                hrefByPair = repo.getLabelHrefsByPair(configSysId,
+                    syncUtils.collectLabelPairs(labelDataByWorkload));
             }
-            var hrefByPair = repo.getLabelHrefsByPair(configSysId,
-                syncUtils.collectLabelPairs(labelDataByWorkload));
 
             for (var index = 0; index < shells.length; index++) {
                 var workloadObject = shells[index];
@@ -1286,13 +1317,19 @@ IllumioUtils.prototype = {
                     continue;
                 }
 
-                workloadObject.label_data = labelDataByWorkload[workloadObject.sys_id];
-                var split = syncUtils.splitLabelsForSync(workloadObject.label_data, hrefByPair);
-                workloadObject.labels = split.labels;
-                workloadObject.createlabels = split.createlabels;
+                var createLabelCount = 0;
+
+                if (!params.skipLabelData) {
+                    workloadObject.label_data = labelDataByWorkload[workloadObject.sys_id];
+                    var split = syncUtils.splitLabelsForSync(workloadObject.label_data, hrefByPair);
+                    workloadObject.labels = split.labels;
+                    workloadObject.createlabels = split.createlabels;
+                    createLabelCount = split.createlabels.length;
+                }
 
                 if (params.applyThreshold) {
-                    var operation = operationByKind[workloadObject.known_to_pce];
+                    var operation = params.operation ||
+                        operationByKind[workloadObject.known_to_pce];
 
                     if (!syncUtils.hasOperationBudget(wlLimitObject, operation)) {
                         outcome.limitExceeded = true;
@@ -1305,7 +1342,7 @@ IllumioUtils.prototype = {
                         continue;
                     }
 
-                    if (!syncUtils.hasLabelCreationBudget(wlLimitObject, split.createlabels.length)) {
+                    if (!syncUtils.hasLabelCreationBudget(wlLimitObject, createLabelCount)) {
                         outcome.limitExceeded = true;
                         wlLimitObject["wlLimit"]["labelCreateLimitExceeded"] = true;
                         if (wlLimitObject.cancelJobOnLimitExceed) {
@@ -1316,7 +1353,7 @@ IllumioUtils.prototype = {
                         continue;
                     }
 
-                    syncUtils.consumeBudget(wlLimitObject, operation, split.createlabels.length);
+                    syncUtils.consumeBudget(wlLimitObject, operation, createLabelCount);
                 }
 
                 outcome.processed++;
@@ -2365,16 +2402,26 @@ IllumioUtils.prototype = {
     },
 
     /**
-     * Convert a workload GlideRecord to a plain object with all fields
-     * @param {GlideRecord} gr Workload GlideRecord
-     * @returns {Object} Workload object
+     * Decide which workload each deletion Sync Filter matched becomes, and write it to the
+     * deletion payload table.
+     *
+     * R14 + P0-1, done as one change because separately neither delivers anything: moving onto
+     * runWorkloadChunks without moving the payload off the ECC message leaves the whole result
+     * set in memory and in the message anyway, and the message is the ceiling that matters.
+     *
+     * Shared with the sync path: chunking, the chunk drain, threshold accounting. Deletion-only:
+     * the 30-minute preview gate below, the eligibility rules in _buildDeletionShell, and the row
+     * shape. Labels are skipped wholesale -- deletion reads three columns and never looks at one.
+     *
+     * @param {String} configSysId sys_id of the PCE Configuration
+     * @returns {Object} { success, message, payloadSysIds, deletionCount, unpairCount,
+     *   skippedCount, thresholdExceeded, cancelJob }
      */
     prepareDeletionPayload: function(configSysId) {
         var result = {
             success: false,
             message: '',
-            retiredWorkloads: {},
-            vensToUnpair: [],
+            payloadSysIds: [],
             deletionCount: 0,
             unpairCount: 0,
             skippedCount: 0,
@@ -2420,84 +2467,171 @@ IllumioUtils.prototype = {
                 return result;
             }
 
-            // Get threshold limits
-            var thresholdLimit = new IllumioThresholdLimit();
-            var wlLimitObject = thresholdLimit.getThresholdLimit(configSysId);
+            var self = this;
+            var syncUtils = new IllumioSyncUtils();
+            var repo = new IllumioSyncRepoUtils(syncUtils);
 
-            // Query workload records and separate into delete vs unpair
-            var chunks = this._chunkArray(syncFilterResult.sysIds, 500);
-            for (var c = 0; c < chunks.length; c++) {
-                var gr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_workload');
-                gr.addQuery('sys_id', 'IN', chunks[c].join(','));
-                gr.query();
+            // One row per bundle rather than one row per workload: the same trade-off
+            // IllumioAutoSyncWithPCE.addObjectToPayload makes, and the same property that sizes
+            // it. Reusing that property keeps the two payload tables bounded by one number.
+            var maxPerRow = parseInt(gs.getProperty(
+                'x_illu2_illumio.max_workloads_in_each_payload_for_autosync', 10000), 10) || 10000;
 
-                while (gr.next()) {
-                    var knownToPce = gr.getValue('known_to_pce');
-                    var pceHref = gr.getValue('pce_workload_href');
+            var bundle = { retiredWorkloads: {}, vensToUnpair: [], isDeletion: true };
+            var bundleCount = 0;
 
-                    if (knownToPce !== 'managed' && knownToPce !== 'unmanaged') {
-                        result.skippedCount++;
-                        continue;
-                    }
+            var flush = function() {
+                if (bundleCount === 0) {
+                    return;
+                }
 
-                    if (gs.nil(pceHref)) {
-                        result.skippedCount++;
-                        continue;
-                    }
+                var rowSysId = repo.insertPayloadRow(
+                    syncUtils.DELETION_PAYLOAD_TABLE, JSON.stringify(bundle));
 
-                    // Enforce threshold limit
-                    if (wlLimitObject.limitEnabled && wlLimitObject.isLimitEnabled['delete'] && wlLimitObject.wlLimit['delete'] <= 0) {
-                        result.thresholdExceeded = true;
-                        if (wlLimitObject.cancelJobOnLimitExceed) {
-                            result.cancelJob = true;
-                            result.message = 'Deletion threshold limit exceeded. Job will be cancelled.';
-                            return result;
-                        }
-                        break;
-                    }
+                // Thrown, not logged-and-continued: a lost row is a set of workloads that will
+                // never reach the MID Server, and carrying on would report a success count that
+                // does not match what gets deleted. The catch below withdraws the rest.
+                if (gs.nil(rowSysId)) {
+                    throw 'Error while inserting record in deletion payload table';
+                }
 
-                    if (wlLimitObject.limitEnabled && wlLimitObject.isLimitEnabled['delete']) {
-                        wlLimitObject.wlLimit['delete'] -= 1;
-                    }
+                result.payloadSysIds.push(rowSysId);
+                bundle = { retiredWorkloads: {}, vensToUnpair: [], isDeletion: true };
+                bundleCount = 0;
+            };
 
-                    if (knownToPce === 'managed') {
-                        var venHref = gr.getValue('ven_href');
-                        if (!gs.nil(venHref)) {
-                            result.vensToUnpair.push(venHref);
-                            result.unpairCount++;
-                        } else {
-                            result.skippedCount++;
-                        }
+            var outcome = this.runWorkloadChunks({
+                pceConfigSysId: configSysId,
+                sysIds: syncFilterResult.sysIds,
+                // Duplicate workload records are excluded here rather than deduplicated by
+                // pce_workload_href afterwards. The old code kept a run-wide href map to do that,
+                // which is exactly the O(all matched workloads) structure this change exists to
+                // remove, and `duplicate` is the column that marks the only way two records can
+                // share an href. Same predicate the sync path uses for the same reason.
+                chunkQuery: 'duplicate=false',
+                skipCriticalLabels: false,
+                skipLabelData: true,
+                applyThreshold: true,
+                operation: 'delete',
+                secure: true,
+                buildShell: function(workloadGr) {
+                    return self._buildDeletionShell(workloadGr, result);
+                },
+                appendRow: function(workloadObject) {
+                    if (workloadObject.known_to_pce === 'managed') {
+                        bundle.vensToUnpair.push(workloadObject.ven_href);
+                        result.unpairCount++;
                     } else {
-                        if (!result.retiredWorkloads.hasOwnProperty(pceHref)) {
-                            result.retiredWorkloads[pceHref] = gr.getUniqueValue();
-                            result.deletionCount++;
-                        }
+                        bundle.retiredWorkloads[workloadObject.pce_workload_href] =
+                            workloadObject.sys_id;
+                        result.deletionCount++;
+                    }
+
+                    bundleCount++;
+                    if (bundleCount >= maxPerRow) {
+                        flush();
                     }
                 }
+            });
 
-                if (result.cancelJob) {
-                    break;
-                }
+            if (outcome.cancelJob) {
+                // The rows already written describe deletions that must not happen.
+                var withdrawn = repo.deletePayloadRows(
+                    syncUtils.DELETION_PAYLOAD_TABLE, result.payloadSysIds);
+                gs.info('[prepareDeletionPayload] Threshold limit exceeded, withdrew ' +
+                    withdrawn + ' payload record(s)');
+
+                result.payloadSysIds = [];
+                result.thresholdExceeded = true;
+                result.cancelJob = true;
+                result.message = 'Deletion threshold limit exceeded. Job will be cancelled.';
+                return result;
             }
+
+            flush();
+
+            result.skippedCount += outcome.skippedLimit;
+            result.thresholdExceeded = outcome.limitExceeded;
 
             if (result.thresholdExceeded) {
                 result.message = 'Deletion threshold limit exceeded. Some workloads were not included.';
-            }
-
-            result.success = true;
-            if (!result.thresholdExceeded) {
+            } else {
                 result.message = result.deletionCount + ' workload(s) for deletion, ' + result.unpairCount + ' workload(s) for unpair' +
                     (result.skippedCount > 0 ? ', ' + result.skippedCount + ' skipped' : '');
             }
 
+            result.success = true;
             gs.info('[prepareDeletionPayload] ' + result.message);
         } catch (ex) {
             gs.error('[prepareDeletionPayload] Exception: ' + ex);
             result.message = 'Exception occurred: ' + ex;
+
+            // Rows are written as the scan proceeds, so an exception part-way through leaves
+            // real rows behind for a job that will never be dispatched. The caller only
+            // withdraws on the paths where this returned success, so clean up here.
+            // payloadSysIds is non-empty only once repo/syncUtils have been assigned.
+            if (result.payloadSysIds.length > 0) {
+                try {
+                    var abandoned = repo.deletePayloadRows(
+                        syncUtils.DELETION_PAYLOAD_TABLE, result.payloadSysIds);
+                    gs.info('[prepareDeletionPayload] Withdrew ' + abandoned +
+                        ' payload record(s) after exception');
+                } catch (cleanupEx) {
+                    gs.error('[prepareDeletionPayload] Failed to withdraw payload records: ' +
+                        cleanupEx);
+                }
+                result.payloadSysIds = [];
+            }
         }
 
         return result;
+    },
+
+    /**
+     * The three columns a deletion acts on, or null for a workload it cannot act on.
+     *
+     * This is the "what a row becomes" half of the phase-2 parameterisation for deletion. It is
+     * deliberately not prepareWorkloadShell: that builds the whole sync object off the mapped
+     * fields, and deletion consults none of it.
+     *
+     * **Behaviour change.** A managed workload with no ven_href is rejected HERE, before
+     * threshold accounting. The pre-R14 code decremented the delete budget first and only then
+     * discovered it had nothing to unpair, so every such workload silently consumed one unit of
+     * a limit that exists to cap real deletions.
+     *
+     * @param {GlideRecord} workloadGr Workload record
+     * @param {Object} tally Accumulator whose skippedCount is incremented on rejection
+     * @returns {Object} Deletion row, or null to drop the workload
+     */
+    _buildDeletionShell: function(workloadGr, tally) {
+        var knownToPce = workloadGr.getValue('known_to_pce');
+        var pceHref = workloadGr.getValue('pce_workload_href');
+        var venHref = workloadGr.getValue('ven_href');
+
+        // Only a workload the PCE knows about can be deleted or unpaired there.
+        if (knownToPce !== 'managed' && knownToPce !== 'unmanaged') {
+            tally.skippedCount++;
+            return null;
+        }
+
+        if (gs.nil(pceHref)) {
+            tally.skippedCount++;
+            return null;
+        }
+
+        // Managed means paired: the VEN is unpaired instead of the workload being deleted, so
+        // with no ven_href there is no operation to send.
+        if (knownToPce === 'managed' && gs.nil(venHref)) {
+            tally.skippedCount++;
+            return null;
+        }
+
+        return {
+            sys_id: workloadGr.getUniqueValue(),
+            known_to_pce: knownToPce,
+            pce_workload_href: pceHref,
+            ven_href: venHref
+        };
     },
 
     buildDeletionPayloadFromSysIds: function(sysIds) {
@@ -2590,14 +2724,14 @@ IllumioUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-11-04 13:11:02</sys_created_on>
         <sys_id>b630a09ddb9020d01206fd641d9619df</sys_id>
-        <sys_mod_count>466</sys_mod_count>
+        <sys_mod_count>467</sys_mod_count>
         <sys_name>IllumioUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_b630a09ddb9020d01206fd641d9619df</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>b630a09ddb9020d01206fd641d9619df</id>
