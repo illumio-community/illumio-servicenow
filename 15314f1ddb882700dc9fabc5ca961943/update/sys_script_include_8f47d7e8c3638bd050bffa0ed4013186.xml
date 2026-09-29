@@ -1,0 +1,1038 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioPreviewUtils</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioPreviewUtils</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioPreviewUtils = Class.create();
+
+/**
+ * Preview exports: evaluate a filter, render the result to CSV, hand the file to the MID Server.
+ *
+ * Why the MID Server is involved at all. A preview is a file, and at 200k workloads that file is
+ * ~120 MB. The instance cannot build it: GlideSysAttachment.write takes the content as a string,
+ * so the whole file has to exist in memory before a byte of it is stored. The MID Server has
+ * something the instance does not -- a filesystem -- so the work is split by capability rather
+ * than by habit:
+ *
+ *   instance   has the data      renders CSV text, one batch at a time, into payload rows
+ *   MID        has a filesystem  appends payload rows to a file and streams it back as bytes
+ *
+ * Neither side ever holds more than one chunk. The instance deliberately does NOT ask the MID to
+ * fetch workload data itself: the MID reads the instance over the Table API, so a batch of 1,000
+ * sys_ids would be a ~33,000 character GET URL, and the label join in generateWorkloadCsv would
+ * have to be reimplemented on the MID where it could drift from the copy that sync uses.
+ *
+ * Phase 1 is shared with sync and deletion, unchanged -- the same evaluator, the same parse. A
+ * preview that resolved workloads by some other route would stop being a preview.
+ *
+ * ONE FLOW, THREE BUTTONS. "Export Matching Workloads" (one Sync Filter), "Export Matching
+ * Workloads for Config" (every inclusion filter) and "Preview Workload Deletion" (every deletion
+ * filter) are the same job with a different context. They previously had three implementations
+ * that agreed on nothing: two of them built the whole CSV as a string inside the browser request
+ * and wrote it with GlideSysAttachment, each with its own hand-rolled timestamp formatting, its
+ * own attachment sweep, and its own column set. Scope is now a parameter -- a configuration
+ * evaluates every eligible filter, a filter evaluates a list of one -- and everything after the
+ * filter list is literally the same code.
+ *
+ * This is re-use and not coupling: all three answer the same question about the same records
+ * through the same sync machinery, and the thing that made them diverge was having been written
+ * at different times rather than any difference in what they mean.
+ *
+ * @see IllumioSyncFilterUtils.evaluateFilters the one phase 1
+ * @see IllumioStartWorkloadDeletion for the same job-record-first shape
+ * @see JIRA/sync-optimization/points.MD R28
+ */
+IllumioPreviewUtils.prototype = {
+
+    initialize: function() {
+        this.logger = new IllumioLogger(null, 'IllumioPreviewUtils');
+        this.utils = new IllumioUtils();
+        this.syncUtils = new IllumioSyncUtils();
+        this.repo = new IllumioSyncRepoUtils(this.syncUtils);
+        this.filterUtils = new IllumioSyncFilterUtils(this.syncUtils, this.repo);
+    },
+
+    // ---- preview types ----
+    //
+    // These must match the `type` choice values on x_illu2_illumio_illumio_preview_payload
+    // exactly. Nothing validates that they do, and a mismatch writes a blank type rather than
+    // failing, so they are stated once here and never inlined. All four were confirmed against
+    // the instance on 2026-09-22.
+
+    TYPE_FILTER_EXPORT: "export_matching_workloads",
+    TYPE_CONFIG_EXPORT: "export_matching_workloads_for_config",
+    TYPE_CONFIG_DELETION: "preview_deletion",
+    TYPE_FILTER_MODE: "preview_filter_mode",
+
+    SYNC_FILTER_TABLE: TABLE_SYNC_FILTER,
+    PCE_CONFIG_TABLE: TABLE_PCE_CONF,
+
+    PROBE: "IllumioGeneratePreviewFile",
+
+    /**
+     * Attachment name prefix per preview type.
+     *
+     * ONE ATTACHMENT PER RECORD, full stop -- _deleteExistingPreview clears the record before
+     * every run regardless of type, so the prefix no longer selects what gets removed. It is now
+     * purely a label, saying what the file contains.
+     *
+     * DELETION-PREVIEW- is still load-bearing beyond this file: IllumioUtils.deletionPreviewStatus
+     * gates Start Workload Deletion on an attachment with that prefix ON THE PCE CONFIGURATION
+     * RECORD, so it is not free to rename.
+     *
+     * A single-filter preview is named for what the filter DOES, not for the button that ran it:
+     * a preview of a deletion filter is a deletion preview whether it was started from the filter
+     * or from the configuration. The two levels therefore share a prefix, which is what makes
+     * "what will this filter delete" and "what will this configuration delete" recognisably the
+     * same question. They do not collide, because they attach to different records -- and for the
+     * same reason a single-filter deletion preview cannot satisfy the deletion gate, which only
+     * ever looks at the configuration.
+     *
+     * @param {String} previewType One of the TYPE_ constants
+     * @param {String} [syncFilterType] 'inclusion' or 'deletion', when the target is a Sync Filter
+     * @returns {String} File name prefix
+     */
+    prefixForType: function(previewType, syncFilterType) {
+        if (previewType === this.TYPE_CONFIG_DELETION) {
+            return "DELETION-PREVIEW-";
+        }
+        if (previewType === this.TYPE_CONFIG_EXPORT) {
+            return "INCLUSION-PREVIEW-";
+        }
+        if (previewType === this.TYPE_FILTER_MODE) {
+            // DISCOVERY-PREVIEW-, not FILTER-MODE-PREVIEW-, which is what this returned while it
+            // had no callers. The name the UI Action has always written, and the one both
+            // JIRA/APPS-2514/scope.md and the discovery refactor verification steps tell a
+            // tester to look for. Nothing gates on it -- _deleteExistingPreview clears the record
+            // whatever the files are called -- so this is a label, and the label should match
+            // what is documented.
+            return "DISCOVERY-PREVIEW-";
+        }
+        if (previewType === this.TYPE_FILTER_EXPORT) {
+            if (syncFilterType === "deletion") {
+                return "DELETION-PREVIEW-";
+            }
+            if (syncFilterType === "inclusion") {
+                return "INCLUSION-PREVIEW-";
+            }
+        }
+
+        // A Sync Filter whose type could not be read -- the record is gone, or the column is
+        // blank on a filter saved before the choice existed. Named for neither, so it is never
+        // mistaken for a preview of something it did not evaluate.
+        return "matching_workloads_";
+    },
+
+    // DEAD -- commented out 2026-09-24, not deleted, so it can be put back in one edit.
+    //
+    // Nothing calls it. Every caller that needs a prefix already holds the _targetSummary it
+    // would recompute here (the summary is read once per export, for the file name), so they
+    // call prefixForType directly with the filterType they already have. This wrapper exists
+    // from before that read was hoisted, and calling it now would re-read the target record.
+    //
+    // prefixForContext: function(context) {
+    //     return this.prefixForType(context.type, this._targetSummary(context).filterType);
+    // },
+
+    /**
+     * The one read of the target record: its name, for the file name, and its type when it is a
+     * Sync Filter, for the prefix.
+     *
+     * @param {Object} context { type, table, sysId }
+     * @returns {Object} { name, filterType } - both empty when the record cannot be read
+     */
+    _targetSummary: function(context) {
+        var summary = { name: "", filterType: "" };
+
+        var gr = new GlideRecord(context.table);
+        if (!gr.get(context.sysId)) {
+            return summary;
+        }
+
+        summary.name = gr.getValue("name") || "";
+
+        if (context.table === this.SYNC_FILTER_TABLE) {
+            summary.filterType = ("" + (gr.getValue("type") || "")).toLowerCase();
+        }
+
+        return summary;
+    },
+
+    /**
+     * Run a preview as a job, off the x_illu2_illumio.start_preview event.
+     *
+     * @param {String} illumioJobId sys_id of the preview scheduled job, from event.parm1
+     * @param {String} contextJson JSON { type, table, sysId }, from event.parm2. Carried on the
+     *                 event rather than on the job record because the scheduled jobs table has a
+     *                 PCE Configuration reference but no generic target, and a Sync Filter
+     *                 preview needs to say which filter.
+     */
+    process: function(illumioJobId, contextJson) {
+        var context = null;
+
+        try {
+            if (gs.nil(illumioJobId)) {
+                this.logger.error("[IllumioPreviewUtils] No job sys_id supplied");
+                return;
+            }
+
+            if (this.utils.isJobCancelled(illumioJobId)) {
+                return;
+            }
+
+            context = this._parseContext(contextJson);
+            if (!context) {
+                this._fail(illumioJobId, "Preview context missing or unreadable: " + contextJson);
+                return;
+            }
+
+            // Sweep before anything else. Rows are not deleted as the MID consumes them -- a MID
+            // failure part way through would otherwise destroy the only copy -- so a previous
+            // run's rows are still here, and they are dead weight rather than a resource.
+            //
+            // The sweep writes its own "Found stale payloads / Starting cleanup / Completed
+            // cleanup" lines through this sink now, so the caller-side summary that used to sit
+            // here has gone: it reported the same count a third line down, and without a
+            // duration, which is the one thing the sweep is worth logging for.
+            this.repo.deleteStalePayloadRows(
+                this.syncUtils.PREVIEW_PAYLOAD_TABLE, illumioJobId,
+                this.utils.jobProgressLogger(illumioJobId));
+
+            // The record is cleared now, not when the new file lands. Preview generation takes
+            // minutes; an out-of-date CSV sitting on the record for that whole time is worse than
+            // no CSV, because it downloads without complaint and looks current. "Nothing there"
+            // reads correctly as "still generating".
+            //
+            // Everything goes, at both levels. See _deleteExistingPreview.
+            var removed = this._deleteExistingPreview(context);
+            if (removed.deleted > 0) {
+                this.utils.updateJobRecord(illumioJobId, {
+                    logs: "Removed " + removed.deleted + " existing attachment(s) from the record."
+                });
+            }
+            if (removed.failed > 0) {
+                // Fail loudly rather than carry on. Carrying on writes a second preview beside a
+                // stale one that could not be removed, and the deletion gate then has two files
+                // to choose between -- which is how a preview generated seconds ago gets refused.
+                this._fail(illumioJobId, "Could not remove " + removed.failed + " of " +
+                    removed.considered + " existing attachment(s) from the record (" +
+                    removed.failedNames.join(", ") + "). A stale preview would have been left " +
+                    "beside the new one, so the preview was not generated. The attachments " +
+                    "survived GlideSysAttachment.deleteAttachment -- see the syslog entries " +
+                    "from IllumioPreviewUtils for the sys_id of each one.");
+                return;
+            }
+
+            // A log line and not just an operation change. Phase 1 runs for minutes on a large
+            // filter, so without this the record is indistinguishable from one whose Script
+            // Action never fired -- which is exactly the question being asked when someone is
+            // watching a job sit at `running`. The evaluation itself now reports as it goes;
+            // see the progress sink passed into _evaluate below.
+            this.utils.updateJobRecord(illumioJobId, {
+                logs: "Picked up by the scheduler. Evaluating Sync Filters.",
+                current_operation: "Evaluating filters"
+            });
+
+            var evaluated = this._evaluate(context, illumioJobId);
+            if (!evaluated.success) {
+                this._fail(illumioJobId, evaluated.message);
+                return;
+            }
+
+            var sysIds = evaluated.sysIds || [];
+
+            if (sysIds.length === 0) {
+                // Matched nothing is an answer, not a failure. Completing rather than failing
+                // keeps it distinguishable from a broken run in the job list. The message says
+                // WHICH answer it was -- no filters of this type at all reads very differently
+                // from filters that ran and matched nothing.
+                this._complete(illumioJobId, evaluated.emptyMessage ||
+                    "No workloads match. Nothing to export, so no attachment was written.");
+                return;
+            }
+
+            // NOT sorted, deliberately. Row order in the file is whatever phase 1 produced, and
+            // it can differ between two runs of an unchanged filter. That was a considered
+            // trade: a sort of 2M sys_ids is ~42M string comparisons and a reference copy of the
+            // whole array, to buy a property -- diffable downloads -- nobody wants here. At
+            // million scale the only thing this pipeline keeps in memory is the sys_id array
+            // itself, and nothing is allowed to duplicate it.
+            this.utils.updateJobRecord(illumioJobId, {
+                logs: sysIds.length + " workload(s) matched. Rendering CSV.",
+                current_operation: "Rendering CSV"
+            });
+
+            var written = this._writePayloadRows(illumioJobId, context, sysIds);
+
+            if (written.cancelled) {
+                this._withdraw(written.payloadSysIds);
+                this.utils.finalizeCancelledJob(illumioJobId,
+                    "Preview cancelled while rendering. Payload rows withdrawn.");
+                return;
+            }
+
+            if (!written.success) {
+                this._withdraw(written.payloadSysIds);
+                this._fail(illumioJobId, written.message);
+                return;
+            }
+
+            this.utils.updateJobRecord(illumioJobId, {
+                logs: "Wrote " + written.chunkCount + " payload chunk(s), " +
+                    written.totalBytes + " byte(s) of CSV covering " + sysIds.length +
+                    " workload(s).",
+                current_operation: "Dispatching to MID Server"
+            });
+
+            var dispatched = this._dispatch(illumioJobId, context, written);
+            if (!dispatched.success) {
+                this._withdraw(written.payloadSysIds);
+                this._fail(illumioJobId,
+                    "Failed to dispatch the preview to the MID Server. " + dispatched.message);
+                return;
+            }
+
+            this.logger.info("[IllumioPreviewUtils] Dispatched " + context.type + " preview for " +
+                context.table + "/" + context.sysId + ": " + written.chunkCount + " chunk(s)");
+        } catch (ex) {
+            this.logger.error("[IllumioPreviewUtils] Exception: " + ex);
+            this._fail(illumioJobId, "Exception occurred while preparing the preview: " + ex);
+        }
+    },
+
+    /**
+     * The discovery filter-mode preview. A SECOND ENTRY POINT, not a branch of `process`.
+     *
+     * Answers a different question from the other three: "which CMDB records will discovery
+     * process for this Class Mapping", not "which workloads does this filter match". It shares
+     * no phase 1 -- there is no Sync Filter here and no workload table -- so routing it through
+     * `process` would mean a type check at the top of every step of a pipeline that has nothing
+     * to do with it. It shares what is genuinely common instead: the context, the
+     * one-attachment-per-record sweep, the file naming, and the two job-closing helpers.
+     *
+     * It also keeps GlideSysAttachment.write rather than going through the payload table and the
+     * MID Server. That machinery exists because a 200k-workload export is a ~120 MB string; this
+     * one is capped by `x_illu2_illumio.maximum_ci_records` (25,000 by default) at five short
+     * columns, so a few MB. Paying for the byte-windowing, the gzip and the round trip to buy
+     * nothing would be the wrong trade -- what this preview actually needed was to stop running
+     * inside the user's click, which is what the Script Action route gives it.
+     *
+     * P0-2 point 9, the fifth and last of the UI Actions.
+     *
+     * @param {String} illumioJobId sys_id of the scheduled job to report against
+     * @param {String} contextJson JSON from event.parm2 -- { type, table, sysId }
+     */
+    processFilterModePreview: function(illumioJobId, contextJson) {
+        try {
+            if (gs.nil(illumioJobId)) {
+                this.logger.error("[IllumioPreviewUtils] No job sys_id supplied for the filter mode " +
+                    "preview");
+                return;
+            }
+
+            if (this.utils.isJobCancelled(illumioJobId)) {
+                return;
+            }
+
+            var context = this._parseContext(contextJson);
+            if (!context) {
+                this._fail(illumioJobId,
+                    "Preview context missing or unreadable: " + contextJson);
+                return;
+            }
+
+            var mappingGr = new GlideRecord(context.table);
+            if (!mappingGr.get(context.sysId)) {
+                this._fail(illumioJobId, "The Config Class Mapping this preview was started " +
+                    "from no longer exists (" + context.table + "/" + context.sysId + ").");
+                return;
+            }
+
+            var sourceTable = mappingGr.getValue("source_table");
+            if (gs.nil(sourceTable)) {
+                this._fail(illumioJobId, "No source table is configured on this mapping.");
+                return;
+            }
+
+            // Read here rather than carried in the event. The job runs after the click, and the
+            // preview should describe the mapping as it is when it runs -- if someone edited the
+            // condition in between, a preview of the old one is worse than no preview.
+            var condition = mappingGr.getValue("conditions_for_excluding_workloads");
+            var filterMode = mappingGr.getValue("filter_mode") || "exclusion_legacy";
+
+            var hostFieldGr = new GlideRecordSecure(TABLE_CLASS_FIELD_MAPPING);
+            hostFieldGr.addQuery("illumio_config_class_mapping", context.sysId);
+            hostFieldGr.addQuery("type", "host_name");
+            hostFieldGr.addActiveQuery();
+            hostFieldGr.setLimit(1);
+            hostFieldGr.query();
+
+            if (!hostFieldGr.next()) {
+                this._fail(illumioJobId, "This preview needs a Host Name field mapping and the " +
+                    "mapping does not have one. Configure a Host Name mapping and run it again.");
+                return;
+            }
+
+            var isAdvancedHostname = hostFieldGr.getValue("advanced") == "1";
+            var hostnameField = isAdvancedHostname ?
+                null : hostFieldGr["ci_field"].getDisplayValue();
+
+            // Same rule, same reason as `process`: the record holds the most recent run's preview
+            // and nothing else, and it is cleared NOW rather than when the new file lands. A
+            // stale CSV sitting on the record while this runs downloads without complaint and
+            // looks current.
+            var removed = this._deleteExistingPreview(context);
+            if (removed.deleted > 0) {
+                this.utils.updateJobRecord(illumioJobId, {
+                    logs: "Removed " + removed.deleted + " existing attachment(s) from the record."
+                });
+            }
+            if (removed.failed > 0) {
+                this._fail(illumioJobId, "Could not remove " + removed.failed + " of " +
+                    removed.considered + " existing attachment(s) from the record (" +
+                    removed.failedNames.join(", ") + "), so the preview was not generated. See " +
+                    "the syslog entries from IllumioPreviewUtils for the sys_id of each one.");
+                return;
+            }
+
+            var maxRecords = parseInt(
+                gs.getProperty("x_illu2_illumio.maximum_ci_records") || "25000", 10) || 25000;
+            var modeLabel = filterMode === "inclusion" ? "Inclusion" : "Exclusion (Legacy)";
+
+            this.utils.updateJobRecord(illumioJobId, {
+                logs: "Scanning " + sourceTable + " in " + modeLabel + " mode, up to " +
+                    maxRecords + " record(s).",
+                current_operation: "Scanning CMDB"
+            });
+
+            var repo = new IllumioDiscoveryRepository();
+            var discoverHelper = new IllumioDiscoverAndMapCMDBServers();
+            var headers = ["sys_id", "name", "sys_class_name", "ip_address", "hostname"];
+            var lines = [headers.join(",")];
+
+            var self = this;
+            var cancelled = false;
+            var scanStartedAt = new Date().getTime();
+            var windowStartedAt = scanStartedAt;
+
+            var result = repo.iterateFilteredCMDBRecords(
+                sourceTable, filterMode, condition, maxRecords,
+                function(previewGr) {
+                    if (cancelled) {
+                        return false;
+                    }
+
+                    var row = [];
+                    for (var h = 0; h < headers.length; h++) {
+                        var val = "";
+                        if (headers[h] === "hostname" && hostnameField) {
+                            val = discoverHelper.getValueFromDotWalkableField(
+                                previewGr, hostnameField) || "";
+                        } else if (headers[h] === "hostname" && isAdvancedHostname) {
+                            val = "(script-based)";
+                        } else {
+                            val = previewGr.getValue(headers[h]) || "";
+                        }
+                        if (val.indexOf(",") !== -1 || val.indexOf('"') !== -1) {
+                            val = '"' + val.replace(/"/g, '""') + '"';
+                        }
+                        row.push(val);
+                    }
+                    lines.push(row.join(","));
+                },
+                {
+                    // Per window rather than per record: the cancel check is a query, and the
+                    // log line is a write. At 25,000 records a per-record check would be 25,000
+                    // of each to report on something that moves in windows anyway.
+                    onWindowComplete: function(windowNumber, windowCount) {
+                        if (self.utils.isJobCancelled(illumioJobId)) {
+                            // Setting the flag is what stops the run -- the row callback above
+                            // returns false on the next record it is handed, and that return
+                            // value is the only one iterateFilteredCMDBRecords acts on.
+                            // Returning false from HERE would look like it stopped the loop and
+                            // would be ignored.
+                            cancelled = true;
+                            return;
+                        }
+
+                        // W2: per-window, so syslog rather than the job record. A 2M-record scan
+                        // is hundreds of windows, and the "Scan complete" line below carries the
+                        // totals they add up to. This is also one fewer job-record write per
+                        // window -- the read-modify-write that W1 made cheap is still a write.
+                        self.logger.setContext(illumioJobId).info(
+                            "Window " + windowNumber + ": " + windowCount +
+                            " record(s) scanned, " + (lines.length - 1) + " kept" +
+                            self.syncUtils.since(windowStartedAt));
+                        windowStartedAt = new Date().getTime();
+                    }
+                }
+            );
+
+            if (cancelled) {
+                this.utils.finalizeCancelledJob(illumioJobId,
+                    "Preview cancelled while scanning the CMDB. No attachment was written.");
+                return;
+            }
+
+            if (result.fetchedCount === 0) {
+                // An answer, not a failure -- the same call `process` makes on an empty match.
+                this._complete(illumioJobId, "No CMDB records match the current filter " +
+                    "configuration" +
+                    (result.excludedCount > 0 ?
+                        " (" + result.excludedCount + " excluded by condition)" : "") +
+                    ", so no attachment was written." + this.syncUtils.since(scanStartedAt));
+                return;
+            }
+
+            this.utils.updateJobRecord(illumioJobId, {
+                logs: "Scan complete: " + result.fetchedCount + " record(s) kept" +
+                    (result.excludedCount > 0 ?
+                        ", " + result.excludedCount + " excluded" : "") +
+                    this.syncUtils.since(scanStartedAt),
+                current_operation: "Writing CSV"
+            });
+
+            var writeStartedAt = new Date().getTime();
+            var csvContent = lines.join("\n");
+            var fileName = this.fileName(context);
+
+            var attachmentSysId = new GlideSysAttachment().write(
+                mappingGr, fileName, "text/csv", csvContent);
+
+            if (gs.nil(attachmentSysId)) {
+                this._fail(illumioJobId, "GlideSysAttachment.write returned nothing for " +
+                    fileName + " (" + csvContent.length + " characters of CSV), so the preview " +
+                    "was not attached.");
+                return;
+            }
+
+            this._complete(illumioJobId, "Preview attached as " + fileName + ": " +
+                result.fetchedCount + " CMDB record(s) will be processed by discovery in " +
+                modeLabel + " mode" +
+                (result.excludedCount > 0 ?
+                    ", " + result.excludedCount + " excluded" : "") +
+                this.syncUtils.since(writeStartedAt));
+        } catch (ex) {
+            this.logger.error("[IllumioPreviewUtils] Filter mode preview exception: " + ex);
+            this._fail(illumioJobId,
+                "Exception occurred while generating the discovery preview: " + ex);
+        }
+    },
+
+    /**
+     * Read and validate the event context.
+     *
+     * @param {String} contextJson JSON from event.parm2
+     * @returns {Object} { type, table, sysId } or null when unusable
+     */
+    _parseContext: function(contextJson) {
+        if (gs.nil(contextJson)) {
+            return null;
+        }
+
+        var context;
+        try {
+            context = JSON.parse(contextJson);
+        } catch (ex) {
+            this.logger.error("[IllumioPreviewUtils] Could not parse preview context: " + ex);
+            return null;
+        }
+
+        if (!context || gs.nil(context.type) || gs.nil(context.table) || gs.nil(context.sysId)) {
+            return null;
+        }
+
+        return context;
+    },
+
+    /**
+     * Phase 1. The same evaluation sync and deletion run, at whichever scope was asked for.
+     *
+     * SCOPE IS A PARAMETER, not a pipeline. A PCE Configuration preview evaluates every eligible
+     * Sync Filter of one type; a Sync Filter preview evaluates a list of one. Both go through
+     * IllumioSyncFilterUtils.evaluateFilters, which is also what a real sync and a real deletion
+     * call -- so the three exports differ in exactly two values, the filter list and the file
+     * name, and in nothing else. Everything after this method is already common: the CSV
+     * renderer, the payload table, the MID probe, the cancel path, the gzip.
+     *
+     * The two configuration-level types used to be UI Actions that did all of this inline, in the
+     * browser request -- evaluate, render the whole CSV to a string, GlideSysAttachment.write. At
+     * 200k workloads that string is ~120 MB and the transaction is minutes long.
+     *
+     * TYPE_FILTER_MODE is deliberately not here. It previews DISCOVERY -- which CMDB records a
+     * Class Mapping will process -- so it shares neither phase 1, the row shape, nor the target
+     * table. It stays where it is.
+     *
+     * @param {Object} context { type, table, sysId }
+     * @param {String} illumioJobId Job to report progress against
+     * @returns {Object} { success, sysIds, message, emptyMessage }
+     */
+    _evaluate: function(context, illumioJobId) {
+        // The progress sink is what turns this from a silent multi-minute stretch into a running
+        // commentary -- a line per label term, every 10,000 CMDB CIs, and one per filter.
+        var progress = this.utils.jobProgressLogger(illumioJobId);
+
+        if (context.type === this.TYPE_FILTER_EXPORT) {
+            // skipActiveCheck: a preview is most useful on a filter that is not switched on yet,
+            // and this is why the run cannot narrow phase 1 by anything the filter's own record
+            // says about itself. sysIdsOnly: the workload records are read again during
+            // rendering, in batches.
+            var result = this.filterUtils.getWorkloadsBySyncFilter(context.sysId, true, true,
+                progress);
+            return {
+                success: result.success,
+                sysIds: result.sysIds,
+                message: result.message,
+                emptyMessage: ""
+            };
+        }
+
+        var filterType = this._filterTypeForPreview(context.type);
+
+        if (!filterType) {
+            // Refusing loudly beats falling through to an empty result, which would attach an
+            // empty CSV and look like a filter that matched nothing.
+            return {
+                success: false,
+                sysIds: [],
+                message: "Preview type '" + context.type + "' is not a workload preview.",
+                emptyMessage: ""
+            };
+        }
+
+        var byConfig = this.filterUtils.getEligibleWorkloadSysIdsByConfig(
+            context.sysId, filterType, progress);
+
+        // No filters of this type is an answer, not a failure -- and a different answer from
+        // "the filters matched nothing", which is why it carries its own message rather than
+        // falling into the empty-result branch unlabelled.
+        if (!byConfig.hasFilter) {
+            return {
+                success: true,
+                sysIds: [],
+                message: "",
+                emptyMessage: "No active " + filterType + " Sync Filters are configured on " +
+                    "this PCE Configuration, so there is nothing to preview."
+            };
+        }
+
+        return {
+            success: true,
+            sysIds: byConfig.sysIds || [],
+            message: "",
+            emptyMessage: "No workloads match the active " + filterType + " Sync Filter(s)."
+        };
+    },
+
+    /**
+     * Sync Filter type a configuration-level preview evaluates.
+     *
+     * @param {String} previewType One of the TYPE_ constants
+     * @returns {String} 'inclusion', 'deletion', or empty when this is not a config-level preview
+     */
+    _filterTypeForPreview: function(previewType) {
+        if (previewType === this.TYPE_CONFIG_EXPORT) {
+            return "inclusion";
+        }
+        if (previewType === this.TYPE_CONFIG_DELETION) {
+            return "deletion";
+        }
+        return "";
+    },
+
+    /**
+     * Phase 2. Render CSV and write it to the payload table in byte-budgeted chunks.
+     *
+     * generateWorkloadCsv hands over one batch of 500 workloads at a time; this buffers those
+     * until PREVIEW_CHUNK_BYTES is reached and then writes a row. The two sizes are separate on
+     * purpose -- 500 is what the database wants in an IN clause, ~1 MB is what the payload
+     * column and the Table API want in a field -- and tying them together would make one of the
+     * two wrong.
+     *
+     * @param {String} illumioJobId Job to log and cancellation-check against
+     * @param {Object} context { type, table, sysId }
+     * @param {Array} sysIds Workload sys_ids, in whatever order phase 1 produced
+     * @returns {Object} { success, cancelled, message, payloadSysIds, chunkCount, totalBytes }
+     */
+    _writePayloadRows: function(illumioJobId, context, sysIds) {
+        var self = this;
+        var state = {
+            success: false,
+            cancelled: false,
+            message: "",
+            payloadSysIds: [],
+            chunkCount: 0,
+            totalBytes: 0
+        };
+
+        var buffer = [];
+        var bufferBytes = 0;
+
+        var flush = function() {
+            if (bufferBytes === 0) {
+                return true;
+            }
+
+            var text = buffer.join("");
+            var bytes = self.syncUtils.utf8Length(text);
+
+            var extraFields = {
+                type: context.type,
+                sequence: state.chunkCount,
+                // Measured here and re-measured by the MID after it encodes to UTF-8. A
+                // string column over max_length is truncated silently on insert -- no
+                // exception, a row that looks fine and a CSV that is wrong from that point
+                // on -- and this is what makes that visible.
+                byte_length: bytes
+            };
+            // Set separately rather than as a literal key: ES5 has no computed property names,
+            // and this column has to come from PAYLOAD_JOB_FIELD. deleteStalePayloadRows sweeps
+            // this table on the same constant, so a literal here would let the two names drift
+            // and the sweep would stop recognising the rows it is meant to spare.
+            extraFields[self.syncUtils.PAYLOAD_JOB_FIELD] = illumioJobId;
+
+            var rowSysId = self.repo.insertPayloadRow(
+                self.syncUtils.PREVIEW_PAYLOAD_TABLE, text, extraFields);
+
+            if (gs.nil(rowSysId)) {
+                state.message = "Failed to insert preview payload row " + state.chunkCount + ".";
+                return false;
+            }
+
+            state.payloadSysIds.push(rowSysId);
+            state.chunkCount++;
+            state.totalBytes += bytes;
+
+            buffer = [];
+            bufferBytes = 0;
+            return true;
+        };
+
+        var failed = false;
+
+        try {
+            this.filterUtils.generateWorkloadCsv(sysIds, function(text) {
+                if (failed || state.cancelled) {
+                    return;
+                }
+
+                // Checked per batch rather than per row: a cancelled preview should stop within
+                // a batch or two, and a query per row would cost more than the render.
+                if (self.utils.isJobCancelled(illumioJobId)) {
+                    state.cancelled = true;
+                    return;
+                }
+
+                buffer.push(text);
+                bufferBytes += self.syncUtils.utf8Length(text);
+
+                if (bufferBytes >= self.syncUtils.PREVIEW_CHUNK_BYTES && !flush()) {
+                    failed = true;
+                }
+            });
+        } catch (ex) {
+            this.logger.error("[IllumioPreviewUtils] Exception while rendering CSV: " + ex);
+            state.message = "Exception occurred while rendering the CSV: " + ex;
+            return state;
+        }
+
+        if (state.cancelled) {
+            return state;
+        }
+
+        if (failed || !flush()) {
+            return state;
+        }
+
+        state.success = true;
+        return state;
+    },
+
+    /**
+     * Queue the assembly job on the MID Server.
+     *
+     * The message carries no PCE credentials. Every other probe in this application talks to the
+     * PCE and needs them; this one only reads the instance, for which the MID already has its own
+     * mid.instance.* configuration. Sending them anyway would put a secret on the ECC queue for
+     * no reason.
+     *
+     * @param {String} illumioJobId sys_id of the preview scheduled job
+     * @param {Object} context { type, table, sysId }
+     * @param {Object} written Result of _writePayloadRows
+     * @returns {Object} { success, message } -- message names the precondition that failed
+     */
+    _dispatch: function(illumioJobId, context, written) {
+        // Three different things can stop the dispatch, and by this point the CSV has already
+        // been rendered, so "it failed" is not a useful thing to tell the reader. Each one says
+        // what is missing, in the job log and not only in syslog, because the job record is what
+        // the person who clicked the button is looking at.
+        var configSysId = this._configSysIdFor(context);
+        if (gs.nil(configSysId)) {
+            return {
+                success: false,
+                message: "No PCE Configuration is set on " + context.table + "/" + context.sysId +
+                    ", so there is no MID Server to send the preview to."
+            };
+        }
+
+        var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+        if (!pceConfig || gs.nil(pceConfig.midServer)) {
+            return {
+                success: false,
+                message: "PCE Configuration " + configSysId + " has no MID Server, so the " +
+                    "preview file cannot be assembled."
+            };
+        }
+
+        var parameters = {
+            // The ECC helper reads this exact key to check for cancellation before inserting.
+            illumio_scheduled_job_id: illumioJobId,
+            jobSysId: illumioJobId,
+            previewType: context.type,
+            targetTable: context.table,
+            targetSysId: context.sysId,
+            fileName: this.fileName(context),
+            payloadTable: this.syncUtils.PREVIEW_PAYLOAD_TABLE,
+            chunkCount: written.chunkCount + "",
+            totalBytes: written.totalBytes + "",
+            time_zone: gs.getSession().getTimeZoneName()
+        };
+
+        if (!new IllumioAddToECCQueue(this.PROBE, pceConfig.midServer, parameters).insert()) {
+            // The ECC helper returns false for two unrelated reasons -- the job was cancelled
+            // between the render and now, or the insert threw -- and reports neither. It logs the
+            // exception itself, so syslog separates them.
+            return {
+                success: false,
+                message: "The ECC queue would not accept the preview for MID Server " +
+                    pceConfig.midServer + ". Either the job was cancelled while the CSV was " +
+                    "being rendered, or the insert failed; check the system log."
+            };
+        }
+
+        return { success: true, message: "" };
+    },
+
+    /**
+     * The PCE Configuration a preview target belongs to, which is what names the MID Server.
+     *
+     * @param {Object} context { type, table, sysId }
+     * @returns {String} sys_id of the PCE Configuration, or empty
+     */
+    _configSysIdFor: function(context) {
+        if (context.table === this.PCE_CONFIG_TABLE) {
+            return context.sysId;
+        }
+
+        var gr = new GlideRecord(context.table);
+        if (!gr.get(context.sysId)) {
+            return "";
+        }
+
+        // The column is not named the same on every table. Everything migrated by the
+        // "Migrate configurations" fix script came out as `illumio_pce_configuration`; the Sync
+        // Filter kept the older `pce_configuration` (see IllumioUtils:1775, IllumioTestUtils:216).
+        // getValue on a column that does not exist returns null rather than throwing, so reading
+        // the wrong one here does not fail -- it yields an empty configuration, and the preview
+        // dies four steps later as "Failed to dispatch", after the CSV has already been rendered.
+        return gr.getValue(
+            context.table === this.SYNC_FILTER_TABLE
+                ? "pce_configuration"
+                : "illumio_pce_configuration"
+        ) || "";
+    },
+
+    /**
+     * Name the attachment will be given once the MID Server uploads it.
+     *
+     * UTC throughout. GlideDateTime.getDisplayValue() renders in the running user's timezone and
+     * date format, so the same run named a file differently depending on who pressed the button
+     * -- and the previous implementation went further and split the display value positionally,
+     * which silently produced a month where it labelled a year for anyone not on a year-first
+     * format.
+     *
+     * @param {Object} context { type, table, sysId }
+     * @returns {String} Attachment file name
+     */
+    fileName: function(context) {
+        // getValue() is always UTC in yyyy-MM-dd HH:mm:ss, whoever is running.
+        var stamp = new GlideDateTime().getValue().replace(/[^0-9]/g, "-");
+        var summary = this._targetSummary(context);
+        var label = this._sanitiseForFileName(summary.name);
+
+        // ".csv", not ".csv.gz". The MID Server compresses the file and appends the extension
+        // itself, because it is the side that knows whether it compressed. Naming it .gz here
+        // would be this file asserting something about bytes it never sees.
+        return this.prefixForType(context.type, summary.filterType) +
+            (label ? label + "_" : "") + stamp + "-UTC.csv";
+    },
+
+    /**
+     * Reduce a record name to something safe in a file name.
+     *
+     * A Sync Filter may be called anything, and the previous export dropped that name into the
+     * file name untouched -- "Prod: US/East" produced a name carrying a slash and a colon.
+     *
+     * @param {String} text Raw record name
+     * @returns {String} Name safe on any filesystem, capped in length
+     */
+    _sanitiseForFileName: function(text) {
+        return ("" + (text || ""))
+            .replace(/[^A-Za-z0-9._-]+/g, "_")
+            .replace(/^_+|_+$/g, "")
+            .substring(0, 60);
+    },
+
+    /**
+     * Clear the target record of attachments before the preview runs.
+     *
+     * ONE RULE, BOTH LEVELS: every attachment on the record goes, whatever it is called, whatever
+     * kind of preview is about to run. A record carries the preview from its most recent run and
+     * nothing else.
+     *
+     * This replaces a prefix match on the PCE Configuration, which kept one attachment per preview
+     * type there. That arrangement was intended to stop an inclusion export revoking a deletion
+     * preview's authority, and it has a real cost under the new rule: an inclusion export on a
+     * configuration now clears its deletion preview too, so Start Workload Deletion will refuse
+     * until a fresh deletion preview is generated. Accepted deliberately -- one attachment per
+     * record is the rule, and a record that can hold two files is a record where the wrong one
+     * can be read.
+     *
+     * GlideSysAttachment.deleteAttachment, NOT GlideRecord.deleteRecord. An attachment is two
+     * things: the sys_attachment row and the sys_attachment_doc chunks holding its bytes.
+     * deleteRecord() on sys_attachment is not the supported way to remove either, and on a scoped
+     * application it returned false for every attachment on the record -- with full Read/Write/
+     * Delete cross-scope privileges on sys_attachment granted. The privilege was never the
+     * problem; the API was.
+     *
+     * VERIFY, DO NOT ASSUME. deleteAttachment returns nothing at all, so the only way to know
+     * whether it worked is to look for the row again. That matters more than the usual amount
+     * here: an unverified sweep is exactly what let a stale CSV sit beside a fresh one and get
+     * read by the deletion gate.
+     *
+     * Collected before deleting rather than deleted during the walk, because mutating the table
+     * a GlideRecord is iterating is how rows get skipped.
+     *
+     * @param {Object} context { type, table, sysId }
+     * @returns {Object} { deleted, failed, considered, failedNames }
+     */
+    _deleteExistingPreview: function(context) {
+        var result = {
+            deleted: 0,
+            failed: 0,
+            considered: 0,
+            failedNames: []
+        };
+
+        var targets = [];
+        var gr = new GlideRecord("sys_attachment");
+        gr.addQuery("table_name", context.table);
+        gr.addQuery("table_sys_id", context.sysId);
+        gr.query();
+        while (gr.next()) {
+            targets.push({
+                sysId: gr.getUniqueValue(),
+                fileName: gr.getValue("file_name") || ""
+            });
+        }
+
+        result.considered = targets.length;
+        var attachment = new GlideSysAttachment();
+
+        for (var t = 0; t < targets.length; t++) {
+            try {
+                attachment.deleteAttachment(targets[t].sysId);
+            } catch (ex) {
+                this.logger.error('[IllumioPreviewUtils] deleteAttachment threw for "' +
+                    targets[t].fileName + '": ' + ex);
+            }
+
+            var check = new GlideRecord("sys_attachment");
+            if (check.get(targets[t].sysId)) {
+                result.failed++;
+                if (result.failedNames.length < 5) {
+                    result.failedNames.push(targets[t].fileName);
+                }
+                this.logger.error('[IllumioPreviewUtils] Attachment "' + targets[t].fileName + '" (' +
+                    targets[t].sysId + ') survived deleteAttachment on ' + context.table + "/" +
+                    context.sysId + ".");
+            } else {
+                result.deleted++;
+            }
+        }
+
+        return result;
+    },
+
+    /**
+     * Withdraw payload rows for a preview that will never be assembled.
+     *
+     * @param {Array} payloadSysIds Rows written by _writePayloadRows
+     */
+    _withdraw: function(payloadSysIds) {
+        try {
+            var withdrawn = this.repo.deletePayloadRows(
+                this.syncUtils.PREVIEW_PAYLOAD_TABLE, payloadSysIds);
+            if (withdrawn > 0) {
+                this.logger.info("[IllumioPreviewUtils] Withdrew " + withdrawn + " payload row(s)");
+            }
+        } catch (ex) {
+            this.logger.error("[IllumioPreviewUtils] Failed to withdraw payload rows: " + ex);
+        }
+    },
+
+    /**
+     * Close the job out as complete with a final log line.
+     *
+     * @param {String} illumioJobId sys_id of the scheduled job
+     * @param {String} message Reason, written to the log and the current operation
+     */
+    _complete: function(illumioJobId, message) {
+        this.utils.updateJobRecord(illumioJobId, {
+            logs: message,
+            current_operation: "Preview completed",
+            job_status: "completed",
+            job_completed: new GlideDateTime()
+        });
+    },
+
+    /**
+     * Close the job out as failed with a final log line.
+     *
+     * @param {String} illumioJobId sys_id of the scheduled job
+     * @param {String} message Reason, written to the log and the current operation
+     */
+    _fail: function(illumioJobId, message) {
+        this.logger.error("[IllumioPreviewUtils] " + message);
+        this.utils.updateJobRecord(illumioJobId, {
+            logs: message,
+            current_operation: "Preview failed",
+            job_status: "failed",
+            job_completed: new GlideDateTime()
+        });
+    },
+
+    type: "IllumioPreviewUtils"
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-22 17:49:40</sys_created_on>
+        <sys_id>8f47d7e8c3638bd050bffa0ed4013186</sys_id>
+        <sys_mod_count>8</sys_mod_count>
+        <sys_name>IllumioPreviewUtils</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_8f47d7e8c3638bd050bffa0ed4013186</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
+    </sys_script_include>
+</record_update>

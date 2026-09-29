@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioLogger</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioLogger</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var IllumioLogger = Class.create();
+
+/**
+ * Server-side logger. The instance half of the MID's IllumioLogUtil.
+ *
+ * Every line it writes to syslog_app_scope carries a correlation prefix:
+ *
+ *     [<job_sys_id>][APP.<Component>] message
+ *
+ * The job sys_id comes FIRST with nothing before it, because the retrieval filter is
+ * `message STARTSWITH "[<job sys_id>]"`. Anything in front of it breaks that query. The whole
+ * activity trail for a run is then:
+ *
+ *     sys_created_on BETWEEN job_started AND job_completed   (IS_AFTER job_started if it never ended)
+ *     AND message STARTSWITH "[<job sys_id>]"
+ *
+ * `APP.` marks the instance side; the MID logger writes `MID.` for the same reason. Once MID
+ * lines are pushed into syslog_app_scope (W5) the two are otherwise indistinguishable.
+ *
+ * WHY THIS EXISTS AT ALL: there were ~250 bare gs.info/warn/error calls across the Script
+ * Includes, Business Rules and UI Actions, none of which said which run produced them. A wrapper
+ * is the only place a prefix can be applied consistently, and the only place a debug switch can
+ * be honoured without touching every call site again.
+ *
+ * DELIBERATELY NOT NAMED IllumioLogUtil. The MID class of that name is a different
+ * implementation with a different backend (ms.log to agent0.log, not gs.* to syslog_app_scope),
+ * and two same-named classes that are not the same class is a trap for whoever greps next.
+ *
+ * @param {String} jobSysId sys_id of the scheduled job. Nil is fine -- Business Rules and UI
+ *                 Actions often have no job, and the prefix degrades to [-] rather than vanishing.
+ * @param {String} component Emitting code unit, bare (e.g. 'IllumioSyncUtils').
+ */
+IllumioLogger.prototype = {
+
+    initialize: function(jobSysId, component) {
+        // Read once per logger, not per line. gs.getProperty is a cached lookup, but a property
+        // read per log line on a path that logs per record is still a per-record cost.
+        this.debugEnabled = gs.getProperty('x_illu2_illumio.debug_logging', 'false') == 'true';
+        this.setContext(jobSysId, component);
+    },
+
+    /**
+     * Set or replace the correlation context. Safe to call more than once -- the job id is not
+     * always known when the logger is built.
+     *
+     * @param {String} jobSysId sys_id of the scheduled job, nil for "no job"
+     * @param {String} component Emitting code unit, bare. Preserved if not supplied.
+     * @returns {Object} this, so it can be chained onto a constructor
+     */
+    setContext: function(jobSysId, component) {
+        this.jobSysId = gs.nil(jobSysId) ? '' : String(jobSysId);
+        if (component) {
+            this.component = String(component);
+        }
+        // A stable shape even when either half is unknown. A line that silently loses its prefix
+        // is a line that drops out of the trail.
+        this.contextPrefix =
+            '[' + (this.jobSysId || '-') + ']' +
+            '[APP.' + (this.component || 'unknown') + '] ';
+        return this;
+    },
+
+    /**
+     * The correlated form of a message. Exposed so callers that must reach gs.* directly can
+     * still produce a findable line.
+     *
+     * No timestamp of any kind. syslog_app_scope's Created column is second-precision, so lines
+     * emitted inside one second come back in arbitrary order -- that is a platform property, not
+     * something to work around by putting a clock in the message.
+     *
+     * @param {String} msg Message
+     * @returns {String} '[<job>][APP.<Component>] msg'
+     */
+    line: function(msg) {
+        return this.contextPrefix + msg;
+    },
+
+    /**
+     * Substitute {0}, {1}, ... from the trailing arguments, here rather than by handing them to
+     * gs.
+     *
+     * The platform's own gs.info(message, parm1, parm2) substitution would work, but forwarding a
+     * variable argument list into it means either Function.apply on a Java-backed object or a
+     * switch on arguments.length at six call sites. Doing it in ES5 is deterministic, has no
+     * interop surface, and gives the same result for the {0}-style call sites already in the
+     * codebase.
+     *
+     * Two call shapes are already in the codebase and both are supported:
+     *
+     *     info('Total {0} of {1}', a, b)      -- parameters as trailing arguments
+     *     info('Total {0} of {1}', [a, b])    -- parameters as one array, which gs.* also accepts
+     *
+     * A parameter with no matching placeholder is APPENDED rather than dropped. gs.* discards it,
+     * which is why `gs.error("Error while fetching the count of labels", err)` -- and half a dozen
+     * others like it -- have been throwing away the exception text they were written to capture.
+     *
+     * @param {Arguments} args The caller's `arguments`; args[0] is the message
+     * @returns {String} Message with substitutions applied
+     */
+    _format: function(args) {
+        var msg = String(args[0]);
+
+        var parms = [];
+        var i;
+        if (args.length === 2 && args[1] instanceof Array) {
+            parms = args[1];
+        } else {
+            for (i = 1; i < args.length; i++) {
+                parms.push(args[i]);
+            }
+        }
+
+        var unmatched = [];
+        for (i = 0; i < parms.length; i++) {
+            var value = (parms[i] === null || parms[i] === undefined) ? '' : String(parms[i]);
+            var token = '{' + i + '}';
+            if (msg.indexOf(token) > -1) {
+                msg = msg.split(token).join(value);
+            } else if (value !== '') {
+                unmatched.push(value);
+            }
+        }
+
+        return unmatched.length ? msg + ' ' + unmatched.join(' ') : msg;
+    },
+
+    /**
+     * Informational. Phase boundaries, counts, outcomes.
+     * @param {String} message Message, optionally with {0}, {1}, ... placeholders
+     */
+    info: function(message) {
+        gs.info(this.line(this._format(arguments)));
+    },
+
+    /**
+     * Diagnostic. Suppressed unless the system property x_illu2_illumio.debug_logging is 'true'.
+     *
+     * Anything emitted once per record belongs here, not at info.
+     *
+     * Written with gs.info and a 'DEBUG: ' marker rather than gs.debug on purpose. gs.debug only
+     * reaches syslog_app_scope when the application's log level is turned down on sys_app, which
+     * is a second switch in a second place that nobody remembers to set. The property above is
+     * the only switch.
+     *
+     * @param {String} message Message, optionally with {0}, {1}, ... placeholders
+     */
+    debug: function(message) {
+        if (!this.debugEnabled) {
+            return;
+        }
+        gs.info(this.line('DEBUG: ' + this._format(arguments)));
+    },
+
+    /**
+     * Something is wrong but the run continues.
+     * @param {String} message Message, optionally with {0}, {1}, ... placeholders
+     */
+    warn: function(message) {
+        gs.warn(this.line(this._format(arguments)));
+    },
+
+    /**
+     * Something failed.
+     * @param {String} message Message, optionally with {0}, {1}, ... placeholders
+     */
+    error: function(message) {
+        gs.error(this.line(this._format(arguments)));
+    },
+
+    /**
+     * A caught exception. Logged at error level with the exception appended.
+     * @param {String} message Context for the exception
+     * @param {Object} exception The caught exception
+     */
+    except: function(message, exception) {
+        gs.error(this.line(message + ' :: ' + exception));
+    },
+
+    type: 'IllumioLogger'
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-29 10:11:40</sys_created_on>
+        <sys_id>de91b576c3e34f1450bffa0ed4013119</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>IllumioLogger</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_de91b576c3e34f1450bffa0ed4013119</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
+    </sys_script_include>
+</record_update>

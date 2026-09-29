@@ -27,7 +27,11 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+        <script><![CDATA[// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Update Label Dimension');
+
+(function executeRule(current, previous /*null when async*/) {
 	var details = {
 		"key": current.getValue("key").trim(),
 		"display_name_singular": current.getValue("display_name_singular").trim(),
@@ -38,7 +42,7 @@
 	};
 	
 	if (gs.nil(current.getValue("href"))) {
-		gs.error("The href for label dimension " + current.getValue("key") + " is not present. Hence, it couldn't be updated.");
+		illumioLogger.error("The href for label dimension " + current.getValue("key") + " is not present. Hence, it couldn't be updated.");
 	} else {
 		var IlUtils = new x_illu2_illumio.IllumioUtils();
 		IlUtils.updateLabelDimension(details);
@@ -50,7 +54,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>a5a5dd8c97600a10b7daf896f053afd4</sys_id>
-        <sys_mod_count>1</sys_mod_count>
+        <sys_mod_count>2</sys_mod_count>
         <sys_name>Update Label Dimension</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -58,7 +62,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_a5a5dd8c97600a10b7daf896f053afd4</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2024-04-09 11:25:32</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:45</sys_updated_on>
         <template/>
         <when>async_always</when>
     </sys_script>

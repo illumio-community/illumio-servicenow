@@ -9,16 +9,20 @@
         <mobile_callable>false</mobile_callable>
         <name>GetLabelGroupsAjax</name>
         <sandbox_callable>true</sandbox_callable>
-        <script><![CDATA[var GetLabelGroupsAjax = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var GetLabelGroupsAjax = Class.create();
 GetLabelGroupsAjax.prototype = Object.extendsObject(
     global.AbstractAjaxProcessor, {
+
+        // On the prototype, not in initialize -- see the note in IllumioUpdatePCE.
+        logger: new IllumioLogger(null, 'GetLabelGroupsAjax'),
 
         /**
          * Get label groups
          * @returns {String} Stringified object of label groups
          **/
         fetchlabelGroups: function() {
-            var labelGroupGr = new GlideRecordSecure("x_illu2_illumio_illumio_label_group_mapping");
+            var labelGroupGr = new GlideRecordSecure(TABLE_LABEL_GROUP_MAPPING);
             labelGroupGr.query();
             var labels = [];
             while (labelGroupGr.next()) {
@@ -36,7 +40,7 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
             var jobStatus = true;
             var failedConfigurations = [];
             for (var configIndex = 0; configIndex < configSysIds.length; configIndex++) {
-                var pceConfigGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_conf");
+                var pceConfigGr = new GlideRecordSecure(TABLE_PCE_CONF);
                 if (pceConfigGr.get(configSysIds[configIndex])) {
                     var utils = new x_illu2_illumio.IllumioUtils();
                     var status = utils.fetchLabelGroupsAndLabelsFromPCE(pceConfigGr);
@@ -77,7 +81,7 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
                     syncFilterLogs: {}
                 };
                 var sysIds = this.getParameter("sysparm_sys_ids");
-                var pceGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload");
+                var pceGr = new GlideRecordSecure(TABLE_PCE_WORKLOAD);
                 pceGr.addQuery("sys_id", "IN", sysIds);
                 pceGr.addQuery("conflicts", true);
                 pceGr.query();
@@ -92,9 +96,9 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
                 }
 
                 // Apply Sync Filter for each PCE Configuration
-                var utils = new x_illu2_illumio.IllumioUtils();
+                var filterUtils = new x_illu2_illumio.IllumioSyncFilterUtils();
                 for (var configId in retObject["data"]) {
-                    var syncFilterResult = utils.getEligibleWorkloadSysIdsByConfig(configId, 'inclusion');
+                    var syncFilterResult = filterUtils.getEligibleWorkloadSysIdsByConfig(configId, 'inclusion');
                     if (syncFilterResult.hasFilter) {
                         var eligibleSet = {};
                         for (var e = 0; e < syncFilterResult.sysIds.length; e++) {
@@ -115,7 +119,7 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
 
                 return JSON.stringify(retObject);
             } catch (e) {
-                gs.error("[filterRecords]Exception in filtering records: ", e);
+                this.logger.error("[filterRecords]Exception in filtering records: ", e);
             }
         },
 
@@ -175,7 +179,7 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
 
                 });
             } catch (ex) {
-                gs.error("[getCreateLabelCounter] exception occurred while counting labels to create. Exception", ex);
+                this.logger.error("[getCreateLabelCounter] exception occurred while counting labels to create. Exception", ex);
                 return JSON.stringify({
                     hasError: true,
                     message: "Error while counting labels."
@@ -201,7 +205,7 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
                 return JSON.stringify(thresholdLimit.checkThresholdLimit(configSysId, labelsToCreate, wlToModify, workloadToCreate));
 
             } catch (ex) {
-                gs.error("[checkThresholdLimit] Exception occurred while checking threshold limit. Exception: " + ex);
+                this.logger.error("[checkThresholdLimit] Exception occurred while checking threshold limit. Exception: " + ex);
             }
         },
 
@@ -214,11 +218,11 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
             try {
                 var workloadSysId = this.getParameter("sysparm_sys_ids");
                 var utils = new x_illu2_illumio.IllumioUtils();
-                var mappedFields = new IllumioGetPCEConfiguration().getMappedFields();
+                var mappedFields = new IllumioGetPCEConfiguration().getLabelDimensionsBySourceTable();
                 var response = utils.getInterfacesObject(workloadSysId, mappedFields.fields);
                 return JSON.stringify(response);
             } catch (ex) {
-                gs.error("[getValidatedInterfaces] Exception occurred while generating valid interfaces object. Exception: " + ex);
+                this.logger.error("[getValidatedInterfaces] Exception occurred while generating valid interfaces object. Exception: " + ex);
             }
         },
 
@@ -231,7 +235,7 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
                 var pceConfig = new IllumioGetPCEConfiguration().getConfiguration();
                 return JSON.stringify(pceConfig);
             } catch (ex) {
-                gs.error("[getConfigurationDetails] Exception occurred while getting configuration details. Exception: " + ex);
+                this.logger.error("[getConfigurationDetails] Exception occurred while getting configuration details. Exception: " + ex);
             }
         },
 
@@ -244,7 +248,7 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
 
             var jobSysId = this.getParameter("sysparm_job_sys_id");
 
-            var scheduledJobGr = new GlideRecordSecure("x_illu2_illumio_illumio_scheduled_jobs");
+            var scheduledJobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
             if (scheduledJobGr.get("sys_id", jobSysId)) {
                 if (scheduledJobGr.job_status == "running")
                     return JSON.stringify({
@@ -270,11 +274,11 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
 
             var jobSysId = this.getParameter("sysparm_job_sys_id");
 
-            var scheduledJobGr = new GlideRecordSecure("x_illu2_illumio_illumio_scheduled_jobs");
+            var scheduledJobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
             if (scheduledJobGr.get("sys_id", jobSysId)) {
                 scheduledJobGr.setValue("job_status", "cancelled");
                 scheduledJobGr.setValue("job_completed", new GlideDateTime());
-                scheduledJobGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + ']  The Job is Cancelled';
+                scheduledJobGr.logs += '\nThe Job is Cancelled';
                 scheduledJobGr.update();
                 return true;
             } else {
@@ -288,14 +292,14 @@ GetLabelGroupsAjax.prototype = Object.extendsObject(
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-10-29 15:02:03</sys_created_on>
         <sys_id>e83ebd53db84e4901206fd641d9619bd</sys_id>
-        <sys_mod_count>205</sys_mod_count>
+        <sys_mod_count>209</sys_mod_count>
         <sys_name>GetLabelGroupsAjax</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_e83ebd53db84e4901206fd641d9619bd</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-27 05:54:00</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:42</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>e83ebd53db84e4901206fd641d9619bd</id>

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_security_acl">
+    <sys_security_acl action="DELETE">
+        <active>true</active>
+        <admin_overrides>true</admin_overrides>
+        <advanced>false</advanced>
+        <applies_to/>
+        <condition/>
+        <controlled_by_refs/>
+        <decision_type>allow</decision_type>
+        <description/>
+        <local_or_existing>Existing</local_or_existing>
+        <name>/api/x_illu2_illumio/illumio_mid_log/push</name>
+        <operation display_value="http_post">ef56dd8cffa03210789affffffffff9c</operation>
+        <script/>
+        <security_attribute/>
+        <sys_class_name>sys_security_acl</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-29 11:55:03</sys_created_on>
+        <sys_id>e6b88e3ac3a74f1450bffa0ed4013186</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>/api/x_illu2_illumio/illumio_mid_log/push</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_security_acl_e6b88e3ac3a74f1450bffa0ed4013186</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 11:55:03</sys_updated_on>
+        <type display_value="REST_Endpoint">REST_Endpoint</type>
+    </sys_security_acl>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>265197833bafced0c55a348aa4e45a7a</instance_id>
+        <instance_name>dev279711</instance_name>
+        <name>sys_security_acl_e6b88e3ac3a74f1450bffa0ed4013186</name>
+        <payload><![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_security_acl"><sys_security_acl action="INSERT_OR_UPDATE"><active>true</active><admin_overrides>true</admin_overrides><advanced>false</advanced><applies_to/><condition/><controlled_by_refs/><decision_type>allow</decision_type><description/><local_or_existing>Existing</local_or_existing><name>/api/x_illu2_illumio/illumio_mid_log/push</name><operation display_value="http_post">ef56dd8cffa03210789affffffffff9c</operation><script/><security_attribute/><sys_class_name>sys_security_acl</sys_class_name><sys_created_by>admin</sys_created_by><sys_created_on>2026-09-29 11:55:03</sys_created_on><sys_id>e6b88e3ac3a74f1450bffa0ed4013186</sys_id><sys_mod_count>0</sys_mod_count><sys_name>/api/x_illu2_illumio/illumio_mid_log/push</sys_name><sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package><sys_policy/><sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope><sys_update_name>sys_security_acl_e6b88e3ac3a74f1450bffa0ed4013186</sys_update_name><sys_updated_by>admin</sys_updated_by><sys_updated_on>2026-09-29 11:55:03</sys_updated_on><type display_value="REST_Endpoint">REST_Endpoint</type></sys_security_acl></record_update>]]></payload>
+        <payload_hash>-872637288</payload_hash>
+        <record_name>/api/x_illu2_illumio/illumio_mid_log/push</record_name>
+        <reverted_from/>
+        <source>4530ca06c347031050bffa0ed4013170</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-29 11:55:03</sys_created_on>
+        <sys_id>f44942bac3a74f1450bffa0ed4013181</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a0ed04b4c70000001</sys_recorded_at>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 11:55:03</sys_updated_on>
+        <type>Access Control</type>
+        <update_guid>b44942ba57a74f140947944f996b3f80</update_guid>
+        <update_guid_history>b44942ba57a74f140947944f996b3f80:-872637288</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-29 12:13:09</sys_created_on>
+        <sys_db_object display_value="" name="sys_security_acl">sys_security_acl</sys_db_object>
+        <sys_id>48979039358d4016840103bbb7fabaa1</sys_id>
+        <sys_metadata>e6b88e3ac3a74f1450bffa0ed4013186</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>/api/x_illu2_illumio/illumio_mid_log/push</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sys_security_acl_e6b88e3ac3a74f1450bffa0ed4013186</sys_update_name>
+        <sys_update_version display_value="sys_security_acl_e6b88e3ac3a74f1450bffa0ed4013186">f44942bac3a74f1450bffa0ed4013181</sys_update_version>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:13:09</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

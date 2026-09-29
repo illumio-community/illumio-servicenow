@@ -35,24 +35,38 @@
         <script><![CDATA[function confirmDeleteSelectedWorkloads() {
     var checkedSysIds = g_list.getChecked();
 
-    if (!checkedSysIds) {
+    // Every message this action shows goes through here.
+    //
+    // The list has no g_form, so the form action's g_form.addInfoMessage/addErrorMessage is not
+    // available. This used to write into top.document's `output_messages` / `page_notifications`
+    // div, guarded by `if (container)` -- and on the list those elements are not present, so the
+    // guard swallowed the message and the action looked like it had done nothing. That is what
+    // hid the "another job is already running" refusal: the server was returning it correctly,
+    // and the client was dropping it on the floor. The modal below is the same one the selection
+    // and validation errors already use, which is why those two were the ones that did show.
+    function showNotice(title, message) {
         var gm = new GlideModal('', false, 500);
-        gm.setTitle('No workloads selected');
+        gm.setTitle(title);
 
         top.window.deleteSelectedWorkloadsCallback = function() {
             gm.destroy();
             return false;
         };
 
-        var noSelectionHtml =
+        gm.renderWithContent(
             '<div style="padding: 8px 4px 4px 4px; font-size: 16px; line-height: 1.5;">' +
-                '<p>No workloads selected. Please select one or more workloads from the list.</p>' +
+                '<p>' + message + '</p>' +
                 '<div style="display:flex; justify-content:flex-end; margin-top:20px;">' +
-                    '<button style="width: 100%" class="btn btn-default" onclick="top.window.deleteSelectedWorkloadsCallback(); return false;">OK</button>' +
+                    '<button style="width: 100%" class="btn btn-default" ' +
+                        'onclick="top.window.deleteSelectedWorkloadsCallback(); return false;">' +
+                        'OK</button>' +
                 '</div>' +
-            '</div>';
+            '</div>');
+    }
 
-        gm.renderWithContent(noSelectionHtml);
+    if (!checkedSysIds) {
+        showNotice('No workloads selected',
+            'No workloads selected. Please select one or more workloads from the list.');
         return false;
     }
 
@@ -66,23 +80,9 @@
         var validCount = validation.managedCount + validation.unmanagedCount;
 
         if (validation.unknownCount > 0) {
-            var gmBlock = new GlideModal('', false, 500);
-            gmBlock.setTitle('No workloads selected');
-
-            top.window.deleteSelectedWorkloadsCallback = function() {
-                gmBlock.destroy();
-                return false;
-            };
-
-            var blockHtml =
-                '<div style="padding: 8px 4px 4px 4px; font-size: 16px; line-height: 1.5;">' +
-                    '<p>One or more invalid workloads selected. Please run this action on existing Managed or Unmanaged workloads.</p>' +
-                    '<div style="display:flex; justify-content:flex-end; margin-top:20px;">' +
-                        '<button style="width: 100%" class="btn btn-default" onclick="top.window.deleteSelectedWorkloadsCallback(); return false;">OK</button>' +
-                    '</div>' +
-                '</div>';
-
-            gmBlock.renderWithContent(blockHtml);
+            showNotice('No workloads selected',
+                'One or more invalid workloads selected. Please run this action on existing ' +
+                'Managed or Unmanaged workloads.');
             return;
         }
 
@@ -100,17 +100,12 @@
                     var result = JSON.parse(deleteResponse);
                     if (result.success) {
                         g_list.refresh();
-                        var msgContainer = top.document.getElementById('output_messages') ||
-                            top.document.getElementById('page_notifications');
-                        if (msgContainer) {
-                            msgContainer.innerHTML = '<div class="outputmsg_success"><span class="outputmsg_text">' + result.message + '</span></div>';
-                        }
+                        showNotice('Deletion started', result.message);
                     } else {
-                        var errContainer = top.document.getElementById('output_messages') ||
-                            top.document.getElementById('page_notifications');
-                        if (errContainer) {
-                            errContainer.innerHTML = '<div class="outputmsg_error"><span class="outputmsg_text">' + result.message + '</span></div>';
-                        }
+                        // Refusals land here: another job already running, workloads spanning
+                        // more than one PCE Configuration, nothing eligible, or a failure to
+                        // write the payload rows. All of them are things the user has to read.
+                        showNotice('Deletion not started', result.message);
                     }
                 });
             }
@@ -153,7 +148,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>54ba492cc3aa475050bffa0ed40131b1</sys_id>
-        <sys_mod_count>17</sys_mod_count>
+        <sys_mod_count>18</sys_mod_count>
         <sys_name>Delete Selected Workloads</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -161,7 +156,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_54ba492cc3aa475050bffa0ed40131b1</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-08-24 06:52:17</sys_updated_on>
+        <sys_updated_on>2026-09-24 11:28:25</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_workload</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>true</ui16_compatible>

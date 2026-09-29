@@ -11,7 +11,15 @@ IllumioManageAsyncJobs.prototype = {
     initialize: function() {
 
         // set the parameters here
-        this.logger = new IllumioLogUtil();
+        // Read up here rather than at the four call sites that used to fetch it individually, so
+        // the logger can be given its correlation context before anything logs.
+        this.illumio_jobId = probe.getParameter('glide.jms.illumio_scheduled_job_id');
+        this.logger = new IllumioLogUtil(this.illumio_jobId, 'IllumioManageAsyncJobs');
+        // Only reached when glide.jms.chunk_size is missing or unparseable. SHOULD MATCH the
+        // default on BATCH_SIZE_STANDARD in IllumioConstants -- a MID script include has no gs
+        // and cannot read a system property, so the number is duplicated by hand, the same way
+        // PAYLOAD_JOB_FIELD is in IllumioMIDConstants. Divergence is not fatal here: it only
+        // changes the chunk size on a run whose ECC message was already malformed.
         this._fallbackDefaultBatchSize = 1000;
         var url = String(ms.getConfigParameter("url"));
         if (url.charAt(url.length - 1) == '/') {
@@ -30,9 +38,10 @@ IllumioManageAsyncJobs.prototype = {
         this.batchSize = parseInt(this.batchSize, 10) || this._fallbackDefaultBatchSize;
         if (this.batchSize < 1) {
             this.logger._warning(
-                "Invalid 'x_illu2_illumio.payload.batch.size' provided. Proceeding with " +
+                "Invalid 'x_illu2_illumio.batch_size_standard' provided. Proceeding with " +
                 this._fallbackDefaultBatchSize +
-                " as default value. Please set a valid value to 'x_illu2_illumio.payload.batch.size' property."
+                " as default value. Please set a valid value to " +
+                "'x_illu2_illumio.batch_size_standard' property."
             );
             this.batchSize = this._fallbackDefaultBatchSize;
         }
@@ -47,7 +56,7 @@ IllumioManageAsyncJobs.prototype = {
         this.snowDateFormat.setTimeZone(this.TimeZone.getTimeZone('GMT'));
         this.illumioDateFormat.setTimeZone(this.TimeZone.getTimeZone('UTC'));
 
-        this.utils = new IllumioPCEUtils(this.timeZone);
+        this.utils = new IllumioPCEUtils(this.timeZone, this.illumio_jobId);
 
         this.protocol = this.utils.getPortFromUrl(this.pceUrl);
 
@@ -63,15 +72,40 @@ IllumioManageAsyncJobs.prototype = {
         this.pceUsername = decodedAuth[0];
         this.pcePassword = decodedAuth.slice(1).join(':');
 
-        this.pceHttpClient = new IllumioHTTPClient(this.pceUrl, this.pceUsername, this.pcePassword, this.protocol, this.pceMIDProxy, this.retryParams);
-        this.snHttpClient = new IllumioHTTPClient(this.snowUrl, this.snowUsername, this.snowPassword, "443", null, this.retryParams);
-        this.illumio_jobId = probe.getParameter("glide.jms.illumio_scheduled_job_id");
+        this.pceHttpClient = new IllumioHTTPClient(this.pceUrl, this.pceUsername, this.pcePassword, this.protocol, this.pceMIDProxy, this.retryParams, this.illumio_jobId);
+        this.snHttpClient = new IllumioHTTPClient(this.snowUrl, this.snowUsername, this.snowPassword, "443", null, this.retryParams, this.illumio_jobId);
+        // illumio_jobId used to be read here, at the very bottom of initialize -- after both HTTP
+        // clients and after the logger. It is read at the top now so the correlation context
+        // exists before anything can log.
     },
 
+    /**
+     * Probe entry point.
+     *
+     * W5/W6: the body is _run(). This wrapper exists for two things the body cannot do for
+     * itself.
+     *
+     * W6 -- one boundary line the moment the probe starts, pushed to the instance rather than
+     * left in agent0.log. A transport failure (MID offline, the message never picked up, a probe
+     * name that does not resolve) runs none of our code, so nothing inside here can report it.
+     * The instance logging "queued for the MID" with no probe-entered line after it is what
+     * says the break is in the transport and not in either half.
+     *
+     * W5 -- the push budget for this run is reset here, before the milestone below, or that line
+     * would be charged against whatever the previous run in this MID JVM spent. There is nothing
+     * to do at the end: each line is pushed to the instance as it happens, so a run that throws
+     * has already delivered the errors that led up to the throw.
+     */
     run: function() {
+        this.logger.resetPushBudget();
+        this.logger._milestone('Probe entered.');
+        return this._run();
+    },
+
+    _run: function() {
 
         if (
-            this.utils.checkCancelledJobStatus(this.illumio_jobId, this.snowUrl, this.snowUsername, this.snowPassword)
+            this.utils.checkCancelledJobStatus(this.illumio_jobId)
         ) {
             return;
         }
@@ -105,7 +139,7 @@ IllumioManageAsyncJobs.prototype = {
                 Prefer: 'respond-async'
             };
 
-            if (this.utils.checkCancelledJobStatus(this.illumio_jobId, this.snowUrl, this.snowUsername, this.snowPassword)) {
+            if (this.utils.checkCancelledJobStatus(this.illumio_jobId)) {
                 return;
             }
 
@@ -135,7 +169,7 @@ IllumioManageAsyncJobs.prototype = {
                 job_identifier: probe.getParameter('glide.jms.job_identifier')
             };
 
-            if (this.utils.checkCancelledJobStatus(this.illumio_jobId, this.snowUrl, this.snowUsername, this.snowPassword)) {
+            if (this.utils.checkCancelledJobStatus(this.illumio_jobId)) {
                 return;
             }
 
@@ -167,7 +201,7 @@ IllumioManageAsyncJobs.prototype = {
             var isResultsAvailable = false;
 
 
-            if (this.utils.checkCancelledJobStatus(this.illumio_jobId, this.snowUrl, this.snowUsername, this.snowPassword)) {
+            if (this.utils.checkCancelledJobStatus(this.illumio_jobId)) {
                 return;
             }
 
@@ -231,7 +265,7 @@ IllumioManageAsyncJobs.prototype = {
         try {
 
 
-            if (this.utils.checkCancelledJobStatus(this.illumio_jobId, this.snowUrl, this.snowUsername, this.snowPassword)) {
+            if (this.utils.checkCancelledJobStatus(this.illumio_jobId)) {
                 return;
             }
 
@@ -317,7 +351,7 @@ IllumioManageAsyncJobs.prototype = {
             // Worth knowing when this is non-zero for workloads: PCE workloads created through
             // the PCE UI have Name set but Hostname null, so they never reach the mapping table
             // and the CMDB CI that should have matched one classifies as unknown instead.
-            var fetchLog = '[' + tag + '] Fetched from PCE: ' + resultLength + ' records (' + fetchElapsed + 's)';
+            var fetchLog = '[' + tag + '] Fetched: ' + resultLength + ' (' + fetchElapsed + 's)';
             if (missingPrimaryKey > 0) {
                 fetchLog += '; skipped ' + missingPrimaryKey + ' with no ' + primaryKey;
             }
@@ -326,7 +360,7 @@ IllumioManageAsyncJobs.prototype = {
                 logs: fetchLog
             });
 
-            if (this.utils.checkCancelledJobStatus(this.illumio_jobId, this.snowUrl, this.snowUsername, this.snowPassword)) {
+            if (this.utils.checkCancelledJobStatus(this.illumio_jobId)) {
                 return;
             }
             // add 1 more iteration count in case the 'resultLength' is exactly divisible by 'batchSize'
@@ -357,7 +391,7 @@ IllumioManageAsyncJobs.prototype = {
 
             var stagingElapsed = ((new Date().getTime() - stagingStartTime) / 1000).toFixed(2);
             this._updateJobRecord(scheduled_job_id, {
-                logs: '[' + tag + '] Written to staging: ' + batchCount + ' batch(es) (batch size: ' + this.batchSize + ', ' + resultLength + ' records) (' + stagingElapsed + 's)'
+                logs: '[' + tag + '] Staged: ' + batchCount + ' batch(s) (Size: ' + this.batchSize + ') (' + stagingElapsed + 's)'
             });
 
             this.logger._info('IllumioManageAsyncJobs - Posted all records to SNOW');
@@ -400,71 +434,79 @@ IllumioManageAsyncJobs.prototype = {
     },
 
     /**
-     * Updates scheduled job record with given parameters
-     * 
-     * @param {String} jobId sys_id of the job record
-     * @param {String} content of job
-     * 
+     * Updates scheduled job record with given parameters.
+     *
+     * One GET, one PUT, and the PUT carries only the fields that changed. Same rewrite as
+     * IllumioUpdateWorkloads._updateJobRecord and for the same reasons -- see the note there:
+     * `job_status` is actually fetched now (all the status comparisons here were against
+     * undefined), the whole-record PUT and its `illumio_pce_configuration` re-flatten are gone,
+     * and `String.replaceAll` was ES2021 on a Rhino engine.
+     *
+     * @param {String} jobSysId sys_id of the job record
+     * @param {Object} jobContent Fields to write. `logs` is appended to what is already there;
+     *                 everything else is replaced.
      */
     _updateJobRecord: function(jobSysId, jobContent) {
 
         var snowGetUrl =
             TABLE_API +
             SCHEDULED_JOB_TABLE +
-            '?sysparm_fields=logs&sysparm_query=sys_id=' +
-            jobSysId;
+            '?sysparm_fields=logs,job_status&sysparm_query=sys_id=' + jobSysId +
+            '&sysparm_limit=1';
 
         var putUrl =
             TABLE_API + SCHEDULED_JOB_TABLE + '/' + jobSysId;
 
         var response = this.snHttpClient.get(snowGetUrl, '');
-        if (response.data.result.length == 0) {
+        if (response.hasError || !response.data || !response.data.result ||
+            response.data.result.length === 0) {
             this.logger._error(
-                '[run] Error while checking status of given job on ServiceNow. Proceeding with further actions.'
+                '[_updateJobRecord] Error while checking status of given job on ServiceNow. ' +
+                'Proceeding with further actions.'
             );
-            return;
+            return false;
         }
 
         var jobRecord = response.data.result[0];
+        var status = String(jobRecord.job_status);
 
-        if (response.hasError) {
-            return false;
-        } else if (jobRecord.job_status == 'cancelled') {
+        if (CANCELLED_JOB_STATUSES.indexOf(status) > -1) {
             return true;
         }
 
-        if (jobRecord.job_status != 'failed') {
-
-            for (var key in jobContent) {
-                if (jobContent.hasOwnProperty(key)) {
-                    if (key != 'logs') {
-                        jobRecord[key] = jobContent[key];
-                    } else {
-                        jobRecord["logs"] = jobRecord["logs"].replaceAll("\\n", "\n");
-                        jobRecord["logs"] += '\n' + '[' + this.illumioDateFormat.format(new Date()) + '] ' + jobContent["logs"];
-
-                    }
-                }
-            }
-            jobRecord["illumio_pce_configuration"] = jobRecord.illumio_pce_configuration.value;
-            var putResponse = this.snHttpClient.put(
-                putUrl,
-                '',
-                null,
-                jobRecord
-            );
-            if (putResponse.hasError) {
-                return false;
-            } else {
-                this.logger._info(
-                    'The Scheduled Job had updated the values with the logs'
-                );
-            }
-        } else {
+        if (status == 'failed') {
             this.logger._info(
-                '[_updateJobRecord] Given job is invalidated. Aborting further actions.'
+                '[_updateJobRecord] Given job has already failed. Aborting further actions.'
             );
+            return false;
         }
+
+        var payload = {};
+        for (var key in jobContent) {
+            if (jobContent.hasOwnProperty(key) && key != 'logs') {
+                payload[key] = jobContent[key];
+            }
+        }
+
+        if (jobContent.hasOwnProperty('logs')) {
+            var existingLogs = String(jobRecord.logs == null ? '' : jobRecord.logs)
+                .replace(/\\n/g, '\n');
+            // W1: no per-line timestamp. The same line is emitted to syslog_app_scope, which
+            // timestamps it there, and the job log is a milestone list rather than a trace.
+            payload.logs = existingLogs + (existingLogs ? '\n' : '') + jobContent.logs;
+            // W2: the job log and Application Logs carry the same milestones. Anything worth a
+            // line on the job record is worth one in the correlated trail, where it sits next to
+            // the MID-side detail that produced it. _milestone pushes it to the instance too, so
+            // a job-log line and its surrounding context are readable from one place.
+            this.logger._milestone(String(jobContent.logs));
+        }
+
+        var putResponse = this.snHttpClient.put(putUrl, '', null, payload);
+        if (putResponse.hasError) {
+            return false;
+        }
+
+        this.logger._debug('The Scheduled Job had updated the values with the logs');
     },
 
     type: "IllumioUpdateKnownWorkloads"
@@ -475,7 +517,7 @@ IllumioManageAsyncJobs.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>63973142db8c6700dc9fabc5ca961947</sys_id>
-        <sys_mod_count>92</sys_mod_count>
+        <sys_mod_count>96</sys_mod_count>
         <sys_name>IllumioManageAsyncJobs</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -483,6 +525,6 @@ IllumioManageAsyncJobs.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_63973142db8c6700dc9fabc5ca961947</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-16 20:38:54</sys_updated_on>
+        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

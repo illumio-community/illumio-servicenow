@@ -3,47 +3,17 @@
         <sys_ui_related_list_entry action="INSERT_OR_UPDATE">
             <filter/>
             <group_by_field/>
-            <list_id display_value="Illumio Sync Filter - Default view" name="x_illu2_illumio_illumio_sync_filter" related_list="NULL" sys_domain="global" view="Default view">d53e6cc2c3b4071050bffa0ed40131f1</list_id>
+            <list_id display_value="Illumio Sync Filter - Default view" name="x_illu2_illumio_illumio_sync_filter" related_list="NULL" sys_domain="global" view="Default view">e095bea0c36f4bd050bffa0ed401317d</list_id>
             <order_by/>
             <position>0</position>
-            <related_list>x_illu2_illumio_illumio_sync_filter_group.sync_filter</related_list>
+            <related_list/>
             <sys_class_name>sys_ui_related_list_entry</sys_class_name>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-05-13 04:29:06</sys_created_on>
-            <sys_id>dd3e6cc2c3b4071050bffa0ed40131f3</sys_id>
+            <sys_created_on>2026-09-22 15:22:19</sys_created_on>
+            <sys_id>2c95bea0c36f4bd050bffa0ed401317f</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-05-13 04:29:06</sys_updated_on>
-        </sys_ui_related_list_entry>
-        <sys_ui_related_list_entry action="INSERT_OR_UPDATE">
-            <filter/>
-            <group_by_field/>
-            <list_id display_value="Illumio Sync Filter - Default view" name="x_illu2_illumio_illumio_sync_filter" related_list="NULL" sys_domain="global" view="Default view">d53e6cc2c3b4071050bffa0ed40131f1</list_id>
-            <order_by/>
-            <position>1</position>
-            <related_list>x_illu2_illumio_illumio_label_filter_item.illumio_sync_filter</related_list>
-            <sys_class_name>sys_ui_related_list_entry</sys_class_name>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-05-13 04:29:06</sys_created_on>
-            <sys_id>dd3e6cc2c3b4071050bffa0ed40131f4</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-05-13 04:29:06</sys_updated_on>
-        </sys_ui_related_list_entry>
-        <sys_ui_related_list_entry action="INSERT_OR_UPDATE">
-            <filter/>
-            <group_by_field/>
-            <list_id display_value="Illumio Sync Filter - Default view" name="x_illu2_illumio_illumio_sync_filter" related_list="NULL" sys_domain="global" view="Default view">d53e6cc2c3b4071050bffa0ed40131f1</list_id>
-            <order_by/>
-            <position>2</position>
-            <related_list>x_illu2_illumio_illumio_workload_field_filter_item.illumio_sync_filter</related_list>
-            <sys_class_name>sys_ui_related_list_entry</sys_class_name>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-05-13 04:29:06</sys_created_on>
-            <sys_id>553e6cc2c3b4071050bffa0ed40131f5</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-05-13 04:29:06</sys_updated_on>
+            <sys_updated_on>2026-09-22 15:22:19</sys_updated_on>
         </sys_ui_related_list_entry>
         <sys_ui_related_list action="INSERT_OR_UPDATE">
             <calculated_name>Illumio Sync Filter - Default view</calculated_name>
@@ -54,10 +24,10 @@
             <related_list/>
             <sys_class_name>sys_ui_related_list</sys_class_name>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-05-13 04:29:06</sys_created_on>
+            <sys_created_on>2026-09-22 15:22:19</sys_created_on>
             <sys_domain>global</sys_domain>
             <sys_domain_path>/</sys_domain_path>
-            <sys_id>d53e6cc2c3b4071050bffa0ed40131f1</sys_id>
+            <sys_id>e095bea0c36f4bd050bffa0ed401317d</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_name>Illumio Sync Filter - Default view</sys_name>
             <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -65,7 +35,7 @@
             <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
             <sys_update_name>sys_ui_related_x_illu2_illumio_illumio_sync_filter_null</sys_update_name>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-05-13 04:29:06</sys_updated_on>
+            <sys_updated_on>2026-09-22 15:22:19</sys_updated_on>
             <sys_user/>
             <view display_value="Default view" name="NULL">Default view</view>
             <view_name/>

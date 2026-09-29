@@ -1,0 +1,699 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="ecc_agent_script_include">
+    <ecc_agent_script_include action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <description/>
+        <name>IllumioGeneratePreviewFile</name>
+        <script><![CDATA[ms.include("IllumioMIDConstants");
+
+var IllumioGeneratePreviewFile = Class.create();
+
+/**
+ * Assemble a preview CSV on disk and attach it to the record that was previewed.
+ *
+ * The instance has already done everything that needs the data: evaluated the filter, rendered
+ * the CSV and written it to x_illu2_illumio_illumio_preview_payload in ~1 MB chunks, in order,
+ * numbered from zero. This probe owns the half the instance cannot do, because it is the half
+ * that needs a filesystem: read the chunks back one at a time, append each to a temp file, and
+ * POST that file to the Attachment API.
+ *
+ * Nothing here parses the CSV, understands a workload or talks to the PCE -- which is why this is
+ * the only probe in the application that is sent no PCE credentials. It reads the instance with
+ * the MID Server's own mid.instance.* account.
+ *
+ * Memory is the whole point. A 200k-workload preview is ~120 MB and a 2M one ~400 MB;
+ * GlideSysAttachment.write takes its content as a string, so the instance cannot produce that
+ * file at all. Here, one chunk is in memory at a time, it is deflated straight into the file as
+ * it arrives, and FileRequestEntity streams the finished file from disk -- so peak usage is
+ * ~1 MB whatever the export weighs, and the raw CSV never exists in full in any process.
+ *
+ * Platform independence is by construction: every write is a byte array in append mode. No
+ * Writer, so no default-charset surprise on a Windows MID; no println/newLine, so no CRLF
+ * translation over line endings the instance already chose.
+ *
+ * @see IllumioPreviewUtils for the instance half and the parameter contract
+ */
+IllumioGeneratePreviewFile.prototype = {
+
+    // Temp files are named so a leftover is identifiable as ours and sweepable by prefix.
+    FILE_PREFIX: "illumio-preview-",
+
+    // How old a prefix-matching temp file must be before the sweep will delete it.
+    //
+    // This is what makes _sweepOrphanFiles safe to run while another preview is assembling. The
+    // sweep used to delete every file carrying our prefix, on the reasoning that only one Illumio
+    // job runs at a time -- the same false invariant that let the instance-side payload sweep
+    // destroy a concurrent run's rows. An assembling file is being written to continuously, so
+    // its last-modified time is always within seconds of now; anything this old belongs to a run
+    // that died before its finally block.
+    //
+    // Six hours, which is absurdly generous against an assembly measured in minutes even at
+    // 120 MB. The cost of being too generous is a dead run's file surviving until the next
+    // preview; the cost of being too tight is deleting a live file mid-write. Those are not
+    // comparable, so the threshold is set where only one of them can happen.
+    //
+    // Age rather than asking the instance which jobs are still open, which is what the
+    // instance-side sweep does. That would be the exact analogue, but it puts a REST round trip
+    // and a new failure mode into a cleanup path, and it would still be wrong if the instance
+    // were unreachable. A clock needs nothing and cannot be unavailable.
+    ORPHAN_MIN_AGE_MS: 6 * 60 * 60 * 1000,
+
+    // Cancellation is checked every Nth chunk rather than every chunk. Each check is a round trip
+    // to the instance, and stopping one chunk (~1 MB, under a second) late costs nothing.
+    CANCEL_CHECK_EVERY: 10,
+
+    // How often a progress line is written to the job record. Two round trips each, so this is
+    // deliberately coarse -- a 120-chunk export logs six times, not 120.
+    PROGRESS_EVERY: 20,
+
+    // ---- compression ----
+    //
+    // The file is gzipped on the way to disk. At a million workloads the raw CSV is ~200 MB and
+    // at two million ~400 MB, which is an attachment nobody wants to store or download and is
+    // close enough to glide.attachment.max_size to be a question every time. This CSV is highly
+    // repetitive -- 32-character hex sys_ids, a small set of label values, one table name
+    // repeated on every row -- so gzip returns roughly 5-10x on it.
+    //
+    // It costs nothing that matters: compression happens on the MID Server, which is not the
+    // constrained side of this pipeline and is otherwise idle while it waits on the instance,
+    // and DEFLATE at the default level runs faster than the Table API can feed it chunks.
+    GZIP_EXTENSION: ".gz",
+    GZIP_CONTENT_TYPE: "application/gzip",
+
+    // Bigger than GZIPOutputStream's 512-byte default, which would mean a syscall every half
+    // kilobyte across hundreds of megabytes.
+    GZIP_BUFFER_BYTES: 65536,
+
+    initialize: function() {
+        // Contextless until jobSysId is read below. See setContext in IllumioLogUtil.
+        this.logger = new IllumioLogUtil(null, 'IllumioGeneratePreviewFile');
+
+        this.SNOWusername = ms.getConfigParameter("mid.instance.username");
+        this.SNOWpassword = ms.getConfigParameter("mid.instance.password");
+        this.SNOWurl = String(ms.getConfigParameter("url"));
+        if (this.SNOWurl[this.SNOWurl.length - 1] === '/') {
+            this.SNOWurl = this.SNOWurl.substring(0, this.SNOWurl.length - 1);
+        }
+
+        this.jobSysId = this._parameter('jobSysId');
+        this.logger.setContext(this.jobSysId);
+        this.previewType = this._parameter('previewType');
+        this.targetTable = this._parameter('targetTable');
+        this.targetSysId = this._parameter('targetSysId');
+        this.fileName = this._parameter('fileName');
+        this.payloadTable = this._parameter('payloadTable') || PREVIEW_PAYLOAD_TABLE;
+        this.chunkCount = parseInt(this._parameter('chunkCount'), 10);
+        this.totalBytes = parseInt(this._parameter('totalBytes'), 10);
+
+        this.timeZone = this._parameter('time_zone');
+        this.SimpleDF = Packages.java.text.SimpleDateFormat;
+        this.TimeZone = Packages.java.util.TimeZone;
+
+        this.snowDateFormat = this.SimpleDF("yyyy-MM-dd HH:mm:ss");
+        this.illumioDateFormat = this.SimpleDF("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
+
+        this.snowDateFormat.setTimeZone(this.TimeZone.getTimeZone('GMT'));
+        this.illumioDateFormat.setTimeZone(this.TimeZone.getTimeZone('UTC'));
+
+        this.File = Packages.java.io.File;
+        this.FileOutputStream = Packages.java.io.FileOutputStream;
+        this.GZIPOutputStream = Packages.java.util.zip.GZIPOutputStream;
+        this.JavaString = Packages.java.lang.String;
+        this.URLEncoder = Packages.java.net.URLEncoder;
+
+        // The file is gzipped, so the attachment is named .csv.gz. The MID owns this because the
+        // MID owns the compression -- the instance names the file .csv and the extension is
+        // appended here, so the name can never claim something the bytes do not.
+        //
+        // Guarded, and it has to be: _validate rejects a missing fileName on truthiness, and an
+        // unconditional append turns "" into ".gz" -- a truthy name for a parameter that was
+        // never sent. The job would then run to completion and attach a file called ".gz".
+        if (this.fileName) {
+            this.fileName = this.fileName + this.GZIP_EXTENSION;
+        }
+
+        this.retryParams = DEFAULT_RETRY_PARAMS;
+        try {
+            this.retryParams = JSON.parse(this._parameter('retry_params'));
+        } catch (e) {
+            this.logger._debug('IllumioGeneratePreviewFile - no retry parameters supplied, ' +
+                'using defaults');
+        }
+
+        this.snHttpClient = new IllumioHTTPClient(this.SNOWurl, this.SNOWusername,
+            this.SNOWpassword, "443", null, this.retryParams, this.jobSysId);
+    },
+
+    /**
+     * Read an ECC message parameter as a JavaScript string.
+     *
+     * probe.getParameter returns a java.lang.String, and a Java object is truthy even when it
+     * holds "" -- so `if (!this.fileName)` on a raw parameter would never catch a missing one.
+     * It also returns Java null for a parameter that was not sent, which concatenates to the
+     * four characters "null" rather than to nothing.
+     *
+     * @param {String} name Parameter name, without the glide.jms. prefix
+     * @returns {String} The value, or "" when it was not sent
+     */
+    _parameter: function(name) {
+        var value = probe.getParameter('glide.jms.' + name);
+        return (value === null || value === undefined) ? '' : '' + value;
+    },
+
+    /**
+     * Probe entry point.
+     *
+     * W5/W6: the body is _run(). This wrapper exists for two things the body cannot do for
+     * itself.
+     *
+     * W6 -- one boundary line the moment the probe starts, pushed to the instance rather than
+     * left in agent0.log. A transport failure (MID offline, the message never picked up, a probe
+     * name that does not resolve) runs none of our code, so nothing inside here can report it.
+     * The instance logging "queued for the MID" with no probe-entered line after it is what
+     * says the break is in the transport and not in either half.
+     *
+     * W5 -- the push budget for this run is reset here, before the milestone below, or that line
+     * would be charged against whatever the previous run in this MID JVM spent. There is nothing
+     * to do at the end: each line is pushed to the instance as it happens, so a run that throws
+     * has already delivered the errors that led up to the throw.
+     */
+    run: function() {
+        this.logger.resetPushBudget();
+        this.logger._milestone('Probe entered.');
+        return this._run();
+    },
+
+    _run: function() {
+        var file = null;
+        var out = null;
+
+        try {
+            if (!this.jobSysId) {
+                this.logger._error('[IllumioGeneratePreviewFile] No job sys_id supplied. ' +
+                    'Nothing to assemble and nowhere to report it.');
+                return;
+            }
+
+            if (!this._parametersUsable()) {
+                return;
+            }
+
+            if (this._isJobStopped()) {
+                this.logger._info('[IllumioGeneratePreviewFile] Job is no longer running. ' +
+                    'Abandoning assembly.');
+                return;
+            }
+
+            this._updateJobRecord({
+                current_operation: 'Assembling preview file',
+                logs: 'MID Server assembling ' + this.chunkCount + ' chunk(s), ' +
+                    this.totalBytes + ' byte(s) of CSV.'
+            });
+
+            // Before creating our own file, not after -- so the sweep cannot delete it. It is
+            // also bounded by ORPHAN_MIN_AGE_MS, so it cannot delete a preview assembling right
+            // now on another PCE Configuration: a MID Server temp directory is not somewhere a
+            // 120 MB orphan should accumulate, but it is also not somewhere to go deleting files
+            // a live run is still writing to.
+            this._sweepOrphanFiles();
+
+            file = this.File.createTempFile(this.FILE_PREFIX + this.jobSysId + '-',
+                '.csv' + this.GZIP_EXTENSION);
+
+            // GZIPOutputStream wrapping the file stream, so nothing is ever compressed in
+            // memory: each chunk is deflated as it is written and only the compressed bytes
+            // reach the disk. The raw CSV never exists anywhere, in any process, at any point.
+            out = new this.GZIPOutputStream(
+                new this.FileOutputStream(file, true), this.GZIP_BUFFER_BYTES);
+
+            // Byte order mark. Excel opens a BOM-less UTF-8 CSV in the system code page and
+            // mangles every non-ASCII hostname and label in it. It goes INSIDE the gzip, so the
+            // decompressed file is a well-formed BOM'd UTF-8 CSV. Excluded from the byte total
+            // the instance reported, since the instance did not write it.
+            out.write(new this.JavaString("\uFEFF").getBytes("UTF-8"));
+
+            var payloadSysIds = [];
+            var bytesWritten = 0;
+
+            for (var sequence = 0; sequence < this.chunkCount; sequence++) {
+                if (sequence % this.CANCEL_CHECK_EVERY === 0 && this._isJobStopped()) {
+                    this.logger._info('[IllumioGeneratePreviewFile] Job stopped at chunk ' +
+                        sequence + '. Discarding the partial file.');
+                    return;
+                }
+
+                var chunk = this._readChunk(sequence);
+                if (!chunk) {
+                    this._fail('Could not read preview payload chunk ' + sequence + ' of ' +
+                        this.chunkCount + '. The preview is incomplete and was not attached.');
+                    return;
+                }
+
+                var bytes = new this.JavaString(chunk.payload).getBytes("UTF-8");
+                // Through parseInt because this is a Java array's length, not a JavaScript
+                // one, and arithmetic and strict comparison on it should not depend on how
+                // Rhino chose to wrap it.
+                var byteCount = parseInt(bytes.length, 10);
+
+                // The instance measured this chunk before inserting it. A string field over its
+                // max_length is truncated silently on insert -- no exception, a row that looks
+                // fine and a CSV that is wrong from that row on. This is what makes that visible.
+                if (!isNaN(chunk.byteLength) && byteCount !== chunk.byteLength) {
+                    this._fail('Preview payload chunk ' + sequence + ' is ' + byteCount +
+                        ' byte(s) but was written as ' + chunk.byteLength +
+                        '. The chunk was truncated in storage, so the CSV would be corrupt ' +
+                        'from this point on. Nothing was attached.');
+                    return;
+                }
+
+                out.write(bytes);
+                bytesWritten += byteCount;
+                payloadSysIds.push(chunk.sysId);
+
+                if (sequence > 0 && sequence % this.PROGRESS_EVERY === 0) {
+                    this._updateJobRecord({
+                        current_operation: 'Assembling preview file (' + sequence + ' of ' +
+                            this.chunkCount + ' chunks)'
+                    });
+                }
+            }
+
+            // Closed before the upload, not in the finally. An open handle would be read by
+            // FileRequestEntity with buffered bytes still outstanding, and on Windows it would
+            // also make the file undeletable. Closing a GZIPOutputStream also calls finish(),
+            // which writes the trailer -- without it the file is a truncated gzip that every
+            // decompressor rejects -- and closes the FileOutputStream underneath it.
+            out.finish();
+            out.flush();
+            out.close();
+            out = null;
+
+            // bytesWritten counts the bytes handed TO the compressor, which is what the instance
+            // measured and rendered. Comparing compressed output against it would always fail.
+            if (!isNaN(this.totalBytes) && bytesWritten !== this.totalBytes) {
+                this._fail('Assembled ' + bytesWritten + ' byte(s) but the instance rendered ' +
+                    this.totalBytes + '. A chunk is missing or duplicated, so nothing was ' +
+                    'attached.');
+                return;
+            }
+
+            if (this._isJobStopped()) {
+                this.logger._info('[IllumioGeneratePreviewFile] Job stopped before upload. ' +
+                    'Discarding the file.');
+                return;
+            }
+
+            // Read off the closed file, so it is the real compressed size rather than anything
+            // the compressor claimed. Through parseInt for the same reason byteCount is: this is
+            // a Java long.
+            var compressedBytes = parseInt(file.length(), 10);
+
+            this._updateJobRecord({
+                current_operation: 'Uploading preview file',
+                logs: 'Assembled ' + bytesWritten + ' byte(s) of CSV, compressed to ' +
+                    compressedBytes + ' byte(s) (' + this._ratio(bytesWritten, compressedBytes) +
+                    '). Uploading "' + this.fileName + '".'
+            });
+
+            var uploaded = this._upload(file);
+            if (uploaded.hasError) {
+                this._fail('Failed to attach the preview file (HTTP ' + uploaded.status +
+                    '). The file was assembled successfully, so this is an upload problem ' +
+                    'rather than a preview problem -- run it again.');
+                return;
+            }
+
+            // Only after the attachment exists. Until then these rows are the sole copy of the
+            // rendered CSV, and re-rendering 200k workloads is minutes of work.
+            var removed = this._deletePayloadRows(payloadSysIds);
+
+            this._updateJobRecord({
+                job_status: 'completed',
+                current_operation: 'Preview completed',
+                job_completed: this.snowDateFormat.format(new Date()) + "",
+                logs: 'Attached "' + this.fileName + '" (' + compressedBytes +
+                    ' byte(s) compressed, ' + bytesWritten + ' uncompressed) and removed ' +
+                    removed + ' payload row(s).'
+            });
+
+            this.logger._info('[IllumioGeneratePreviewFile] Attached ' + this.fileName +
+                ' to ' + this.targetTable + '/' + this.targetSysId);
+        } catch (exception) {
+            this.logger._except('[IllumioGeneratePreviewFile] Exception: ' + exception);
+            this._fail('Exception while assembling the preview file: ' + exception);
+        } finally {
+            if (out !== null) {
+                try {
+                    out.close();
+                } catch (closeException) {
+                    this.logger._error('[IllumioGeneratePreviewFile] Could not close the ' +
+                        'preview file: ' + closeException);
+                }
+            }
+
+            if (file !== null) {
+                // deleteOnExit is not enough -- the MID Server process outlives this probe by
+                // weeks. The boolean return is checked because File.delete() fails silently,
+                // and a leftover here is measured in hundreds of megabytes.
+                if (!file['delete']()) {
+                    this.logger._warning('[IllumioGeneratePreviewFile] Could not delete the ' +
+                        'temporary preview file ' + file.getAbsolutePath() +
+                        '. It will be swept by the next preview.');
+                }
+            }
+        }
+    },
+
+    /**
+     * Are the probe parameters complete enough to attempt anything?
+     *
+     * @returns {Boolean} true when assembly can proceed
+     */
+    _parametersUsable: function() {
+        var missing = [];
+        if (!this.targetTable) { missing.push('targetTable'); }
+        if (!this.targetSysId) { missing.push('targetSysId'); }
+        if (!this.fileName) { missing.push('fileName'); }
+        if (isNaN(this.chunkCount)) { missing.push('chunkCount'); }
+
+        if (missing.length > 0) {
+            this._fail('Preview assembly was dispatched without: ' + missing.join(', ') + '.');
+            return false;
+        }
+
+        if (this.chunkCount <= 0) {
+            // The instance completes an empty preview itself and never dispatches, so this means
+            // the two sides disagree rather than that the filter matched nothing.
+            this._fail('Preview assembly was dispatched with no payload chunks.');
+            return false;
+        }
+
+        return true;
+    },
+
+    /**
+     * Read one payload chunk by its sequence number.
+     *
+     * Read one at a time by sequence rather than all at once: the chunks are ~1 MB each and the
+     * whole point of this probe is that no more than one of them is in memory. The limit of 2 is
+     * how a duplicate sequence is detected -- two rows claiming position 4 would otherwise be a
+     * silent coin flip over which one lands in the file.
+     *
+     * @param {Number} sequence Zero-based chunk number
+     * @returns {Object} { sysId, payload, byteLength } or null when unreadable
+     */
+    _readChunk: function(sequence) {
+        // The query value is encoded, unlike every other MID query in this application, because
+        // this is the first one with two conditions. `^` is not a legal URI character and the
+        // MID's HTTP client rejects the whole request rather than escaping it for us:
+        // "java.lang.IllegalArgumentException: Invalid uri ... Invalid query". The instance
+        // decodes the value before parsing it, so `%5E` reaches the query parser as `^`.
+        var url = TABLE_API + this.payloadTable +
+            '?sysparm_query=' + this._encode('job_id=' + this.jobSysId +
+                '^sequence=' + sequence) +
+            '&sysparm_fields=sys_id,payload,byte_length' +
+            '&sysparm_exclude_reference_link=true&sysparm_limit=2';
+
+        var response = this.snHttpClient.get(url, '');
+        if (response.hasError || !response.data || !response.data.result) {
+            this.logger._error('[IllumioGeneratePreviewFile] Error reading payload chunk ' +
+                sequence);
+            return null;
+        }
+
+        var rows = response.data.result;
+        if (rows.length !== 1) {
+            this.logger._error('[IllumioGeneratePreviewFile] Expected one payload row for ' +
+                'chunk ' + sequence + ' but found ' + rows.length);
+            return null;
+        }
+
+        return {
+            sysId: rows[0].sys_id,
+            payload: (rows[0].payload === null || rows[0].payload === undefined) ?
+                '' : '' + rows[0].payload,
+            byteLength: parseInt(rows[0].byte_length, 10)
+        };
+    },
+
+    /**
+     * "8.4x smaller" for the job log.
+     *
+     * Reported because it is the only evidence that compression is earning its place on real
+     * data. If a future export ever comes back near 1x, the CSV has changed shape and the
+     * decision to gzip is worth revisiting.
+     *
+     * @param {Number} raw Uncompressed byte count
+     * @param {Number} compressed Compressed byte count
+     * @returns {String} Human-readable ratio
+     */
+    _ratio: function(raw, compressed) {
+        if (!compressed || isNaN(raw) || isNaN(compressed)) {
+            return 'ratio unavailable';
+        }
+        return (Math.round((raw / compressed) * 10) / 10) + 'x smaller';
+    },
+
+    /**
+     * Attach the assembled file to the record that was previewed.
+     *
+     * @param {java.io.File} file The assembled, gzipped CSV
+     * @returns {JSON} Response object from the HTTP client
+     */
+    _upload: function(file) {
+        var queryString =
+            'table_name=' + this._encode(this.targetTable) +
+            '&table_sys_id=' + this._encode(this.targetSysId) +
+            '&file_name=' + this._encode(this.fileName);
+
+        // application/gzip, not text/csv. With text/csv a browser may transparently decompress
+        // on download and hand back a .csv.gz that is actually plain CSV, which is worse than
+        // either outcome on its own.
+        return this.snHttpClient.postFile(ATTACHMENT_FILE_API, queryString, file,
+            this.GZIP_CONTENT_TYPE);
+    },
+
+    /**
+     * Percent-encode a query string value.
+     *
+     * @param {String} value Raw value
+     * @returns {String} Encoded value
+     */
+    _encode: function(value) {
+        return '' + this.URLEncoder.encode('' + value, 'UTF-8');
+    },
+
+    /**
+     * Delete the payload rows this run consumed.
+     *
+     * Failures are logged and swallowed. The rows are dead weight at this point, not a
+     * correctness problem, and the next preview sweeps whatever is left behind.
+     *
+     * @param {Array} payloadSysIds sys_ids of the rows written for this job
+     * @returns {Number} Rows deleted
+     */
+    _deletePayloadRows: function(payloadSysIds) {
+        var deleted = 0;
+
+        for (var index = 0; index < payloadSysIds.length; index++) {
+            var response = this.snHttpClient.deleteMethod(
+                TABLE_API + this.payloadTable + '/' + payloadSysIds[index], '');
+
+            if (response.hasError) {
+                this.logger._warning('[IllumioGeneratePreviewFile] Could not delete payload ' +
+                    'row ' + payloadSysIds[index]);
+            } else {
+                deleted++;
+            }
+        }
+
+        return deleted;
+    },
+
+    /**
+     * Delete preview temp files left by earlier runs.
+     *
+     * Matched on our own prefix so nothing else in the temp directory is ever a candidate, and on
+     * ORPHAN_MIN_AGE_MS so a preview assembling right now on another PCE Configuration is never a
+     * candidate either.
+     *
+     * The age check is the whole point. This used to delete every prefix-matching file, justified
+     * by "only one Illumio job runs at a time" -- which was already untrue for the per-config
+     * entry points and is deliberately untrue now. Without it, enabling concurrent runs would
+     * mean preview B deleting preview A's part-written file out from under the stream still
+     * writing to it: A fails with an IO error on a file it created and owns, pointing at nothing.
+     */
+    _sweepOrphanFiles: function() {
+        try {
+            var tempDir = new this.File(Packages.java.lang.System.getProperty("java.io.tmpdir"));
+            var names = tempDir.list();
+            if (names === null) {
+                return;
+            }
+
+            var oldestKept = new Date().getTime() - this.ORPHAN_MIN_AGE_MS;
+            var swept = 0;
+
+            for (var index = 0; index < names.length; index++) {
+                var name = '' + names[index];
+                if (name.indexOf(this.FILE_PREFIX) !== 0) {
+                    continue;
+                }
+
+                var orphan = new this.File(tempDir, name);
+                if (!orphan.isFile()) {
+                    continue;
+                }
+
+                // lastModified() returns 0 when it cannot be read. Treated as "too new to touch"
+                // rather than as epoch, which would make an unreadable timestamp the one case
+                // that always gets deleted.
+                var modifiedAt = orphan.lastModified();
+                if (!modifiedAt || modifiedAt > oldestKept) {
+                    continue;
+                }
+
+                if (orphan['delete']()) {
+                    swept++;
+                }
+            }
+
+            if (swept > 0) {
+                this.logger._info('[IllumioGeneratePreviewFile] Swept ' + swept +
+                    ' orphaned preview file(s) from the temp directory.');
+            }
+        } catch (exception) {
+            // Housekeeping. A temp directory we cannot list is not a reason to refuse the export.
+            this.logger._warning('[IllumioGeneratePreviewFile] Could not sweep orphaned ' +
+                'preview files: ' + exception);
+        }
+    },
+
+    /**
+     * Has the job been cancelled or already closed out?
+     *
+     * Failed counts as stopped as well as cancelled: the instance marks a preview failed when it
+     * gives up, and a MID Server that went on to attach a file would contradict a record the
+     * user has already been shown.
+     *
+     * A transient error reads as "not stopped". Abandoning a nearly finished 120 MB assembly
+     * because one GET timed out would be the more expensive mistake.
+     *
+     * @returns {Boolean} true when the job should not continue
+     */
+    _isJobStopped: function() {
+        var url = TABLE_API + SCHEDULED_JOB_TABLE +
+            '?sysparm_query=sys_id=' + this.jobSysId +
+            '&sysparm_fields=job_status&sysparm_exclude_reference_link=true';
+
+        var response = this.snHttpClient.get(url, '');
+        if (response.hasError || !response.data || !response.data.result ||
+            response.data.result.length === 0) {
+            return false;
+        }
+
+        var status = '' + response.data.result[0].job_status;
+        return status === 'cancelled' || status === 'failed' || status === 'completed';
+    },
+
+    /**
+     * Close the job out as failed with a final log line.
+     *
+     * @param {String} message Reason, written to the log and the current operation
+     */
+    _fail: function(message) {
+        this.logger._error('[IllumioGeneratePreviewFile] ' + message);
+        this._updateJobRecord({
+            job_status: 'failed',
+            current_operation: 'Preview failed',
+            job_completed: this.snowDateFormat.format(new Date()) + "",
+            logs: message
+        });
+    },
+
+    /**
+     * Update the scheduled job record, appending to its log rather than replacing it.
+     *
+     * Reads and writes only the fields involved. The other MID probes round-trip the whole record
+     * and have to re-flatten its reference fields to do so; there is nothing to gain from that
+     * here, and a preview job's log is the only place this work is visible to the user.
+     *
+     * @param {Object} jobContent Fields to set. `logs` is appended; everything else is assigned.
+     */
+    _updateJobRecord: function(jobContent) {
+        try {
+            var getUrl = TABLE_API + SCHEDULED_JOB_TABLE +
+                '?sysparm_query=sys_id=' + this.jobSysId +
+                '&sysparm_fields=logs,job_status&sysparm_exclude_reference_link=true';
+
+            var response = this.snHttpClient.get(getUrl, '');
+            if (response.hasError || !response.data || !response.data.result ||
+                response.data.result.length === 0) {
+                this.logger._error('[IllumioGeneratePreviewFile] Could not read job ' +
+                    this.jobSysId + ' to update it.');
+                return;
+            }
+
+            var current = response.data.result[0];
+
+            // A cancelled or failed job is final. Writing to it would replace a status the user
+            // has already been shown with one that contradicts it.
+            if (current.job_status == 'cancelled' || current.job_status == 'failed') {
+                this.logger._info('[IllumioGeneratePreviewFile] Job ' + this.jobSysId + ' is ' +
+                    current.job_status + '. Not updating it.');
+                return;
+            }
+
+            var payload = {};
+            for (var key in jobContent) {
+                if (!jobContent.hasOwnProperty(key) || key === 'logs') {
+                    continue;
+                }
+                payload[key] = jobContent[key];
+            }
+
+            if (jobContent.logs) {
+                var existing = current.logs ? '' + current.logs : '';
+                // W1: no per-line timestamp. The same line is emitted to syslog_app_scope, which
+                // timestamps it there, and the job log is a milestone list rather than a trace.
+                payload.logs = existing + (existing ? '\n' : '') + jobContent.logs;
+
+                // W2: the job log and Application Logs carry the same milestones. _milestone
+                // pushes it to the instance too, so a job-log line and the MID-side context
+                // around it are readable from one place.
+                this.logger._milestone(String(jobContent.logs));
+            }
+
+            var putResponse = this.snHttpClient.put(
+                TABLE_API + SCHEDULED_JOB_TABLE + '/' + this.jobSysId, '', null, payload);
+
+            if (putResponse.hasError) {
+                this.logger._error('[IllumioGeneratePreviewFile] Failed to update job ' +
+                    this.jobSysId);
+            }
+        } catch (exception) {
+            // Never allowed to break the assembly it is reporting on.
+            this.logger._except('[IllumioGeneratePreviewFile] Exception updating the job ' +
+                'record: ' + exception);
+        }
+    },
+
+    type: 'IllumioGeneratePreviewFile'
+};
+]]></script>
+        <sys_class_name>ecc_agent_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-22 17:49:39</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>f647d7e8c3638bd050bffa0ed40131b4</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>IllumioGeneratePreviewFile</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>ecc_agent_script_include_f647d7e8c3638bd050bffa0ed40131b4</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
+    </ecc_agent_script_include>
+</record_update>

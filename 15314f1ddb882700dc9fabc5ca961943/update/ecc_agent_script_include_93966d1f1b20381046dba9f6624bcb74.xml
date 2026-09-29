@@ -7,8 +7,9 @@
 var IllumioPCEUtils = Class.create();
 
 IllumioPCEUtils.prototype = {
-    initialize: function(timezone) {
-        this.logger = new IllumioLogUtil();
+    initialize: function(timezone, jobSysId) {
+        this.jobSysId = jobSysId || null;
+        this.logger = new IllumioLogUtil(this.jobSysId, 'IllumioPCEUtils');
 
         this.timeZone = timezone;
         this.SimpleDF = Packages.java.text.SimpleDateFormat;
@@ -32,6 +33,33 @@ IllumioPCEUtils.prototype = {
     },
 
     /**
+     * The instance-facing HTTP client, built once and reused.
+     *
+     * A new client per call meant a fresh one on every iteration of every chunk loop, for a
+     * request that carries no state worth rebuilding. It used to be built lazily inside
+     * checkCancelledJobStatus alone, which made that method a hidden prerequisite of
+     * _updateJobRecord -- removing the redundant status check from _updateJobRecord (W1) would
+     * have left it with no client at all. It lives here now so neither method depends on the
+     * other having run.
+     *
+     * @returns {Object} this.snHttpClient
+     */
+    _snowClient: function() {
+        if (!this.snHttpClient) {
+            this.snHttpClient = new IllumioHTTPClient(
+                this.snowUrl,
+                this.snowUsername,
+                this.snowPassword,
+                '443',
+                null,
+                this.retryParams,
+                this.jobSysId
+            );
+        }
+        return this.snHttpClient;
+    },
+
+    /**
      * Handles exception by logging and setting job status as failed
      * @param {String} exception - Exception message
      * @param {String} jobId - sys_id of the job
@@ -50,67 +78,98 @@ IllumioPCEUtils.prototype = {
     },
 
     /**
-     * Updates scheduled job record with given parameters
-     * @param {String} jobId sys_id of the job record
-     * @param {String} jonContent content of the job 
+     * Updates scheduled job record with given parameters.
+     *
+     * Only the fields being changed are sent. It used to read the whole record, mutate it and
+     * PUT all of it back, which meant every update rewrote every field -- and the record it read
+     * was narrowed to `logs` by sysparm_fields, so the reference dereference on
+     * illumio_pce_configuration was reading a field that was never in the response.
+     *
+     * @param {String} jobSysId sys_id of the job record.
+     * @param {Object} jobContent Fields to write. `logs` is appended to what is already there;
+     *                 everything else is replaced.
      */
     _updateJobRecord: function(jobSysId, jobContent) {
 
-        if (this.checkCancelledJobStatus(jobSysId, this.snowUrl, this.snowUsername, this.snowPassword))
-            return;
+        // W1: a checkCancelledJobStatus(jobSysId) call used to stand here. It GETs job_status --
+        // and the GET below already asks for job_status, and the test at the bottom of it is the
+        // same test against the same CANCELLED_JOB_STATUSES list. Two round trips answered one
+        // question, on a method called at every chunk boundary. One GET, one PUT, and the
+        // cancellation check is no weaker for it.
+        this._snowClient();
 
         var snowGetUrl =
             TABLE_API +
             SCHEDULED_JOB_TABLE +
-            '?sysparm_fields=logs&sysparm_query=sys_id=' +
-            jobSysId;
+            '?sysparm_fields=logs,job_status&sysparm_query=sys_id=' +
+            jobSysId +
+            '&sysparm_limit=1';
         var snowPutUrl = TABLE_API + SCHEDULED_JOB_TABLE + '/' + jobSysId;
 
         var response = this.snHttpClient.get(snowGetUrl, '');
-        if (response.data.result.length == 0) return false;
-        var jobRecord = response.data.result[0];
-
         if (response.hasError) {
             return false;
-        } else if (jobRecord.job_status == 'cancelled') {
+        }
+        if (!response.data || !response.data.result || response.data.result.length === 0) {
+            return false;
+        }
+        var jobRecord = response.data.result[0];
+
+        // job_status was not in sysparm_fields before this, so both of these comparisons were
+        // against undefined: a cancelled job was never detected here and a failed job was always
+        // written over.
+        if (CANCELLED_JOB_STATUSES.indexOf(String(jobRecord.job_status)) > -1) {
             return true;
         }
 
-        if (jobRecord.job_status != 'failed') {
-            for (var key in jobContent) {
-                if (jobContent.hasOwnProperty(key)) {
-
-                    if (key != 'logs') {
-                        jobRecord[key] = jobContent[key];
-                    } else {
-                        jobRecord["logs"] = jobRecord["logs"].replaceAll("\\\"", "\"");
-                        jobRecord["logs"] = jobRecord["logs"].replaceAll("\\'", "'");
-                        jobRecord["logs"] = jobRecord["logs"].replaceAll("\\n", "\n");
-                        jobRecord["logs"] += '\n' + '[' + this.illumioDateFormat.format(new Date()) + '] ' + jobContent["logs"];
-                    }
-                }
-            }
-            jobRecord["illumio_pce_configuration"] = jobRecord.illumio_pce_configuration.value;
-
-            var putResponse = this.snHttpClient.put(
-                snowPutUrl,
-                '',
-                null,
-                jobRecord
-            );
-            if (putResponse.hasError) {
-                return false;
-            } else {
-                this.logger._info(
-                    'The Scheduled Job been updated with the logs'
-                );
-            }
-        } else {
+        if (jobRecord.job_status == 'failed') {
             this.logger._info(
-                '[_updateJobRecord] Given job is invalidated. Aborting further actions.'
+                '[_updateJobRecord] Given job has already failed. Aborting further actions.'
             );
+            return false;
         }
 
+        var payload = {};
+        for (var key in jobContent) {
+            if (jobContent.hasOwnProperty(key) && key != 'logs') {
+                payload[key] = jobContent[key];
+            }
+        }
+
+        if (jobContent.hasOwnProperty('logs')) {
+            var existingLogs = String(jobRecord.logs == null ? '' : jobRecord.logs)
+                .replace(/\\"/g, '"')
+                .replace(/\\'/g, "'")
+                .replace(/\\n/g, '\n');
+            // jobContent.logs is an ARRAY on this path -- the authentication probe passes several
+            // lines at once. String concatenation ran it through Array.toString(), which joins
+            // with commas, so three connectivity milestones arrived as one comma-separated line
+            // on the job record. Joined with newlines now, the way every other sink already
+            // separates them.
+            var milestones = (jobContent.logs instanceof Array) ?
+                jobContent.logs : [jobContent.logs];
+
+            // W1: no per-line timestamp. The same lines are emitted to syslog_app_scope, which
+            // timestamps them there, and the job log is a milestone list rather than a trace.
+            payload.logs = existingLogs + (existingLogs ? '\n' : '') + milestones.join('\n');
+
+            // W2: the job log and Application Logs carry the same milestones, one line each.
+            for (var m = 0; m < milestones.length; m++) {
+                this.logger._milestone(String(milestones[m]));
+            }
+        }
+
+        var putResponse = this.snHttpClient.put(
+            snowPutUrl,
+            '',
+            null,
+            payload
+        );
+        if (putResponse.hasError) {
+            return false;
+        }
+
+        this.logger._info('The Scheduled Job been updated with the logs');
     },
 
     /**
@@ -159,45 +218,55 @@ IllumioPCEUtils.prototype = {
      * @returns {String} port
      **/
     getPortFromUrl: function(url) {
-        new IllumioLogUtil()._debug("getPortFromUrl: " + url);
+        this.logger._debug("getPortFromUrl: " + url);
         var port = parseInt(url.substring(url.lastIndexOf(':') + 1));
         return isNaN(port) ? 443 : port;
     },
 
 
     /**
-     * Returns the job status in boolean
-     * @param {sys_id} jobSysId
-     * @param {String} SNOWurl
-     * @param {String} SNOWusername
-     * @param {Password} SNOWpassword
-     * @returns {Boolean} value for cancelled job status
+     * Has this job been stopped on the instance?
+     *
+     * Called from ~18 places, several of them inside per-chunk loops, so it is deliberately the
+     * cheapest possible read: ONE field, ONE row. Without sysparm_fields it returned the whole
+     * job record on every call -- including `logs`, which grows for the length of the run, so the
+     * cost of asking "should I stop?" rose with every line the job had already written.
+     *
+     * It used to take three credential arguments and ignore all of them -- the client has been
+     * built from this object's own MID config parameters (see initialize) for some time. They are
+     * gone, along with the copies every call site was passing.
+     *
+     * Returns false when the status cannot be established -- a failed request, a missing job. The
+     * MID keeps working rather than abandoning a live run because one HTTP call did not land; a
+     * genuine cancellation is still there to be found on the next check.
+     *
+     * @param {String} jobSysId sys_id of the scheduled job record.
+     * @returns {Boolean} True when the job is in one of CANCELLED_JOB_STATUSES.
      **/
-    checkCancelledJobStatus: function(jobSysId, SNOWurl, SNOWusername, SNOWpassword) {
+    checkCancelledJobStatus: function(jobSysId) {
 
-        this.snHttpClient = new IllumioHTTPClient(
-            this.snowUrl,
-            this.snowUsername,
-            this.snowPassword,
-            '443',
-            null,
-            this.retryParams
-        );
+        this._snowClient();
 
         var snowGetUrl =
             TABLE_API +
             SCHEDULED_JOB_TABLE +
-            '?sysparm_query=sys_id=' + jobSysId;
+            '?sysparm_query=sys_id=' + jobSysId +
+            '&sysparm_fields=job_status' +
+            '&sysparm_limit=1';
 
         var response = this.snHttpClient.get(snowGetUrl, '');
         if (response.hasError) {
             return false;
         }
 
-        if (response.data.result && response.data.result[0].job_status == "cancelled")
-            return true;
+        var result = response.data && response.data.result;
+        // Length check: result[0] on an empty array threw, and an empty array is exactly what
+        // comes back when the job record has been deleted mid-run.
+        if (!result || result.length === 0) {
+            return false;
+        }
 
-        return false;
+        return CANCELLED_JOB_STATUSES.indexOf(String(result[0].job_status)) > -1;
     },
 
 
@@ -209,7 +278,7 @@ IllumioPCEUtils.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>93966d1f1b20381046dba9f6624bcb74</sys_id>
-        <sys_mod_count>47</sys_mod_count>
+        <sys_mod_count>48</sys_mod_count>
         <sys_name>IllumioPCEUtils</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -217,6 +286,6 @@ IllumioPCEUtils.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_93966d1f1b20381046dba9f6624bcb74</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-04-23 17:34:27</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:36</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

@@ -63,120 +63,90 @@
     return false;
 }
 
+// Server half: a trigger, and nothing else.
+//
+// This used to run both phases of the deletion inline -- getEligibleWorkloadSysIdsByConfig, then
+// prepareWorkloadsForPCE over every match, writing payload rows -- and only create the scheduled job
+// once all of that had finished. On a configuration of any size that is minutes of work inside a
+// browser request, and it put the running-job guard after the work it was meant to prevent.
+//
+// Deletion is a job now, exactly like sync: this validates, creates the job record, raises the
+// event and returns. IllumioStartWorkloadDeletion does the work in the scheduler and reports
+// progress on the job record.
 if (typeof window === 'undefined') {
+    // Declared inside the server guard for the same reason gs.include is: this Script
+    // field is evaluated in the browser too, for the client half above, and IllumioLogger
+    // is a server Script Include. At the top of the file it threw a ReferenceError on
+    // every form load and stopped the form rendering.
+    var illumioLogger = new IllumioLogger(null, 'Start Workload Deletion');
+
+    // Inside the server guard, not at the top of the file. This Script field is evaluated in
+    // the browser too, for the client half above, and `gs` does not exist there -- a
+    // top-level gs.include would throw a ReferenceError and kill the onclick handler.
+    gs.include("IllumioConstants");
+
     var configSysId = current.getUniqueValue();
-    var tableName = current.getTableName();
-    var redirectUrl = tableName + '.do?sys_id=' + configSysId;
+    var redirectUrl = current.getTableName() + '.do?sys_id=' + configSysId;
 
     try {
         var utils = new IllumioUtils();
-        var payload = utils.prepareDeletionPayload(configSysId);
+        // Scoped to this PCE Configuration. It was instance-wide, which was propping up two
+        // sweeps that deleted anything they did not own -- both fixed, see getRunningJob.
+        var runningJob = utils.getRunningJob(configSysId);
 
-        // P0-1 makes prepareDeletionPayload write rows to the deletion payload table, so from
-        // here on every path that does NOT dispatch has to withdraw them. Before P0-1 nothing
-        // was persisted until the ECC message was built and bailing out was free.
-        var withdrawPayload = function() {
-            var syncUtils = new IllumioSyncUtils();
-            var withdrawn = new IllumioSyncRepoUtils(syncUtils)
-                .deletePayloadRows(syncUtils.DELETION_PAYLOAD_TABLE, payload.payloadSysIds);
-            if (withdrawn > 0) {
-                gs.info('[StartWorkloadDeletion] Withdrew ' + withdrawn + ' payload record(s)');
-            }
-        };
+        var previewStatus = utils.deletionPreviewStatus(configSysId);
 
-        if (!payload.success) {
-            gs.addErrorMessage(payload.message);
+        if (!previewStatus.fresh) {
+            // Says which of the several reasons it is. The old message was one sentence for all
+            // of them, so a preview that went to a Sync Filter, a preview job still in flight and
+            // a genuinely stale file all read identically -- and the first two look to the user
+            // like the gate is simply wrong.
+            gs.addErrorMessage(utils.describeDeletionPreviewRefusal(previewStatus));
             action.setRedirectURL(redirectUrl);
-        } else if (payload.cancelJob) {
-            // prepareDeletionPayload has already withdrawn its own rows in this case.
-            gs.addErrorMessage(payload.message);
+
+        } else if (runningJob) {
+            // Now genuinely a guard: nothing has been queried or written at this point.
+            //
+            // Widened from "another job on this PCE Configuration" to "another Illumio job
+            // anywhere", which is the rule the preview export introduced and which this one is
+            // now a case of. The narrower version was never really per-configuration in effect:
+            // deletion and sync both write to the shared payload tables and both drive the same
+            // MID Server, so two configurations running at once were already contending.
+            gs.addErrorMessage(utils.describeRunningJob(runningJob));
             action.setRedirectURL(redirectUrl);
-        } else if (!payload.payloadSysIds || payload.payloadSysIds.length === 0) {
-            gs.addErrorMessage('No workloads are eligible for deletion or unpair. ' +
-                payload.message);
-            action.setRedirectURL(redirectUrl);
+
         } else {
-            // Check for running jobs
-            var runningJobs = new GlideAggregate('x_illu2_illumio_illumio_scheduled_jobs');
-            runningJobs.addQuery('job_status', 'running');
-            runningJobs.addQuery('illumio_pce_configuration', configSysId);
-            runningJobs.addAggregate('COUNT');
-            runningJobs.query();
-            if (runningJobs.next() && parseInt(runningJobs.getAggregate('COUNT')) > 0) {
-                withdrawPayload();
-                gs.addErrorMessage('Another job is already running for this PCE Configuration. Please wait for it to complete.');
-                action.setRedirectURL(redirectUrl);
+            var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            jobGr.initialize();
+            jobGr.job_owner = gs.getUser().getID();
+            jobGr.job_type = 'deletion';
+            jobGr.job_status = 'running';
+            jobGr.job_started = new GlideDateTime();
+            jobGr.current_operation = 'Preparing workload deletion';
+            jobGr.illumio_pce_configuration = configSysId;
+            jobGr.logs = 'Deletion requested. Resolving deletion sync filters.';
+            var jobSysId = jobGr.insert();
+            // From here on the job record exists, so anything this action logs -- including
+            // an exception out of the block below -- lands under the same job id the
+            // scheduler half will use.
+            illumioLogger.setContext(jobSysId);
+
+            if (gs.nil(jobSysId)) {
+                gs.addErrorMessage('Failed to create scheduled job for deletion.');
             } else {
-                var scheduledJobGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
-                scheduledJobGr.initialize();
-                scheduledJobGr.job_owner = gs.getUser().getID();
-                scheduledJobGr.job_type = 'deletion';
-                scheduledJobGr.job_status = 'running';
-                scheduledJobGr.job_started = new GlideDateTime();
-                scheduledJobGr.current_operation = 'Preparing workload deletion';
-                scheduledJobGr.illumio_pce_configuration = configSysId;
+                // Same handoff discovery uses to reach its own long-running work: the event is
+                // raised here, the Script Action picks it up in the scheduler.
+                gs.eventQueueScheduled('x_illu2_illumio.start_workload_deletion',
+                    jobGr, jobSysId, '', new GlideDateTime());
 
-                var logTimestamp = new Date(new GlideDateTime().getNumericValue()).toISOString();
-                var logs = '[' + logTimestamp + '] Deletion started: ' + payload.deletionCount + ' workload(s) for deletion, ' + payload.unpairCount + ' workload(s) for unpair';
-                if (payload.skippedCount > 0) {
-                    logs += ', ' + payload.skippedCount + ' skipped';
-                }
-                if (payload.thresholdExceeded) {
-                    logs += '\n[' + logTimestamp + '] Deletion threshold limit exceeded. Some workloads were not included.';
-                }
-                scheduledJobGr.logs = logs;
-                var jobSysId = scheduledJobGr.insert();
-
-                if (gs.nil(jobSysId)) {
-                    withdrawPayload();
-                    gs.addErrorMessage('Failed to create scheduled job for deletion.');
-                    action.setRedirectURL(redirectUrl);
-                } else {
-                    var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
-
-                    var parameters = {
-                        jobSysId: jobSysId,
-                        operation: 'delete',
-                        partialSucc: payload.thresholdExceeded ? 'true' : 'false',
-                        skipped: payload.skippedCount + '',
-                        // P0-1: the workloads themselves live in
-                        // x_illu2_illumio_illumio_deletion_payload now and the message carries
-                        // only the row sys_ids. It used to carry both lists as JSON, which grew
-                        // with the number of matched workloads inside a single ECC record.
-                        payloadSysIds: payload.payloadSysIds + '',
-                        pce_url: pceConfig.pceUrl,
-                        pce_secret: pceConfig.pceSecret,
-                        pce_username: pceConfig.pceUsername,
-                        pce_org_id: pceConfig.pceOrganizationID + '',
-                        pce_authorization: gs.base64Encode(pceConfig.pceUsername + ':' + pceConfig.pceSecret),
-                        configSysId: configSysId,
-                        time_zone: gs.getSession().getTimeZoneName(),
-                        batch_size: gs.getProperty('x_illu2_illumio.bulk_operation_batch_size', 1000),
-                        enable_pce_mid_proxy: pceConfig.enable_pce_mid_proxy,
-                        retry_params: JSON.stringify(pceConfig.retry_params)
-                    };
-
-                    var eccQueue = new IllumioAddToECCQueue('IllumioUpdateWorkloads', pceConfig.midServer, parameters);
-                    var dispatched = eccQueue.insert();
-
-                    if (dispatched) {
-                        gs.addInfoMessage('Deletion process started. ' + payload.deletionCount + ' workload(s) for deletion, ' + payload.unpairCount + ' for unpair. Track progress in Scheduled Jobs.');
-                    } else {
-                        withdrawPayload();
-                        scheduledJobGr.get(jobSysId);
-                        scheduledJobGr.job_status = 'failed';
-                        scheduledJobGr.job_completed = new GlideDateTime();
-                        scheduledJobGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] Failed to dispatch deletion to MID server';
-                        scheduledJobGr.update();
-                        gs.addErrorMessage('Failed to dispatch deletion to MID server.');
-                    }
-                    action.setRedirectURL(redirectUrl);
-                }
+                gs.addInfoMessage('Deletion job started. Track progress in Scheduled Jobs.');
             }
+
+            action.setRedirectURL(redirectUrl);
         }
     } catch (ex) {
-        gs.error('[StartWorkloadDeletion] Exception: ' + ex);
-        gs.addErrorMessage('Error preparing deletion: ' + ex);
+        illumioLogger.error('Exception: ' + ex);
+        gs.addErrorMessage('Error starting deletion: ' + ex);
         action.setRedirectURL(redirectUrl);
     }
 }
@@ -193,7 +163,7 @@ if (typeof window === 'undefined') {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>5695dd67c39e0f1050bffa0ed40131de</sys_id>
-        <sys_mod_count>20</sys_mod_count>
+        <sys_mod_count>28</sys_mod_count>
         <sys_name>Start Workload Deletion</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -201,7 +171,7 @@ if (typeof window === 'undefined') {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_5695dd67c39e0f1050bffa0ed40131de</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:20:22</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_conf</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

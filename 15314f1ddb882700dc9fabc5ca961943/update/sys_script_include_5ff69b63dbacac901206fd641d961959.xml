@@ -9,104 +9,163 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioThresholdLimit</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioThresholdLimit = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+
+/**
+ * Resolves the per-operation threshold limits configured on an Illumio PCE Configuration.
+ *
+ * FAILURE POLICY -- this class does not degrade. If the limits cannot be resolved (the
+ * configuration is unreadable, a count query fails, or a configured limit is not a number)
+ * getThresholdLimit throws and the caller must cancel the job.
+ *
+ * The reason it throws rather than returning what it managed to build: every flag it did not
+ * reach still reads as "no limit configured for that operation". A half-built limit object is
+ * therefore indistinguishable from "limits are off", and the caller would push an unbounded
+ * number of creates, updates or deletes to the PCE believing it was inside a threshold. Failing
+ * loudly and stopping the job is the only safe outcome.
+ */
+var IllumioThresholdLimit = Class.create();
 IllumioThresholdLimit.prototype = {
-    initialize: function() {},
+    initialize: function() {
+        this.logger = new IllumioLogger(null, 'IllumioThresholdLimit');
+    },
 
     /**
-     * Get the workload limit object for given Illumio PCE Configuration
-     * @params {String} configSysId Illumio PCE Configuration sys_id.
-     * @return {JSON} workload limit object
+     * Builds the workload limit object for a given Illumio PCE Configuration.
+     *
+     * @param {String} configSysId Illumio PCE Configuration sys_id.
+     * @return {Object} Limit object: limitEnabled, isLimitEnabled and wlLimit per operation
+     *                  (update / create / delete / labelCreate), and cancelJobOnLimitExceed.
+     * @throws {Error} When the limits cannot be resolved. The caller must cancel the job.
      */
     getThresholdLimit: function(configSysId) {
         try {
-            var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
-            var utils = new IllumioUtils();
-
-            var wlLimitObject = {
-                "limitEnabled": false,
-                isLimitEnabled: {
-                    "update": false,
-                    "create": false,
-                    "delete": false,
-                    "labelCreate": false
-                },
-                wlLimit: {
-                    "update": 0,
-                    "create": 0,
-                    "delete": 0,
-                    "labelCreate": 0
-                },
-                cancelJobOnLimitExceed: pceConfig.cancel_job_on_limit_exceed
-            };
-
-            if (pceConfig.enable_limit) {
-                wlLimitObject["limitEnabled"] = true;
-                var totalWorkloads = utils.getTotalRecords("x_illu2_illumio_illumio_pce_workload", configSysId);
-                if (pceConfig.limit_on_label_creation) {
-
-                    var totalLabels = utils.getTotalRecords("x_illu2_illumio_illumio_pce_labels_mapping", configSysId);
-                    var labelLimit = parseInt(pceConfig.label_creation_limit);
-                    if (pceConfig.label_creation_limit.includes("%")) {
-                        labelLimit = Math.floor((totalLabels * parseInt(pceConfig.label_creation_limit) / 100));
-                    }
-
-                    wlLimitObject["isLimitEnabled"]["labelCreate"] = true;
-                    wlLimitObject["wlLimit"]["labelCreate"] = labelLimit;
-                }
-                if (pceConfig.limit_on_wl_modification) {
-
-                    var workloadLimit = parseInt(pceConfig.wl_modification_limit);
-                    if (pceConfig.wl_modification_limit.includes("%")) {
-                        workloadLimit = Math.floor((totalWorkloads * parseInt(pceConfig.wl_modification_limit) / 100));
-                    }
-
-                    wlLimitObject["isLimitEnabled"]["update"] = true;
-                    wlLimitObject["wlLimit"]["update"] = workloadLimit;
-
-                }
-                if (pceConfig.limit_on_wl_creation) {
-                    var ukwLimit = parseInt(pceConfig.wl_creation_limit);
-                    if (pceConfig.wl_creation_limit.includes("%")) {
-                        ukwLimit = Math.floor((totalWorkloads * parseInt(pceConfig.wl_creation_limit) / 100));
-                    }
-
-                    wlLimitObject["isLimitEnabled"]["create"] = true;
-                    wlLimitObject["wlLimit"]["create"] = ukwLimit;
-                }
-                if (pceConfig.limit_on_wl_deletion) {
-                    var delLimit = parseInt(pceConfig.wl_deletion_limit);
-                    if (pceConfig.wl_deletion_limit.includes("%")) {
-                        delLimit = Math.floor((totalWorkloads * parseInt(pceConfig.wl_deletion_limit) / 100));
-                    }
-
-                    wlLimitObject["isLimitEnabled"]["delete"] = true;
-                    wlLimitObject["wlLimit"]["delete"] = delLimit;
-
-                }
-
-            }
+            return this._buildLimitObject(configSysId);
         } catch (ex) {
-            gs.error("[IllumioThresholdLimit] Exception occurred while checking threshold limit. Exception", ex);
-        } finally {
-            return wlLimitObject;
+            // Logged here so the stack lands in syslog, then rethrown with a message the caller
+            // can put straight into the job log without leaking internals.
+            this.logger.error("[IllumioThresholdLimit] Threshold limits could not be resolved for " +
+                "configuration " + configSysId + ". Exception: " + ex);
+            throw new Error("Threshold limits could not be resolved for PCE configuration " +
+                configSysId + ": " + ex);
+        }
+    },
+
+    /**
+     * The resolution itself. Anything that goes wrong in here throws.
+     *
+     * @param {String} configSysId Illumio PCE Configuration sys_id.
+     * @return {Object} Limit object.
+     */
+    _buildLimitObject: function(configSysId) {
+        var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+        if (!pceConfig) {
+            throw new Error("PCE configuration record does not exist or is not readable");
         }
 
+        var wlLimitObject = {
+            "limitEnabled": false,
+            isLimitEnabled: {
+                "update": false,
+                "create": false,
+                "delete": false,
+                "labelCreate": false
+            },
+            wlLimit: {
+                "update": 0,
+                "create": 0,
+                "delete": 0,
+                "labelCreate": 0
+            },
+            cancelJobOnLimitExceed: pceConfig.cancel_job_on_limit_exceed
+        };
+
+        if (!pceConfig.enable_limit) {
+            return wlLimitObject;
+        }
+        wlLimitObject["limitEnabled"] = true;
+
+        var utils = new IllumioUtils();
+
+        // Counted once and only when a workload limit actually needs it. The old code ran this
+        // count even when the only limit configured was on label creation.
+        var needsWorkloadCount = pceConfig.limit_on_wl_modification ||
+            pceConfig.limit_on_wl_creation ||
+            pceConfig.limit_on_wl_deletion;
+        var totalWorkloads = needsWorkloadCount ?
+            utils.getTotalRecords(TABLE_PCE_WORKLOAD, configSysId) : 0;
+
+        if (pceConfig.limit_on_label_creation) {
+            var totalLabels = utils.getTotalRecords(TABLE_PCE_LABELS_MAPPING, configSysId);
+            this._applyLimit(wlLimitObject, "labelCreate", pceConfig.label_creation_limit,
+                totalLabels, "New label creation limit");
+        }
+
+        if (pceConfig.limit_on_wl_modification) {
+            this._applyLimit(wlLimitObject, "update", pceConfig.wl_modification_limit,
+                totalWorkloads, "Workload label modifications limit");
+        }
+
+        if (pceConfig.limit_on_wl_creation) {
+            this._applyLimit(wlLimitObject, "create", pceConfig.wl_creation_limit,
+                totalWorkloads, "Workload creation limit");
+        }
+
+        if (pceConfig.limit_on_wl_deletion) {
+            this._applyLimit(wlLimitObject, "delete", pceConfig.wl_deletion_limit,
+                totalWorkloads, "Workload deletion limit");
+        }
+
+        return wlLimitObject;
+    },
+
+    /**
+     * Resolves one configured limit and writes it into the limit object.
+     *
+     * A limit is either an absolute count ("500") or a percentage of the current population
+     * ("10%"). Anything that does not parse to a non-negative number is a misconfiguration and
+     * throws -- reading it as 0 would block every operation, and reading it as unlimited would
+     * defeat the threshold the user asked for. Neither is a guess worth making on their behalf.
+     *
+     * The configured value is coerced with String() before it is inspected: getConfiguration
+     * hands back GlideElement references, not primitives, so string methods cannot be called on
+     * it directly.
+     *
+     * @param {Object} wlLimitObject Limit object under construction. Mutated in place.
+     * @param {String} operation One of update / create / delete / labelCreate.
+     * @param {String} rawLimit Configured value, absolute or percentage.
+     * @param {Number} basisTotal Current population a percentage applies to.
+     * @param {String} fieldLabel Field name as the user sees it, used in the error message.
+     */
+    _applyLimit: function(wlLimitObject, operation, rawLimit, basisTotal, fieldLabel) {
+        var configured = String(rawLimit == null ? "" : rawLimit).replace(/^\s+|\s+$/g, "");
+        var isPercentage = configured.indexOf("%") > -1;
+        var parsed = parseInt(configured, 10);
+
+        if (isNaN(parsed) || parsed < 0) {
+            throw new Error(fieldLabel + " is set to '" + configured + "', which is not a " +
+                "valid count or percentage");
+        }
+
+        wlLimitObject["isLimitEnabled"][operation] = true;
+        wlLimitObject["wlLimit"][operation] = isPercentage ?
+            Math.floor(basisTotal * parsed / 100) : parsed;
     },
 
     type: 'IllumioThresholdLimit'
-};]]></script>
+};
+]]></script>
         <sys_class_name>sys_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-11-24 12:30:31</sys_created_on>
         <sys_id>5ff69b63dbacac901206fd641d961959</sys_id>
-        <sys_mod_count>53</sys_mod_count>
+        <sys_mod_count>55</sys_mod_count>
         <sys_name>IllumioThresholdLimit</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_5ff69b63dbacac901206fd641d961959</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2025-03-24 06:16:06</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
     </sys_script_include>
 </record_update>

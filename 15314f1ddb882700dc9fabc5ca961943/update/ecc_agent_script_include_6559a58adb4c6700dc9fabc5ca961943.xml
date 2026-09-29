@@ -8,16 +8,99 @@ ms.include('IllumioMIDConstants');
 
 var IllumioHTTPClient = Class.create();
 IllumioHTTPClient.prototype = {
-    initialize: function(baseUrl, username, password, protocol, pceMIDProxy, retryParams) {
-        this.logger = new IllumioLogUtil();
+    // jobSysId is optional and carries only the correlation prefix -- the transport does not use
+    // it. Without it this client's ~20 log lines (retries, backoff, non-2xx responses) cannot be
+    // tied back to the run that produced them, and those are exactly the lines worth finding.
+    initialize: function(baseUrl, username, password, protocol, pceMIDProxy, retryParams, jobSysId) {
+        this.logger = new IllumioLogUtil(jobSysId, 'IllumioHTTPClient');
         this.baseUrl = baseUrl;
         var proxyFlag = (pceMIDProxy == 'true' || pceMIDProxy == '1' || pceMIDProxy == true || pceMIDProxy == null);
         // we'll skip the logs when creating object for 'snHttpClient'
         var skipLogs = pceMIDProxy == null;
         this.client = this._setupClient(baseUrl, username, password, protocol, proxyFlag, skipLogs);
-        this.httpRetryCount = retryParams.http_retry_count;
-        this.httpRetryIntervalIncrement = retryParams.http_retry_interval_increment;
-        this.httpRetryIntervalMax = retryParams.http_retry_interval_max;
+        retryParams = retryParams || {};
+        // Validated, never defaulted. Substituting a default would be this file deciding on the
+        // administrator's behalf how hard to hit their PCE, using a number they never entered and
+        // cannot see -- and the old behaviour was worse than either: the three values were taken
+        // as given, so a configuration saved with 0 (the form's validators permit it) made
+        // Math.min(0, 0 + 0) === 0 and every "retry" slept for no time at all. Against a PCE
+        // answering 429 that is not a backoff, it is a tight loop that spends the whole retry
+        // budget in under a second and guarantees the failure it was meant to prevent.
+        //
+        // So: all three must be present and greater than zero, or retrying is off entirely. Each
+        // one is load-bearing -- a count with no interval retries instantly, an interval with no
+        // count never retries, and an increment of zero never grows the wait. A partial
+        // configuration is not a weaker retry policy, it is a broken one, and failing the call on
+        // the first refusal is the honest outcome. The log line below says which field is at
+        // fault, because a silently non-retrying client looks exactly like a flaky PCE.
+        this.httpRetryCount = parseInt(retryParams.http_retry_count, 10);
+        this.httpRetryIntervalIncrement = parseInt(retryParams.http_retry_interval_increment, 10);
+        this.httpRetryIntervalMax = parseInt(retryParams.http_retry_interval_max, 10);
+
+        this.retryEnabled = this._validateRetryParams(skipLogs);
+
+        // Proactive pacing, applied to the PCE client only. Reactive backoff alone cannot stop a
+        // 429 -- by the time it fires the PCE has already refused the call, and every refusal is
+        // an error line in the log even when the retry succeeds. The label-creation loop POSTs
+        // /labels/ back to back, which is what earned the 429s. The SNOW client is the one built
+        // with pceMIDProxy omitted -- the same discriminator `skipLogs` already uses above -- and
+        // is not throttled: it talks to the instance, which is not rate limited this way, and
+        // pacing it would slow every job for nothing.
+        this.minCallIntervalMs = skipLogs ? 0 : MIN_PCE_CALL_INTERVAL_MS;
+        this.lastCallFinishedAt = 0;
+    },
+
+    /**
+     * Are all three retry settings a usable retry policy?
+     *
+     * All or nothing. Every one of the three must parse as a number greater than zero; any that
+     * does not disables retrying for this client entirely rather than being replaced.
+     *
+     * @param {Boolean} skipLogs Suppress the warning, for the instance-facing client
+     * @returns {Boolean} true when retrying is safe to attempt
+     */
+    _validateRetryParams: function(skipLogs) {
+        var invalid = [];
+
+        if (isNaN(this.httpRetryCount) || this.httpRetryCount <= 0) {
+            invalid.push('Retry Count (' + this.httpRetryCount + ')');
+        }
+        if (isNaN(this.httpRetryIntervalIncrement) || this.httpRetryIntervalIncrement <= 0) {
+            invalid.push('Retry Interval Increment (' + this.httpRetryIntervalIncrement + ')');
+        }
+        if (isNaN(this.httpRetryIntervalMax) || this.httpRetryIntervalMax <= 0) {
+            invalid.push('Retry Interval Max (' + this.httpRetryIntervalMax + ')');
+        }
+
+        if (invalid.length === 0) {
+            return true;
+        }
+
+        if (!skipLogs) {
+            this.logger._warning('Retrying is DISABLED for this PCE Configuration: ' +
+                invalid.join(', ') + ' must each be greater than zero. Requests that fail with a ' +
+                '429 or a 5xx will be reported as failures on the first attempt rather than ' +
+                'retried. Correct these on the PCE Configuration record to enable retrying.');
+        }
+
+        return false;
+    },
+
+    /**
+     * Wait, if needed, so consecutive calls to the PCE are never closer than minCallIntervalMs.
+     *
+     * Costs nothing when the caller is already slower than the interval, which is the normal
+     * case -- it only bites on tight loops like label creation.
+     */
+    _pace: function() {
+        if (this.minCallIntervalMs <= 0 || this.lastCallFinishedAt === 0) {
+            return;
+        }
+
+        var waitMs = this.minCallIntervalMs - (new Date().getTime() - this.lastCallFinishedAt);
+        if (waitMs > 0) {
+            Packages.java.lang.Thread.sleep(waitMs);
+        }
     },
 
     /**
@@ -120,7 +203,9 @@ IllumioHTTPClient.prototype = {
         }
 
         try {
+            this._pace();
             this.client.executeMethod(method);
+            this.lastCallFinishedAt = new Date().getTime();
             var responseBody = method.getResponseBody();
 
             if (responseBody)
@@ -148,9 +233,21 @@ IllumioHTTPClient.prototype = {
             }
 
             retryCount = (typeof retryCount == 'undefined') ? this.httpRetryCount : retryCount;
-            if (retryCount <= 0 || (RETRY_CODES.indexOf(responseCode) == -1 && responseCode < 500)) {
+            // retryEnabled first: with an incomplete retry configuration there is no safe wait to
+            // compute, so the call fails here on its first refusal instead of being retried with
+            // a number this file invented. The constructor has already said so in the agent log.
+            if (!this.retryEnabled || retryCount <= 0 ||
+                (RETRY_CODES.indexOf(responseCode) == -1 && responseCode < 500)) {
                 this.logger._error('Failed: HTTP' + method.getName() + ' Call, status: ' + responseCode);
                 this.logger._debug("Failure reason: " + method.getResponseBodyAsString());
+                if (!this.retryEnabled && (RETRY_CODES.indexOf(responseCode) != -1 ||
+                        responseCode >= 500)) {
+                    // Name it at the point of loss. Otherwise a 429 that would have succeeded on
+                    // the second attempt is indistinguishable from a PCE that is simply down.
+                    this.logger._error('This status was retryable, but retrying is disabled ' +
+                        'because the PCE Configuration\'s Retry Count, Retry Interval Increment ' +
+                        'and Retry Interval Max are not all greater than zero.');
+                }
                 return {
                     hasError: true,
                     status: responseCode
@@ -159,13 +256,29 @@ IllumioHTTPClient.prototype = {
 
             lastSleepTime = lastSleepTime ? lastSleepTime : 0;
             lastSleepTime = Math.min(this.httpRetryIntervalMax, lastSleepTime + this.httpRetryIntervalIncrement);
+
+            // Retry-After is the PCE telling us exactly how long it wants; prefer it over the
+            // ramp. Only when it is present and parses -- parseRetryAfterHeader returns 0 for a
+            // header it cannot read, and 0 means "do not use it", not "retry immediately".
+            var retryAfterSeconds = 0;
             if (responseCode == 429) {
-                var retryAfterHeader = responseHeaders['retry-after'];
+                var retryAfterHeader = this._findHeader(responseHeaders, 'retry-after');
                 if (retryAfterHeader) {
-                    lastSleepTime = this.parseRetryAfterHeader(retryAfterHeader) || lastSleepTime;
+                    retryAfterSeconds = this.parseRetryAfterHeader(retryAfterHeader);
                 }
             }
-            this.logger._error('Failed to execute HTTP call: Waiting for ' + lastSleepTime + ' seconds before doing another REST call.');
+            if (retryAfterSeconds > 0) {
+                lastSleepTime = Math.min(retryAfterSeconds, this.httpRetryIntervalMax);
+            }
+
+            // No floor is applied here, and none is needed. Reaching this line means
+            // retryEnabled, which means all three settings parsed as integers greater than zero,
+            // which makes Math.min(max, ramp) and a positive Retry-After both at least 1. The
+            // "Waiting for 0 seconds" this used to print was the unvalidated configuration
+            // showing through, not arithmetic that needs guarding.
+            this.logger._warning('HTTP ' + method.getName() + ' ' + endpoint + ' returned ' +
+                responseCode + '. Waiting ' + lastSleepTime + ' seconds before retrying (' +
+                retryCount + ' attempt(s) left).');
             method.releaseConnection();
             Packages.java.lang.Thread.sleep(lastSleepTime * 1000);
             return this._executeMethod(endpoint, queryString, method, headers, requestData, retryCount - 1, lastSleepTime);
@@ -234,6 +347,73 @@ IllumioHTTPClient.prototype = {
     },
 
     /**
+     * POST a file from disk as the raw request body.
+     *
+     * Deliberately not routed through _executeMethod. That one serialises the body with
+     * JSON.stringify, which would read the whole file into memory as a string and defeat the
+     * point of assembling it on disk; FileRequestEntity streams it instead, so a 120 MB preview
+     * costs the same memory as a 1 KB one.
+     *
+     * Also deliberately NOT retried. _executeMethod retries on 5xx, which is right for an
+     * idempotent call and wrong here -- a request that timed out after the instance stored the
+     * attachment would leave a second copy on the record, and a duplicate preview is worse than a
+     * failed one because nothing marks which is current. The caller fails the job instead.
+     *
+     * @param {String} endpoint Endpoint of the API
+     * @param {String} queryString Query to add in the URL
+     * @param {java.io.File} file File to send as the body
+     * @param {String} contentType Content type of the body
+     * @returns {JSON} Object of the response
+     **/
+    postFile: function(endpoint, queryString, file, contentType) {
+        var postMethod = new PostMethod(this.baseUrl + endpoint);
+        if (queryString) {
+            postMethod.setQueryString(queryString);
+        }
+
+        try {
+            postMethod.setRequestEntity(new FileRequestEntity(file, contentType));
+            this.client.executeMethod(postMethod);
+
+            var responseCode = parseInt(postMethod.getStatusCode());
+            var responseBody = postMethod.getResponseBodyAsString();
+
+            if (responseCode < 200 || responseCode >= 300) {
+                this.logger._error('Failed: HTTP POST file call, status: ' + responseCode);
+                this.logger._debug('Failure reason: ' + responseBody);
+                return {
+                    hasError: true,
+                    status: responseCode
+                };
+            }
+
+            var data = null;
+            try {
+                data = responseBody ? JSON.parse(responseBody) : null;
+            } catch (parseException) {
+                // A 2xx with an unreadable body still means the file landed. Only the caller's
+                // logging wants the body, so this is not an error.
+                this.logger._debug('POST file succeeded with an unparseable body: ' + responseBody);
+            }
+
+            this.logger._debug('HTTP POST file call complete, status: ' + responseCode);
+            return {
+                hasError: false,
+                data: data,
+                status: responseCode
+            };
+        } catch (e) {
+            this.logger._error('POST file request failed : Exception ' + e);
+            return {
+                hasError: true,
+                status: 0
+            };
+        } finally {
+            postMethod.releaseConnection();
+        }
+    },
+
+    /**
      * Get the value of the parameter from the config file
      * @param {string} parm parameters to get from config.xml
      * @returns Value of the parameter
@@ -260,6 +440,26 @@ IllumioHTTPClient.prototype = {
         }
     },
 
+    /**
+     * Look a response header up without caring about its case.
+     *
+     * responseHeaders is keyed by whatever casing the server sent, so the direct
+     * responseHeaders['retry-after'] lookup this replaces missed every PCE that answers with the
+     * conventional "Retry-After" -- the header was read as absent and the ramp used instead.
+     *
+     * @param {JSON} headers Response headers keyed as received
+     * @param {String} name Header name to find, lower case
+     * @returns {String} Header value, or '' when not present
+     */
+    _findHeader: function(headers, name) {
+        for (var key in headers) {
+            if (('' + key).toLowerCase() === name) {
+                return headers[key];
+            }
+        }
+        return '';
+    },
+
     parseRetryAfterHeader: function(retryAfter) {
         var retryAfterSeconds = parseInt(retryAfter);
         if (isNaN(retryAfterSeconds)) {
@@ -279,7 +479,7 @@ IllumioHTTPClient.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>6559a58adb4c6700dc9fabc5ca961943</sys_id>
-        <sys_mod_count>220</sys_mod_count>
+        <sys_mod_count>224</sys_mod_count>
         <sys_name>IllumioHTTPClient</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -287,6 +487,6 @@ IllumioHTTPClient.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_6559a58adb4c6700dc9fabc5ca961943</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-18 15:04:21</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:37</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

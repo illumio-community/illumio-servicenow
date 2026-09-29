@@ -32,14 +32,29 @@
  *
  * Rejects a Sync Filter whose conditions cannot be evaluated the way the author meant.
  *
- * All three rules below fail SILENTLY at run time otherwise -- the filter saves, the job runs,
- * and it syncs the wrong set of workloads or none at all with nothing in the log to say why.
- * This rule is what replaces the structural safety the old Label Filter Item records gave for
- * free, now that a filter is free-text encoded queries.
+ * Every rule below fails SILENTLY at run time otherwise -- the filter saves, the job runs, and it
+ * syncs the wrong set of workloads or none at all with nothing in the log to say why. This rule
+ * is what replaces the structural safety the old Label Filter Item records gave for free, now
+ * that a filter is free-text encoded queries.
  *
- * The label rules are not restated here: they come from the same IllumioSyncUtils parse the
- * evaluator uses, so what is rejected on save and what is refused at run time cannot drift
- * apart.
+ * The label rules are deliberately NOT restated here. They live in
+ * IllumioSyncUtils.parseLabelCondition, which is the same parse the evaluator runs, so what is
+ * rejected on save and what is refused at run time cannot drift apart. Adding a rule means adding
+ * it to the parser; this file picks it up for free. As of now the parser enforces:
+ *
+ *   - a sub-predicate is a Label Dimension and its CMDB Value and nothing else
+ *     (illumio_label_dimension=<dimension>^cmdb_value=<value>)
+ *   - "is" is the only operator -- no LIKE, STARTSWITH, IN, ISEMPTY, negations or ranges
+ *   - no condition may have a blank value, and no OR group may be empty
+ *   - a dimension must carry a value condition; a value condition must follow a dimension
+ *   - ^OR may not be applied to the dimension field itself
+ *
+ * What stays here is everything that is a property of the RECORD rather than of the condition
+ * text: the zero-terms check, and the class_mapping pairing.
+ *
+ * The readable rendering of the condition is NOT done here and is not stored on the record. It is
+ * computed on demand for display only -- see IllumioUtilsAJAX.describeLabelCondition and the
+ * "Sync Filter Describe Label Condition" client script.
  */
 (function executeRule(current, previous /*null when async*/ ) {
 
@@ -98,7 +113,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>d6074158c3a387d050bffa0ed40131c6</sys_id>
-        <sys_mod_count>1</sys_mod_count>
+        <sys_mod_count>3</sys_mod_count>
         <sys_name>Validate Sync Filter Conditions</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -106,7 +121,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_d6074158c3a387d050bffa0ed40131c6</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-21 12:46:34</sys_updated_on>
+        <sys_updated_on>2026-09-22 15:51:04</sys_updated_on>
         <template/>
         <when>before</when>
     </sys_script>

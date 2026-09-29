@@ -32,74 +32,152 @@
         <name>Export Matching Workloads for Config</name>
         <onclick/>
         <order>101</order>
-        <script><![CDATA[(function executeExportMatchingWorkloads(current, action, gs) {
-    var configSysId = current.getUniqueValue();
-    var tableName = current.getTableName();
-    var redirectUrl = tableName + '.do?sys_id=' + configSysId;
+        <script><![CDATA[/**
+ * Client half of the one-job-at-a-time guard. Onclick: startExportMatchingWorkloadsForConfig()
+ *
+ * In this field rather than in `client_script_v2`, because that field is an empty stub on every
+ * UI Action in this application and nothing reads it. Both halves share the Script field, which
+ * is the whole reason the server half below is behind a `typeof window` guard.
+ *
+ * Purely to save a round trip that would end in an error message: the check that actually
+ * enforces the rule runs on the server immediately before the job record is inserted, because
+ * two people clicking within the same second both pass this one. Never treat this as the guard.
+ *
+ * GlideAjax is asynchronous, so the click always returns false and the form is submitted from
+ * the callback rather than by returning true.
+ */
+function startExportMatchingWorkloadsForConfig() {
+    var check = new GlideAjax('x_illu2_illumio.IllumioUtilsAJAX');
+    check.addParam('sysparm_name', 'hasRunningJob');
+    // Scopes the check to this PCE Configuration, so a job on a different one no longer greys
+    // this out. Must match what the server half passes, or the two halves disagree and the
+    // client waves through something the server then refuses.
+    check.addParam('sysparm_config_sys_id', g_form.getUniqueValue());
 
-    if (gs.nil(configSysId)) {
-        gs.addErrorMessage("Unable to determine PCE Configuration.");
-        action.setRedirectURL(redirectUrl);
-        return;
-    }
+    check.getXMLAnswer(function(answer) {
+        var response;
+
+        try {
+            response = answer ? JSON.parse(answer) : { running: false };
+        } catch (ex) {
+            // Never leave the click doing nothing. An unreadable answer means the guard could
+            // not be evaluated, and the server repeats the check anyway.
+            response = { running: false };
+        }
+
+        if (response.running) {
+            // Names the blocking job, because the action the user needs is usually to cancel it.
+            g_form.addErrorMessage(response.message);
+            return;
+        }
+
+        gsftSubmit(null, g_form.getFormElement(), 'export_matching_workloads_for_config');
+    });
+
+    return false;
+}
+
+// Server half: a trigger, and nothing else.
+//
+// This used to run both phases inline in the browser request -- evaluate every active inclusion
+// Sync Filter, render the whole CSV to a string, write it with GlideSysAttachment. At 200k
+// workloads that string is ~120 MB and the transaction is minutes long, and the one-filter export
+// had already moved off that shape in R25. It is the same job as that one now, with a different
+// context: IllumioPreviewUtils evaluates every eligible filter, the scheduler runs it, and the
+// MID Server assembles and compresses the file.
+//
+// Action name: export_matching_workloads_for_config (the client half submits it by that name).
+if (typeof window === 'undefined') {
+    // Declared inside the server guard for the same reason gs.include is: this Script
+    // field is evaluated in the browser too, for the client half above, and IllumioLogger
+    // is a server Script Include. At the top of the file it threw a ReferenceError on
+    // every form load and stopped the form rendering.
+    var illumioLogger = new IllumioLogger(null, 'Export Matching Workloads for Config');
+
+    // Inside the server guard, not at the top of the file. This Script field is evaluated in
+    // the browser too, for the client half above, and `gs` does not exist there -- a
+    // top-level gs.include would throw a ReferenceError and kill the onclick handler.
+    gs.include("IllumioConstants");
+
+    var configSysId = current.getUniqueValue();
+    var redirectUrl = current.getTableName() + '.do?sys_id=' + configSysId;
 
     try {
         var utils = new IllumioUtils();
-        var syncFilterResult = utils.getEligibleWorkloadSysIdsByConfig(configSysId, 'inclusion');
+        // Scoped to this PCE Configuration. It was instance-wide, which was propping up two
+        // sweeps that deleted anything they did not own -- both fixed, see getRunningJob.
+        var runningJob = utils.getRunningJob(configSysId);
 
-        if (!syncFilterResult.hasFilter) {
-            gs.addInfoMessage("No active inclusion sync filters configured for this PCE Configuration.");
+        if (runningJob) {
+            // The authoritative check. The client half ran the same one before submitting, but
+            // that was a different transaction and anything could have started since.
+            //
+            // The refusal gets a job record of its own, inserted already failed so it never
+            // counts as running. There is nowhere else to log it -- you cannot write to the log
+            // of a job you declined to create -- and without it a user reporting "the button
+            // does nothing" leaves no trace to look at.
+            var message = utils.describeRunningJob(runningJob);
+
+            var refusedGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            refusedGr.initialize();
+            refusedGr.job_owner = gs.getUser().getID();
+            refusedGr.job_type = 'preview';
+            refusedGr.job_status = 'failed';
+            refusedGr.job_started = new GlideDateTime();
+            refusedGr.job_completed = new GlideDateTime();
+            refusedGr.current_operation = 'Preview refused';
+            refusedGr.illumio_pce_configuration = configSysId;
+            refusedGr.logs = 'Inclusion preview requested for PCE Configuration "' +
+                current.getValue('name') + '" and refused. ' + message;
+            refusedGr.insert();
+
+            gs.addErrorMessage(message);
             action.setRedirectURL(redirectUrl);
-            return;
-        }
 
-        var sysIds = syncFilterResult.sysIds;
-
-        if (!sysIds || sysIds.length === 0) {
-            gs.addInfoMessage("No workloads match the active inclusion sync filter criteria.");
-            action.setRedirectURL(redirectUrl);
-            return;
-        }
-
-        var csvContent = utils.generateWorkloadCsv(sysIds);
-
-        var now = new GlideDateTime();
-        var displayValue = now.getDisplayValue();
-        var parts = displayValue.replace(/[:\s]/g, '-').replace(/[^0-9\-]/g, '').split('-');
-        var yy = (parts[0] || '00').slice(-2);
-        var mm = ('0' + (parts[1] || '0')).slice(-2);
-        var dd = ('0' + (parts[2] || '0')).slice(-2);
-        var hh = ('0' + (parts[3] || '0')).slice(-2);
-        var min = ('0' + (parts[4] || '0')).slice(-2);
-        var fileName = 'INCLUSION-PREVIEW-' + dd + '-' + mm + '-' + yy + '-' + hh + '-' + min + '.csv';
-
-        var targetGr = new GlideRecord(tableName);
-        targetGr.get(configSysId);
-
-        var sa = new GlideSysAttachment();
-
-        var existingAttachments = sa.getAttachments(tableName, configSysId);
-        while (existingAttachments.next()) {
-            if ((existingAttachments.getValue('file_name') || '').indexOf('INCLUSION-PREVIEW-') === 0) {
-                sa.deleteAttachment(existingAttachments.getUniqueValue());
-            }
-        }
-
-        var attachmentSysId = sa.write(targetGr, fileName, 'text/csv', csvContent);
-
-        if (gs.nil(attachmentSysId)) {
-            gs.error('[ExportMatchingWorkloads] GlideSysAttachment.write returned nil. FileName: ' + fileName + ', CSV length: ' + csvContent.length);
-            gs.addErrorMessage("Failed to generate CSV export. Check application logs for details.");
         } else {
-            gs.addInfoMessage(sysIds.length + " matching workloads exported. Download the CSV from the attachments on this record.");
+            var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            jobGr.initialize();
+            jobGr.job_owner = gs.getUser().getID();
+            jobGr.job_type = 'preview';
+            jobGr.job_status = 'running';
+            jobGr.job_started = new GlideDateTime();
+            jobGr.current_operation = 'Preparing preview';
+            jobGr.illumio_pce_configuration = configSysId;
+            jobGr.logs = 'Inclusion preview requested for PCE Configuration "' +
+                current.getValue('name') + '".';
+            var jobSysId = jobGr.insert();
+            // From here on the job record exists, so anything this action logs -- including
+            // an exception out of the block below -- lands under the same job id the
+            // scheduler half will use.
+            illumioLogger.setContext(jobSysId);
+
+            if (gs.nil(jobSysId)) {
+                gs.addErrorMessage('Failed to create the scheduled job for this preview.');
+            } else {
+                // parm2 carries what the job record cannot: the scheduled jobs table has a PCE
+                // Configuration reference but no generic target, and the preview types differ by
+                // which record they attach to as well as by which filters they evaluate.
+                var context = JSON.stringify({
+                    type: new IllumioPreviewUtils().TYPE_CONFIG_EXPORT,
+                    table: current.getTableName(),
+                    sysId: configSysId
+                });
+
+                gs.eventQueueScheduled('x_illu2_illumio.start_preview',
+                    jobGr, jobSysId, context, new GlideDateTime());
+
+                gs.addInfoMessage('Preview job started. The CSV will be attached to this record ' +
+                    'when it completes. Track progress in Scheduled Jobs.');
+            }
+
+            action.setRedirectURL(redirectUrl);
         }
     } catch (ex) {
-        gs.error('[ExportMatchingWorkloads] Exception: ' + ex);
-        gs.addErrorMessage("Error exporting workloads: " + ex);
+        illumioLogger.error('Exception: ' + ex);
+        gs.addErrorMessage('Error starting the preview: ' + ex);
+        action.setRedirectURL(redirectUrl);
     }
-
-    action.setRedirectURL(redirectUrl);
-})(current, action, gs);
+}
 ]]></script>
         <show_form_icon_only>false</show_form_icon_only>
         <show_insert>false</show_insert>
@@ -113,7 +191,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>4a9d4342c356031050bffa0ed40131e7</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>14</sys_mod_count>
         <sys_name>Export Matching Workloads for Config</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -121,7 +199,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_4a9d4342c356031050bffa0ed40131e7</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-08-25 12:53:21</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:20:22</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_conf</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

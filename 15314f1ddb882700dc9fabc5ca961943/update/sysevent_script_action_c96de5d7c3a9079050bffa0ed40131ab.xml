@@ -6,20 +6,24 @@
         <event_name>x_illu2_illumio.post_sync_discovery</event_name>
         <name>IllumioPostSyncDiscovery</name>
         <order>100</order>
-        <script><![CDATA[(function() {
+        <script><![CDATA[// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'IllumioPostSyncDiscovery');
+
+(function() {
     var configSysId = event.parm1;
 
     if (gs.nil(configSysId)) {
-        gs.error('[IllumioPostSyncDiscovery] No configSysId in event.parm1');
+        illumioLogger.error('No configSysId in event.parm1');
         return;
     }
 
-    gs.info('[IllumioPostSyncDiscovery] Starting post-sync discovery for config: ' + configSysId);
+    illumioLogger.info('Starting post-sync discovery for config: ' + configSysId);
 
     var result = new IllumioStartDiscovery().process(configSysId, true);
 
     if (!result) {
-        gs.warn('[IllumioPostSyncDiscovery] Discovery failed to start for config ' + configSysId);
+        illumioLogger.warn('Discovery failed to start for config ' + configSysId);
     }
 })();
 ]]></script>
@@ -30,7 +34,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>c96de5d7c3a9079050bffa0ed40131ab</sys_id>
-        <sys_mod_count>3</sys_mod_count>
+        <sys_mod_count>4</sys_mod_count>
         <sys_name>IllumioPostSyncDiscovery</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -38,6 +42,6 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sysevent_script_action_c96de5d7c3a9079050bffa0ed40131ab</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-06-24 08:08:32</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
     </sysevent_script_action>
 </record_update>

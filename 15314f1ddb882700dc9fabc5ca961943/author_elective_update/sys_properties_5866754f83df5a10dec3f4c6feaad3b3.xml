@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_properties">
+    <sys_properties action="DELETE">
+        <choices/>
+        <description>The batch size to process the labels and workloads coming from Illumio PCE and send them to ServiceNow tables. Default: 1000.</description>
+        <ignore_cache>true</ignore_cache>
+        <is_private>false</is_private>
+        <name>x_illu2_illumio.payload.batch.size</name>
+        <read_roles>x_illu2_illumio.illumio_admin,admin</read_roles>
+        <suffix>payload.batch.size</suffix>
+        <sys_class_name>sys_properties</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2025-01-29 06:24:12</sys_created_on>
+        <sys_id>5866754f83df5a10dec3f4c6feaad3b3</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>x_illu2_illumio.payload.batch.size</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_properties_5866754f83df5a10dec3f4c6feaad3b3</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2025-02-04 06:06:18</sys_updated_on>
+        <type>integer</type>
+        <value>1000</value>
+        <write_roles>x_illu2_illumio.illumio_admin,admin</write_roles>
+    </sys_properties>
+    <sys_translated_text action="DELETE" query="documentkey=5866754f83df5a10dec3f4c6feaad3b3"/>
+<sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>265197833bafced0c55a348aa4e45a7a</instance_id>
+        <instance_name>dev279711</instance_name>
+        <name>sys_properties_5866754f83df5a10dec3f4c6feaad3b3</name>
+        <payload><![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_properties">
+    <sys_properties action="INSERT_OR_UPDATE">
+        <choices/>
+        <description>The batch size to process the labels and workloads coming from Illumio PCE and send them to ServiceNow tables. Default: 1000.</description>
+        <ignore_cache>true</ignore_cache>
+        <is_private>false</is_private>
+        <name>x_illu2_illumio.payload.batch.size</name>
+        <read_roles>x_illu2_illumio.illumio_admin,admin</read_roles>
+        <suffix>payload.batch.size</suffix>
+        <sys_class_name>sys_properties</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2025-01-29 06:24:12</sys_created_on>
+        <sys_id>5866754f83df5a10dec3f4c6feaad3b3</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>x_illu2_illumio.payload.batch.size</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_properties_5866754f83df5a10dec3f4c6feaad3b3</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2025-02-04 06:06:18</sys_updated_on>
+        <type>integer</type>
+        <value>1000</value>
+        <write_roles>x_illu2_illumio.illumio_admin,admin</write_roles>
+    </sys_properties>
+    <sys_translated_text action="delete_multiple" query="documentkey=5866754f83df5a10dec3f4c6feaad3b3"/>
+</record_update>]]></payload>
+        <payload_hash>920740609</payload_hash>
+        <record_name>x_illu2_illumio.payload.batch.size</record_name>
+        <reverted_from/>
+        <source>846b38c0c392031050bffa0ed40131a5</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-07-20 13:55:18</sys_created_on>
+        <sys_id>82ebb088c392031050bffa0ed40131b9</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>19f7fcf45a80000001</sys_recorded_at>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-07-20 13:55:18</sys_updated_on>
+        <type>System Property</type>
+        <update_guid>caebb08864920310f667146f318909b8</update_guid>
+        <update_guid_history>caebb08864920310f667146f318909b8:0,b2c930c81d520310125952d784fc84de:834346593,37556ecee3828750d1a6c9e9b8c82ab2:0,72f36a82a9828750b17ee31698950309:-1904943989,5599b4b466c68b1068a1ddf4c564eaf5:0,09e7fcf498868b10bbd6471e9abac1f2:653936223,9bf30830218e4b106ac421fd05ed6d1e:0,250cc345b0f107d04979ebed838ffd04:-984100564,7d781beb22900f107329509c065e2bbb:920740609</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-24 05:38:41</sys_created_on>
+        <sys_db_object display_value="" name="sys_properties">sys_properties</sys_db_object>
+        <sys_id>09792ef533624c1e9fa43a4fa7af03e9</sys_id>
+        <sys_metadata>5866754f83df5a10dec3f4c6feaad3b3</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio.payload.batch.size</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sys_properties_5866754f83df5a10dec3f4c6feaad3b3</sys_update_name>
+        <sys_update_version display_value="sys_properties_5866754f83df5a10dec3f4c6feaad3b3">82ebb088c392031050bffa0ed40131b9</sys_update_version>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-24 05:38:41</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

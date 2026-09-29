@@ -3,9 +3,10 @@
         <action_name>show_Matching_workloads_for_config</action_name>
         <active>false</active>
         <client>false</client>
-        <client_script_v2><![CDATA[function onClick(g_form) {
-
-}]]></client_script_v2>
+        <client_script_v2><![CDATA[// DEPRECATED -- intentionally empty. The UI Action record is kept in a deactivated state
+// because the ServiceNow certifiers require the entry to exist. Do not add code here and do
+// not include this file in app-wide scans. Live replacement: the Export Matching Workloads pair.
+]]></client_script_v2>
         <comments/>
         <condition/>
         <form_action>false</form_action>
@@ -32,40 +33,9 @@
         <name>Show Matching Workloads for Config</name>
         <onclick/>
         <order>100</order>
-        <script><![CDATA[(function executeShowMatchingWorkloadsForConfig(current, action, gs) {
-    var configSysId = current.getUniqueValue();
-    var tableName = current.getTableName();
-    if (gs.nil(configSysId)) {
-        gs.addErrorMessage("Unable to determine PCE Configuration.");
-        action.setRedirectURL(tableName + '.do?sys_id=' + configSysId);
-        return;
-    }
-
-    var utils = new IllumioUtils();
-    var syncFilterResult = utils.getEligibleWorkloadSysIdsByConfig(configSysId, 'inclusion');
-
-    if (!syncFilterResult.hasFilter) {
-        gs.addInfoMessage("No active inclusion sync filters configured for this PCE Configuration. All conflicting workloads are eligible for sync.");
-        action.setRedirectURL(tableName + '.do?sys_id=' + configSysId);
-        return;
-    }
-
-    var sysIds = syncFilterResult.sysIds;
-
-    if (!sysIds || sysIds.length === 0) {
-        gs.addInfoMessage("No workloads match the active inclusion sync filter criteria.");
-        action.setRedirectURL(tableName + '.do?sys_id=' + configSysId);
-        return;
-    }
-
-    var REDIRECT_LIMIT = 1000;
-    if (sysIds.length <= REDIRECT_LIMIT) {
-        action.setRedirectURL("x_illu2_illumio_illumio_pce_workload_list.do?sysparm_query=sys_idIN" + sysIds.join(","));
-    } else {
-        gs.addInfoMessage(sysIds.length + " workloads match the active inclusion sync filters. Use 'Export Matching Workloads' to download the full list.");
-        action.setRedirectURL(tableName + '.do?sys_id=' + configSysId);
-    }
-})(current, action, gs);
+        <script><![CDATA[// DEPRECATED -- intentionally empty. The UI Action record is kept in a deactivated state
+// because the ServiceNow certifiers require the entry to exist. Do not add code here and do
+// not include this file in app-wide scans. Live replacement: the Export Matching Workloads pair.
 ]]></script>
         <show_form_icon_only>false</show_form_icon_only>
         <show_insert>false</show_insert>
@@ -79,7 +49,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>148a074ec3d2031050bffa0ed40131ae</sys_id>
-        <sys_mod_count>4</sys_mod_count>
+        <sys_mod_count>7</sys_mod_count>
         <sys_name>Show Matching Workloads for Config</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -87,7 +57,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_148a074ec3d2031050bffa0ed40131ae</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:11:50</sys_updated_on>
+        <sys_updated_on>2026-09-24 07:50:47</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_conf</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

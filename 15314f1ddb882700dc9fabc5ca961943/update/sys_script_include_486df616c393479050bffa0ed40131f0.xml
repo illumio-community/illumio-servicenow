@@ -9,7 +9,8 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioDiscoveryUtils</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioDiscoveryUtils = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioDiscoveryUtils = Class.create();
 IllumioDiscoveryUtils.prototype = {
     // Reference to hostname rules http://man7.org/linux/man-pages/man7/hostname.7.html
     // Moved byte-for-byte from IllumioDiscoverAndMapCMDBServers. The dot before the closing
@@ -57,11 +58,11 @@ IllumioDiscoveryUtils.prototype = {
     // NOT reachable by this step; they are cleared once by the R15 fix script.
     STALE_DISCOVERY_DATA: [{
         label: "workload field value",
-        table: "x_illu2_illumio_illumio_pce_workload_field_value",
+        table: TABLE_PCE_WORKLOAD_FIELD_VALUE,
         configField: "illumio_pce_configuration"
     }, {
         label: "workload",
-        table: "x_illu2_illumio_illumio_pce_workload",
+        table: TABLE_PCE_WORKLOAD,
         configField: "illumio_pce_configuration",
         batched: true
     }],
@@ -480,6 +481,31 @@ IllumioDiscoveryUtils.prototype = {
     },
 
     /**
+     * " (12.34s)" -- the trailing duration clause, identical to IllumioSyncUtils.since.
+     *
+     * Deliberately the same name, signature and output as the sync-side helper. Discovery had
+     * formatDuration but no since(), so four formatters below each spelled out
+     * ' (' + this.formatDuration(ms) + 's)' and each of their callers spelled out
+     * `Date.now() - someStartTime` to feed it. Four copies of a two-part idiom is four chances
+     * for the space, the "s" or the brackets to drift, and the strings here are a customer-visible
+     * contract (see the section header above).
+     *
+     * NOT a call into IllumioSyncUtils. This block is kept free of dependencies as well as of
+     * Glide calls so the whole log format can be asserted from a plain Node harness with nothing
+     * loaded. A duplicated two-line function is the cheaper of the two prices -- but the two
+     * copies must not drift, exactly as IllumioSyncUtils.formatDuration's own comment says.
+     *
+     * Takes the START time, not a duration, so the call site reads as "since here" and cannot
+     * pass a timestamp where elapsed milliseconds were wanted.
+     *
+     * @param {Number} startedAt Epoch milliseconds the step began
+     * @returns {String} Clause to append to a log line
+     */
+    since: function(startedAt) {
+        return " (" + this.formatDuration(new Date().getTime() - startedAt) + "s)";
+    },
+
+    /**
      * Human label for the discovery filter mode
      * @param {String} filterMode "inclusion" or "exclusion_legacy"
      * @param {String} condition The configured condition, nil when none is set
@@ -496,11 +522,11 @@ IllumioDiscoveryUtils.prototype = {
      * Per-table stale-data deletion line. One per entry in STALE_DISCOVERY_DATA,
      * so adding a table there adds a log step automatically.
      * @param {String} label Human label for the table, from STALE_DISCOVERY_DATA
-     * @param {Number} ms Elapsed milliseconds for this deletion step
+     * @param {Number} startedAt Epoch milliseconds this deletion step began
      * @returns {String} Log line
      */
-    formatDeletionLog: function(label, ms) {
-        return "Deleted stale " + label + " data (" + this.formatDuration(ms) + "s)";
+    formatDeletionLog: function(label, startedAt) {
+        return "Deleted stale " + label + " data" + this.since(startedAt);
     },
 
     /**
@@ -529,16 +555,37 @@ IllumioDiscoveryUtils.prototype = {
      * @param {Number} batch 1-based batch number
      * @param {Number} deleted Rows deleted so far in this step
      * @param {Number} total Rows the step started with
-     * @param {Number} ms Elapsed milliseconds for this batch
+     * @param {Number} startedAt Epoch milliseconds this batch began
      * @returns {String} Log line
      */
-    formatDeletionBatchLog: function(batch, deleted, total, ms) {
+    formatDeletionBatchLog: function(batch, deleted, total, startedAt) {
         return "Deleted Batch " + batch + ": " + deleted + "/" + total +
-            " records (" + this.formatDuration(ms) + "s)";
+            " records" + this.since(startedAt);
     },
 
-    formatFilteredLog: function(count, ms, table) {
-        return "Filtered " + count + " items (" + this.formatDuration(ms) + "s) from " + table;
+    /**
+     * Terminal line for a stale-data step that could not clear its table. The run is failed
+     * immediately after this, so this is the last thing the job record says about deletion and
+     * has to carry the reason on its own -- the syslog error that accompanies it is not where
+     * someone reading the job record will look.
+     * @param {String} label Step label from STALE_DISCOVERY_DATA
+     * @param {Number} remaining Rows still present
+     * @returns {String} Log line
+     */
+    formatDeletionRefusedLog: function(label, remaining) {
+        return "Could not delete stale " + label + " data: " + remaining +
+            " record(s) remain. Discovery stopped -- continuing would compare CMDB against " +
+            "the previous run's data.";
+    },
+
+    /**
+     * @param {Number} count Records the filter matched
+     * @param {Number} startedAt Epoch milliseconds the count query began
+     * @param {String} table Source table name
+     * @returns {String} Log line
+     */
+    formatFilteredLog: function(count, startedAt, table) {
+        return "Filtered " + count + " items" + this.since(startedAt) + " from " + table;
     },
 
     formatProcessingLog: function(count, table, batches) {
@@ -553,14 +600,14 @@ IllumioDiscoveryUtils.prototype = {
      * @param {Number} processedTotal Records processed so far across all batches
      * @param {Number} totalRecords Table total
      * @param {String} table Source table name
-     * @param {Number} ms Elapsed milliseconds for this batch
+     * @param {Number} startedAt Epoch milliseconds this batch began
      * @param {Object} counts { managed, unmanaged, unknown, duplicate }
      * @returns {String} Log line
      */
-    formatBatchLog: function(windowNumber, processedTotal, totalRecords, table, ms, counts) {
+    formatBatchLog: function(windowNumber, processedTotal, totalRecords, table, startedAt, counts) {
         return "Batch " + windowNumber + " completed: " + processedTotal + "/" + totalRecords +
             " " + table + " records processed" +
-            " (" + this.formatDuration(ms) + "s)" +
+            this.since(startedAt) +
             " [MNWL: " + counts.managed +
             ", UMWL: " + counts.unmanaged +
             ", UNWL: " + counts.unknown +
@@ -672,18 +719,19 @@ IllumioDiscoveryUtils.prototype = {
     },
 
     type: "IllumioDiscoveryUtils",
-};]]></script>
+};
+]]></script>
         <sys_class_name>sys_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>486df616c393479050bffa0ed40131f0</sys_id>
-        <sys_mod_count>12</sys_mod_count>
+        <sys_mod_count>15</sys_mod_count>
         <sys_name>IllumioDiscoveryUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_486df616c393479050bffa0ed40131f0</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 08:05:50</sys_updated_on>
+        <sys_updated_on>2026-09-29 12:56:35</sys_updated_on>
     </sys_script_include>
 </record_update>

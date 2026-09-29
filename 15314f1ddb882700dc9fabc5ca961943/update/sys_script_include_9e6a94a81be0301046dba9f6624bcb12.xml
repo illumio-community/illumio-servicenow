@@ -9,16 +9,16 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioStartAuthentication</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioStartAuthentication = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioStartAuthentication = Class.create();
 IllumioStartAuthentication.prototype = {
 
     initialize: function () {
-        this.scheduledJobsGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
+        this.logger = new IllumioLogger(null, 'IllumioStartAuthentication');
+        this.scheduledJobsGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
         this.utils = new x_illu2_illumio.IllumioUtils();
     },
 
-    AUTHENTICATION_API_ENDPOINT: '/api/v2/product_version',
-    
     /**
      * Creates a scheudle job and triggers the authentication process
      */
@@ -30,9 +30,9 @@ IllumioStartAuthentication.prototype = {
         this.scheduledJobsGr.job_status = 'running';
 		this.scheduledJobsGr.job_owner = gs.getUser().getID();
         this.scheduledJobsGr.current_operation = 'Connectivity check with PCE';
-        this.scheduledJobsGr.logs = '[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] MID Server is running and it is up-to-date';
-        this.scheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] MID Server user has required roles';
-        this.scheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] Started validating the connectivity with PCE';
+        this.scheduledJobsGr.logs = 'MID Server is running and it is up-to-date';
+        this.scheduledJobsGr.logs += '\nMID Server user has required roles';
+        this.scheduledJobsGr.logs += '\nStarted validating the connectivity with PCE';
         this.scheduledJobsGr.job_type = 'connectivity_check';
         var jobSysId = this.scheduledJobsGr.insert();
 
@@ -48,7 +48,7 @@ IllumioStartAuthentication.prototype = {
      */
     startAuthetication: function (jobSysId,configSysId) {
 
-        gs.info("Initiating a job to check PCE connectivity.");
+        this.logger.info("Initiating a job to check PCE connectivity.");
         var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
         var org_id = pceConfig.pceOrganizationID;
         var label_dimension_api_endpoint = "/api/v2/orgs/"+org_id+"/label_dimensions"; 
@@ -89,13 +89,13 @@ IllumioStartAuthentication.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2021-06-01 11:15:40</sys_created_on>
         <sys_id>9e6a94a81be0301046dba9f6624bcb12</sys_id>
-        <sys_mod_count>29</sys_mod_count>
+        <sys_mod_count>31</sys_mod_count>
         <sys_name>IllumioStartAuthentication</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_9e6a94a81be0301046dba9f6624bcb12</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-16 09:04:01</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:42</sys_updated_on>
     </sys_script_include>
 </record_update>

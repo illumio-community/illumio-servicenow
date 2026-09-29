@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
-    <element db_object_id="07b245a79300021062233f018bba1042" label="Illumio Scheduled Jobs" max_length="40" name="x_illu2_illumio_illumio_scheduled_jobs" type="collection">
+    <element audit="true" db_object_id="07b245a79300021062233f018bba1042" label="Illumio Scheduled Jobs" max_length="40" name="x_illu2_illumio_illumio_scheduled_jobs" type="collection">
         <element label="Job Completed" max_length="40" name="job_completed" type="glide_date_time"/>
         <element attributes="readonly_clickthrough=true" label="Incident" max_length="32" name="incident" read_only="true" read_only_option="client_script_modifiable" reference="incident" type="reference"/>
         <element choice="1" label="Job Status" max_length="40" name="job_status" type="string">
@@ -19,6 +19,7 @@
             <choice>
                 <element inactive_on_update="false" label="Data Sync" sequence="1" value="data sync"/>
                 <element inactive_on_update="false" label="Data Collection" sequence="0" value="data collection"/>
+                <element inactive_on_update="false" label="Preview" sequence="4" value="preview"/>
                 <element inactive_on_update="false" label="Deletion" sequence="3" value="deletion"/>
                 <element inactive_on_update="false" label="Connectivity Check" sequence="2" value="connectivity_check"/>
             </choice>

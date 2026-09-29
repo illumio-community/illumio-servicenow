@@ -5,12 +5,16 @@
 We introduced the support of multiple label dimensions and introduced new tables and deprecated the old tables. To prevent the loss of existing data present in the old tables, we introduced the fix scripts to migrate the data present in the tables, while upgrading to the new version.</description>
         <name>Add exisiting mapping to other table</name>
         <record_for_rollback>false</record_for_rollback>
-        <script><![CDATA[/**
+        <script><![CDATA[// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Add exisiting mapping to other table');
+
+/**
  * This script will fetch the existing field mappings from PCE configuration
  * and add that field mapping to Illumio PCE Field Mappings table(x_illu2_illumio_illumio_pce_field_mapping)
  */
 
-gs.info('Running "Add exisiting mapping to other table" fix script of Illumio');
+illumioLogger.info('Running "Add exisiting mapping to other table" fix script of Illumio');
 
 // fetching PCE configuration record
 var grPCEConfig = new GlideRecord('x_illu2_illumio_illumio_pce_conf');
@@ -45,28 +49,28 @@ if (grPCEConfig.next()) {
         }
 
         if (!grPCEFieldMapping.insert()) {
-            gs.error('Error while inserting field mapping record in PCE configuration');
+            illumioLogger.error('Error while inserting field mapping record in PCE configuration');
         } else {
-            gs.info('Successfully added field mapping in PCE field mapping table');
+            illumioLogger.info('Successfully added field mapping in PCE field mapping table');
         }
     } else {
-        gs.info('Source table or Host name is not selected in PCE configuration. Hence skipping the record creation for field mapping');
+        illumioLogger.info('Source table or Host name is not selected in PCE configuration. Hence skipping the record creation for field mapping');
     }
 } else {
-    gs.info('No PCE configuration found for Illumio application. Hence skipping the record creation for field mapping');
+    illumioLogger.info('No PCE configuration found for Illumio application. Hence skipping the record creation for field mapping');
 }]]></script>
         <sys_class_name>sys_script_fix</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-10-29 05:24:47</sys_created_on>
         <sys_id>5eabff87db4ce4d0223ef5361d961984</sys_id>
-        <sys_mod_count>8</sys_mod_count>
+        <sys_mod_count>9</sys_mod_count>
         <sys_name>Add exisiting mapping to other table</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_fix_5eabff87db4ce4d0223ef5361d961984</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-20 15:45:32</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
         <unloadable>false</unloadable>
     </sys_script_fix>
     <sys_es_latest_script action="INSERT_OR_UPDATE">

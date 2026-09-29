@@ -3,16 +3,109 @@
         <active>true</active>
         <description>Log utility</description>
         <name>IllumioLogUtil</name>
-        <script><![CDATA[var IllumioLogUtil = Class.create();
+        <script><![CDATA[// For MID_LOG_PUSH_API and MID_LOG_PUSH_MAX. Every probe already includes this on its first
+// line, so in practice the constants are loaded before any logger exists -- but IllumioHTTPClient
+// builds a logger, and stating the dependency here rather than relying on the caller is what
+// IllumioHTTPClient itself does.
+ms.include("IllumioMIDConstants");
 
+var IllumioLogUtil = Class.create();
+
+// ---------------------------------------------------------------------------------------------
+// W5: pushing MID lines to the instance.
+//
+// There is NO BUFFER. Each warning, error, exception and milestone goes out on its own POST as it
+// happens. The buffer that used to live here was removed 2026-09-29: measured against the ~10
+// instance round-trips per batch that _updateJobRecord already makes, batching bought about a 10%
+// reduction in chatter, and it cost the ordering of the lines it batched -- a flushed batch lands
+// inside one second and syslog_app_scope's Created column is second-precision, so it came back
+// shuffled. See MID_LOG_BUFFER_MAX in IllumioMIDConstants, kept commented for the reasoning.
+//
+// The state below is module-level rather than per-instance because the logger is not: a probe run
+// builds five or six of them, one per class plus one inside every IllumioHTTPClient. Per-instance
+// state would mean the HTTP client's own logger carried its own untracked budget.
+// ---------------------------------------------------------------------------------------------
+var ILLUMIO_MID_LOG_CLIENT = null;
+// Set while a push is in flight. Not an optimization -- IllumioHTTPClient builds its own logger
+// and calls _error when a request fails, so a failing push would push again, and that is
+// recursion rather than merely a loop.
+var ILLUMIO_MID_LOG_PUSHING = false;
+// Pushes spent by the current probe run. Reset by resetPushBudget() from each probe's run().
+var ILLUMIO_MID_LOG_PUSH_COUNT = 0;
+
+/**
+ * MID-side logger.
+ *
+ * Every line it emits carries a correlation prefix:
+ *
+ *     [<job_sys_id>][MID.<Component>] message
+ *
+ * The job sys_id comes FIRST with nothing before it, because the retrieval filter on
+ * syslog_app_scope is `message STARTSWITH "[<job sys_id>]"`. Anything in front of it breaks that
+ * query. In agent0.log the existing `>>> LEVEL: IllumioLogs:` marker still leads the line -- people
+ * grep for it -- and the correlation prefix follows it; only the form that gets pushed to the
+ * instance (W5) has to start with the job id, and `line()` below is what returns that form.
+ *
+ * The `MID.` side marker is added here rather than by the caller. Once MID lines are pushed into
+ * syslog_app_scope they are otherwise indistinguishable from server-side lines.
+ *
+ * @param {String} jobSysId sys_id of the scheduled job. Optional -- several probes construct the
+ *                 logger in initialize() before the job id is known, and call setContext later.
+ * @param {String} component Emitting class, bare (e.g. 'IllumioUpdateWorkloads').
+ */
 IllumioLogUtil.prototype = {
-    initialize: function() {
+    initialize: function(jobSysId, component) {
+        // debug.logging was read into this.debug1 and then never consulted anywhere in the MID
+        // directory, so _debug logged unconditionally. IllumioUpdateWorkloads logs per workload at
+        // debug level, which meant a 100k run wrote 100k+ lines into agent0.log with debug
+        // logging nominally off -- rotating away the errors worth keeping. It is honoured now.
         this.debug1 = ms.getConfigParameter("debug.logging") == 'true';
+
         this.infoPrefix = '>>> INFO: IllumioLogs: ';
         this.debugPrefix = '>>> DEBUG: IllumioLogs:';
         this.warningPrefix = '>>> WARNING: IllumioLogs: ';
         this.errorPrefix = '>>> ERROR: IllumioLogs: ';
         this.exceptionPrefix = '>>> EXCEPTION: IllumioLogs: ';
+
+        this.setContext(jobSysId, component);
+    },
+
+    /**
+     * Set or replace the correlation context. Safe to call more than once -- the job id is not
+     * always available at construction time.
+     *
+     * @param {String} jobSysId sys_id of the scheduled job, nil for "not known yet"
+     * @param {String} component Emitting class, bare. Preserved if not supplied.
+     * @returns {Object} this, so it can be chained onto a constructor
+     */
+    setContext: function(jobSysId, component) {
+        this.jobSysId = jobSysId ? String(jobSysId) : '';
+        if (component) {
+            this.component = String(component);
+        }
+        // A stable shape even when either half is unknown: the prefix is what makes a line
+        // findable, and a line that silently loses it is a line that drops out of the trail.
+        this.contextPrefix =
+            '[' + (this.jobSysId || '-') + ']' +
+            '[MID.' + (this.component || 'unknown') + '] ';
+        return this;
+    },
+
+    /**
+     * The correlated form of a message -- prefix first, no level marker.
+     *
+     * This is what W5 pushes to the instance. Kept separate from the ms.log() calls below so the
+     * two forms cannot drift apart.
+     *
+     * No timestamp of any kind. syslog_app_scope's Created column is second-precision, so lines
+     * emitted inside one second come back in arbitrary order -- that is a platform property, not
+     * something to work around by putting a clock in the message.
+     *
+     * @param {String} msg Message to log
+     * @returns {String} '[<job>][MID.<Component>] msg'
+     */
+    line: function(msg) {
+        return this.contextPrefix + msg;
     },
 
     /**
@@ -20,15 +113,19 @@ IllumioLogUtil.prototype = {
      * @params {String} msg Message to log
      */
     _info: function(msg) {
-        ms.log(this.infoPrefix + msg);
+        ms.log(this.infoPrefix + this.line(msg));
     },
 
     /**
-     * Add debug logs in mid server
+     * Add debug logs in mid server. Suppressed unless the MID config parameter `debug.logging`
+     * is 'true'.
      * @params {String} msg Message to log
      */
     _debug: function(msg) {
-        ms.log(this.debugPrefix + msg);
+        if (!this.debug1) {
+            return;
+        }
+        ms.log(this.debugPrefix + this.line(msg));
     },
 
     /**
@@ -36,7 +133,8 @@ IllumioLogUtil.prototype = {
      * @params {String} msg Message to log
      */
     _warning: function(msg) {
-        ms.log(this.warningPrefix + msg);
+        ms.log(this.warningPrefix + this.line(msg));
+        this._push('warn', msg);
     },
 
     /**
@@ -44,7 +142,8 @@ IllumioLogUtil.prototype = {
      * @params {String} msg Message to log
      */
     _error: function(msg) {
-        ms.log(this.errorPrefix + msg);
+        ms.log(this.errorPrefix + this.line(msg));
+        this._push('error', msg);
     },
 
     /**
@@ -52,25 +151,186 @@ IllumioLogUtil.prototype = {
      * @params {String} msg Message to log
      */
     _except: function(msg) {
-        ms.log(this.exceptionPrefix + msg);
+        ms.log(this.exceptionPrefix + this.line(msg));
+        this._push('error', msg);
+    },
+
+    /**
+     * An info line the instance must see. Logged at info level AND pushed to the instance, which
+     * ordinary _info is not.
+     *
+     * Two kinds of caller, and nothing else should be added to the list:
+     *
+     * - **W6 handoff boundaries** -- the probe-entered line. The whole value of a boundary line is
+     *   that its ABSENCE localizes a break: if the instance logged "queueing for the MID" and no
+     *   probe-entered line ever follows, the break is in the transport and not in code either
+     *   side runs. A line that only reaches agent0.log cannot say that to someone on the instance.
+     * - **W2 per-batch progress** -- the row lines moved off the job record. Moving detail out of
+     *   the job log is only an improvement if it lands somewhere reachable from the job log.
+     *
+     * Both are bounded by payload ROW count, not by workload count -- which is the line between
+     * this and _debug, and the reason a 100k run does not flood the wire.
+     *
+     * @params {String} msg Message to log
+     */
+    _milestone: function(msg) {
+        ms.log(this.infoPrefix + this.line(msg));
+        this._push('info', msg);
+    },
+
+    /**
+     * W5: start a fresh push budget for this probe run.
+     *
+     * Called first thing in every probe's run() wrapper -- before the probe-entered milestone, or
+     * that line gets charged against the previous run's spent budget. This is where flush() used
+     * to be called; the wrapper needs nothing at the end any more, because each line has already
+     * gone out by the time the run finishes.
+     *
+     * The reset is necessary because MID JVMs are long-lived and the counter is module-level.
+     * Without it the first busy run after a restart would spend the budget for every run after it.
+     *
+     * Concurrent probe runs in one JVM (normal since R33 -- one job per CONFIGURATION, not
+     * globally) share this counter, so a second probe starting mid-run resets the first probe's
+     * spend. That is benign and deliberately not solved: the failure it lets through is a budget
+     * more generous than intended, and the alternative is per-run state threaded through every
+     * logger a probe builds, including the ones inside IllumioHTTPClient.
+     */
+    resetPushBudget: function() {
+        ILLUMIO_MID_LOG_PUSH_COUNT = 0;
+    },
+
+    /**
+     * W5: send one line to the instance, now.
+     *
+     * Errors, warnings, exceptions, and whatever _milestone sends. Ordinary info and debug stay in
+     * agent0.log behind `debug1` -- pushing those would put a per-workload line onto the wire,
+     * which is the cost W4 just removed from the file.
+     *
+     * ms.log() has already run by the time this is called, so agent0.log is complete whether the
+     * push succeeds, fails, or is refused by the budget. That is what makes every "give up" path
+     * below acceptable: the line is never lost, it just stays on the MID host.
+     *
+     * Nothing is retried. IllumioHTTPClient is built with no retry parameters for exactly this
+     * reason -- a log push that failed is not worth spending a run's time on, and retrying while
+     * the instance is down stalls the work that actually matters.
+     *
+     * @param {String} level 'error', 'warn' or 'info' -- the gs.* method the endpoint will call
+     * @param {String} msg Raw message; the correlation prefix is applied here
+     * @returns {Boolean} true if the instance accepted the line
+     */
+    _push: function(level, msg) {
+        // A push is in flight and this line came out of the push itself. agent0.log has it.
+        if (ILLUMIO_MID_LOG_PUSHING) {
+            return false;
+        }
+
+        // The literal fallback is not defensive noise. If MID_LOG_PUSH_MAX were ever undefined --
+        // a failed include, a constant renamed and this call site missed -- then
+        // `count >= undefined` is a NaN comparison and evaluates FALSE, so the budget would never
+        // bind and the cap would be silently off. That is the exact shape of the bug this cap
+        // exists to prevent. Cheaper to state the bound twice than to depend on a global for it.
+        var pushMax = MID_LOG_PUSH_MAX > 0 ? MID_LOG_PUSH_MAX : 500;
+        if (ILLUMIO_MID_LOG_PUSH_COUNT >= pushMax) {
+            return false;
+        }
+
+        ILLUMIO_MID_LOG_PUSH_COUNT++;
+
+        var lines = [{
+            level: level,
+            message: this.line(msg)
+        }];
+
+        // Spend the last push saying it was the last one. Without this the trail simply stops on
+        // the instance and the reader cannot tell "the run went quiet" from "the budget ran out".
+        // A note in agent0.log would not do: that file is the one place this whole work item
+        // exists to stop people having to open.
+        if (ILLUMIO_MID_LOG_PUSH_COUNT === pushMax) {
+            lines.push({
+                level: 'warn',
+                message: this.line(
+                    '[log push] Push budget of ' + pushMax + ' for this probe run is spent. ' +
+                    'Remaining MID lines for this run stay in agent0.log on the MID host.')
+            });
+        }
+
+        ILLUMIO_MID_LOG_PUSHING = true;
+
+        try {
+            var response = this._pushClient().post(MID_LOG_PUSH_API, '', null, {
+                lines: lines
+            });
+
+            if (response.hasError) {
+                // Direct ms.log, not this._error -- pushing is suppressed right now, so an _error
+                // here would reach agent0.log and nothing else anyway, and going straight to
+                // ms.log makes that obvious to the next reader.
+                ms.log(this.errorPrefix + this.line(
+                    '[log push] Could not push the preceding line to the instance. ' +
+                    'It remains in this file only.'));
+                return false;
+            }
+            return true;
+        } catch (ex) {
+            ms.log(this.errorPrefix + this.line(
+                '[log push] Exception pushing the preceding line to the instance: ' + ex +
+                '. It remains in this file only.'));
+            return false;
+        } finally {
+            ILLUMIO_MID_LOG_PUSHING = false;
+        }
+    },
+
+    /**
+     * The instance-facing client used for log pushes only, built once per MID JVM.
+     *
+     * Its own credentials come from the MID config the same way IllumioPCEUtils reads them, so
+     * the logger needs nothing passed in -- it has to work in classes that never received a PCE
+     * Configuration.
+     *
+     * Retry parameters are omitted on purpose. IllumioHTTPClient substitutes no defaults, so this
+     * client does not retry, which is what we want: a log push that failed is not worth spending
+     * a run's time on, and retrying it while the instance is down would stall the work that
+     * actually matters.
+     *
+     * @returns {Object} IllumioHTTPClient pointed at the instance
+     */
+    _pushClient: function() {
+        if (!ILLUMIO_MID_LOG_CLIENT) {
+            var url = String(ms.getConfigParameter('url'));
+            if (url.charAt(url.length - 1) == '/') {
+                url = url.substring(0, url.length - 1);
+            }
+            ILLUMIO_MID_LOG_CLIENT = new IllumioHTTPClient(
+                url,
+                ms.getConfigParameter('mid.instance.username'),
+                ms.getConfigParameter('mid.instance.password'),
+                '443',
+                null,
+                null,
+                this.jobSysId
+            );
+        }
+        return ILLUMIO_MID_LOG_CLIENT;
     },
 
     type: "IllumioLogUtil"
-};]]></script>
+};
+]]></script>
         <sys_class_name>ecc_agent_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 07:33:27</sys_created_on>
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>4f3be58adb4c6700dc9fabc5ca9619a0</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>11</sys_mod_count>
         <sys_name>IllumioLogUtil</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_4f3be58adb4c6700dc9fabc5ca9619a0</sys_update_name>
-        <sys_updated_by>hetang.modi</sys_updated_by>
-        <sys_updated_on>2025-01-29 10:26:05</sys_updated_on>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

@@ -29,18 +29,28 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[// Check if both jobs are finished and then trigger CMDB discovery
+        <script><![CDATA[gs.include("IllumioConstants");
+// Check if both jobs are finished and then trigger CMDB discovery
+// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Illumio Poll PCE Async Job Status');
+
 function updateJob(sys_id) {
-    var grAsync = new GlideRecordSecure('x_illu2_illumio_illumio_pce_async_jobs');
+    var grAsync = new GlideRecordSecure(TABLE_PCE_ASYNC_JOBS);
     if (grAsync.get(sys_id)) {
         grAsync.job_status = 'completed';
         if (!grAsync.update()) {
-            gs.error('Error while updating the record from x_illu2_illumio_illumio_pce_async_jobs table having sys id: ' + sys_id);
+            illumioLogger.error('Error while updating the record from x_illu2_illumio_illumio_pce_async_jobs table having sys id: ' + sys_id);
         }
     }
 }
 
 (function executeRule(current, previous /*null when async*/ ) {
+
+    // The async-job row carries the Illumio job it belongs to; correlate on that, not on the
+    // async row's own sys_id. updateJob() above is only ever reached from in here, so it picks
+    // up the same context.
+    illumioLogger.setContext(current.illumio_job_id + "");
 
     var utils = new IllumioUtils();
     try {
@@ -65,15 +75,32 @@ function updateJob(sys_id) {
             var readStartTime = Date.now();
             while (stagingTableGr.next()) {
                 var json_data = stagingTableGr.getValue('json_data');
-                if (json_data.trim() == '<see_attachment/>') {
-                    data = data.concat(JSON.parse(utils.downloadAttachmentData(current.result_table_name + "", stagingTableGr.getUniqueValue())));
-                } else {
-                    data = data.concat(JSON.parse(stagingTableGr.json_data + ""));
+                var parsed = json_data.trim() == '<see_attachment/>' ?
+                    JSON.parse(utils.downloadAttachmentData(current.result_table_name + "", stagingTableGr.getUniqueValue())) :
+                    JSON.parse(stagingTableGr.json_data + "");
+
+                // Appended in place. This was `data = data.concat(parsed)`, which builds a WHOLE
+                // NEW array every iteration and copies everything accumulated so far into it --
+                // O(n^2) bytes allocated across the loop, and while the copy runs the old array
+                // and the new one are both resident, so peak is 2x the accumulated dataset
+                // instead of 1x.
+                //
+                // A plain loop and not push.apply(data, parsed): apply passes every element as a
+                // separate argument, and one staging row carries the whole PCE page -- ~100k
+                // workloads in production -- which is past the argument-count ceiling on some
+                // engines. The loop has no ceiling.
+                for (var parsedIndex = 0, parsedLength = parsed.length; parsedIndex < parsedLength; parsedIndex++) {
+                    data.push(parsed[parsedIndex]);
                 }
+
+                // Dropped before the next JSON.parse rather than left to the next iteration's
+                // assignment, which happens only after that parse has already allocated. Saves
+                // one chunk at the peak.
+                parsed = null;
             }
             var readElapsed = ((Date.now() - readStartTime) / 1000).toFixed(2);
             utils.updateJobRecord(jobId, {
-                logs: '[' + tag + '] Read from staging: ' + data.length + ' records (' + readElapsed + 's)'
+                logs: '[' + tag + '] Read from staging: ' + data.length + ' (' + readElapsed + 's)'
             });
 
             if (data.length) {
@@ -82,7 +109,7 @@ function updateJob(sys_id) {
                     mappingTableGr.deleteMultiple();
                     var deleteElapsed = ((Date.now() - deleteStartTime) / 1000).toFixed(2);
                     utils.updateJobRecord(jobId, {
-                        logs: '[' + tag + '] Deleted old records from ' + mappingLabel + ' (' + deleteElapsed + 's)'
+                        logs: '[' + tag + '] Cleared ' + mappingLabel + ' (' + deleteElapsed + 's)'
                     });
 
                     var insertStartTime = Date.now();
@@ -118,7 +145,7 @@ function updateJob(sys_id) {
                     }
                     var insertElapsed = ((Date.now() - insertStartTime) / 1000).toFixed(2);
                     utils.updateJobRecord(jobId, {
-                        logs: '[' + tag + '] Inserted into ' + mappingLabel + ': ' + dataLength + ' records (' + insertElapsed + 's)'
+                        logs: '[' + tag + '] Populated ' + mappingLabel + ': ' + dataLength + ' (' + insertElapsed + 's)'
                     });
 
                     var cleanupStartTime = Date.now();
@@ -132,13 +159,13 @@ function updateJob(sys_id) {
 
                     updateJob(current.sys_id);
                 } catch (ex) {
-                    gs.error("Exception occurred while creating workloads for mapping table: " + ex);
+                    illumioLogger.error("Exception occurred while creating workloads for mapping table: " + ex);
                 }
 
             } else {
 
                 mappingTableGr.deleteMultiple();
-                gs.info('No data present to map in {0} table', stagingTableGr);
+                illumioLogger.info('No data present to map in {0} table', stagingTableGr);
                 updateJob(current.sys_id);
 
             }
@@ -160,7 +187,7 @@ function updateJob(sys_id) {
             job_completed: new GlideDateTime(),
         };
         new IllumioUtils().updateJobRecord(current.illumio_job_id, jobContent);
-        gs.error('Exception occurred: {0}', e + "");
+        illumioLogger.error('Exception occurred: {0}', e + "");
     }
 
 
@@ -171,7 +198,7 @@ function updateJob(sys_id) {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>6db41282dbcc6700dc9fabc5ca96191f</sys_id>
-        <sys_mod_count>87</sys_mod_count>
+        <sys_mod_count>91</sys_mod_count>
         <sys_name>Illumio Poll PCE Async Job Status</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -179,7 +206,7 @@ function updateJob(sys_id) {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_6db41282dbcc6700dc9fabc5ca96191f</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-16 14:18:17</sys_updated_on>
+        <sys_updated_on>2026-09-29 12:56:34</sys_updated_on>
         <template/>
         <when>async</when>
     </sys_script>

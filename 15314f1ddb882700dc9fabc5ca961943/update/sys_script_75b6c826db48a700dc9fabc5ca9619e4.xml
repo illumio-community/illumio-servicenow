@@ -29,25 +29,44 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[(function executeRule(current, previous /*null when async*/ ) {
-    try {
+        <script><![CDATA[/**
+ * SUPPRESSED -- the body below is intentionally commented out. The business rule record is kept
+ * so the suppression is visible in the update set and reversible without recreating it.
+ *
+ * Why: conflict detection moved into the discovery pipeline. IllumioDiscoveryUtils.evaluateConflict
+ * decides `conflicts` from the CMDB and PCE values already in memory while the workload is being
+ * processed, and writes it as part of the same insert/update. This rule then ran afterwards and
+ * re-decided the same field -- one re-read of the PCE configuration and its label dimension
+ * mappings per workload row, on the hottest write path in the app, to arrive at an answer that
+ * had just been computed. On a 5k+ run that is 5k+ redundant configuration reads.
+ *
+ * It was also not merely redundant. Running after the fact, it could overwrite a `conflicts` value
+ * that evaluateConflict had deliberately set to false.
+ *
+ * If conflict detection ever needs to move back out of discovery, restore this rule and remove the
+ * evaluateConflict call rather than running both.
+ */
 
-        // Set conflicts to true if any label mismatch present
-        var pceConfig = current.getValue("illumio_pce_configuration");
-        var mappedField = new IllumioGetPCEConfiguration().getMappedFields(pceConfig);
-        current.conflicts = new IllumioUtils().checkConflict(current, mappedField);
-    } catch (ex) {
-        gs.error("[Illumio Set Conflict] Exception while Executing Business Rule", ex);
-    }
-
-})(current, previous);]]></script>
+// (function executeRule(current, previous /*null when async*/ ) {
+//     try {
+//
+//         // Set conflicts to true if any label mismatch present
+//         var pceConfig = current.getValue("illumio_pce_configuration");
+//         var mappedField = new IllumioGetPCEConfiguration().getLabelDimensionsBySourceTable(pceConfig);
+//         current.conflicts = new IllumioUtils().checkConflict(current, mappedField);
+//     } catch (ex) {
+//         gs.error("[Illumio Set Conflict] Exception while Executing Business Rule", ex);
+//     }
+//
+// })(current, previous);
+]]></script>
         <sys_class_name>sys_script</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-23 13:31:51</sys_created_on>
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>75b6c826db48a700dc9fabc5ca9619e4</sys_id>
-        <sys_mod_count>47</sys_mod_count>
+        <sys_mod_count>49</sys_mod_count>
         <sys_name>Illumio Set Conflict</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -55,7 +74,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_75b6c826db48a700dc9fabc5ca9619e4</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-15 22:04:12</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:44</sys_updated_on>
         <template/>
         <when>before</when>
     </sys_script>

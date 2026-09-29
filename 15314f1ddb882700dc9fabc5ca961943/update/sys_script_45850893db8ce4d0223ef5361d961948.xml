@@ -27,16 +27,21 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[(function executeRule(current, previous /*null when async*/ ) {
+        <script><![CDATA[gs.include("IllumioConstants");
+// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Illumio prevent duplicate mapping table');
 
-    var configClassGr = new GlideRecordSecure('x_illu2_illumio_illumio_config_class_mapping');
+(function executeRule(current, previous /*null when async*/ ) {
+
+    var configClassGr = new GlideRecordSecure(TABLE_CONFIG_CLASS_MAPPING);
     configClassGr.addQuery('illumio_pce_configuration', current.getValue('illumio_pce_configuration'));
     configClassGr.addQuery('source_table', current.source_table);
     configClassGr.addQuery('sys_id', '!=', current.getUniqueValue());
     configClassGr.query();
     if (configClassGr.next()) {
         gs.addErrorMessage(current.source_table + ' table is already selected in other class mapping. Please select the different table or update the existing class mapping.');
-        gs.info('[Illumio prevent duplicate mapping table] ' + current.source_table + ' table is already selected in other field mapping. Please select the different table or update the existing field mapping.');
+        illumioLogger.info('' + current.source_table + ' table is already selected in other field mapping. Please select the different table or update the existing field mapping.');
         current.setAbortAction(true);
     }
 
@@ -48,15 +53,15 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>45850893db8ce4d0223ef5361d961948</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>11</sys_mod_count>
         <sys_name>Illumio prevent duplicate mapping table</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_45850893db8ce4d0223ef5361d961948</sys_update_name>
-        <sys_updated_by>crest.data</sys_updated_by>
-        <sys_updated_on>2025-07-21 07:25:31</sys_updated_on>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 10:11:44</sys_updated_on>
         <template/>
         <when>before</when>
     </sys_script>

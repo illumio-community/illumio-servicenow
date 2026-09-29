@@ -24,12 +24,45 @@ IllumioAutoSyncWithPCE.prototype = {
     SYNC_CHUNK_QUERY: "duplicate=false^conflicts=true",
 
     initialize: function() {
+        this.logger = new IllumioLogger(null, 'IllumioAutoSyncWithPCE');
         this.sys_ids = [];
         this.managedWorkloadsList = [];
         this.unManagedWorkloadsList = [];
         this.unknownWorkloadsList = [];
-        this.payloadSysIds = [];
-        this.maxSizeOfWorkloadPayload = parseInt(gs.getProperty("x_illu2_illumio.max_workloads_in_each_payload_for_autosync", 10000));
+        // How many payload rows this run has written. A count, not the sys_ids: since R33 the
+        // rows carry the job reference and every consumer -- the MID Server that reads them and
+        // the withdrawal paths that delete them -- asks the table for "this job's rows" instead
+        // of being handed a list. The only thing the list was still being used for was the test
+        // "is there anything for the MID to do", and a count answers that.
+        this.payloadRowCount = 0;
+        // Workloads lost to a failed payload insert. A sync that could not write one of its rows
+        // is a partial success, not a success, and this is what says so on the job record.
+        this.droppedOnInsert = 0;
+
+        // Run totals for the closing Summary line. Separate from the three lists because those
+        // are emptied on every flush -- by the time the run is over they are all zero, which is
+        // why the two "nothing to do" summaries below report zeros that are true by accident.
+        this.createdCount = 0;
+        this.updatedCount = 0;
+
+        // When the row currently being filled started. Reset by every flush, so each "Payload
+        // Prepared" line times its own row rather than the run so far -- the per-STEP duration
+        // the rest of the application's logs use. An instance field rather than a local because
+        // flushPayload is a method and the only other way to give it the clock is a parameter
+        // the caller would have to keep in step with the flushes it does not do.
+        this.payloadRowStartedAt = 0;
+
+        // The bundle size is IllumioSyncUtils.PAYLOAD_ROW_SIZE, not a property of this class. The
+        // old x_illu2_illumio.max_workloads_in_each_payload_for_autosync is unused: it was a
+        // fossil from when payload rows were built all at once at the end of the run and the
+        // property capped how large one could get. Rows are written as the run proceeds now, so a
+        // second, larger number only meant finished workload objects piled up in heap before
+        // anything was written.
+        //
+        // No code has read that property since. The sys_properties RECORD is not in source
+        // control, so it still exists on any instance where it was set and has to be deleted
+        // there by hand -- leaving it means an admin can find and set a property that does
+        // nothing, which is worse than it not existing.
     },
 
     /**
@@ -42,8 +75,7 @@ IllumioAutoSyncWithPCE.prototype = {
             repo = new IllumioSyncRepoUtils(syncUtils),
             skippedWorkloads = 0,
             partial_success = "false",
-            countObject, sysIds = [],
-            counter = 0;
+            countObject, sysIds = [];
 
         try {
             if (utils.isJobCancelled(illumioJobId)) {
@@ -56,18 +88,33 @@ IllumioAutoSyncWithPCE.prototype = {
             instanceURL = instanceURL.replace('/', '');
 
             // fetch scheduled job record
-            var illumioScheduledJobsGr = new GlideRecordSecure("x_illu2_illumio_illumio_scheduled_jobs");
+            var illumioScheduledJobsGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
             if (!illumioScheduledJobsGr.get(illumioJobId)) {
-                gs.error("Error while starting Auto Sync process: Not able to find Scheduled Job with Sys ID: {0}", illumioJobId);
+                this.logger.error("Error while starting Auto Sync process: Not able to find Scheduled Job with Sys ID: {0}", illumioJobId);
                 return;
             }
 
             // fetch the PCE Configuration record
             var configSysId = illumioScheduledJobsGr.getValue("illumio_pce_configuration"),
                 userGr = illumioScheduledJobsGr.job_owner;
-            var configGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_conf");
+            var configGr = new GlideRecordSecure(TABLE_PCE_CONF);
             if (!configGr.get(configSysId)) {
-                gs.error("Error while starting Auto Sync process: Not able to find PCE Configuration with Sys ID: {0}", configSysId);
+                this.logger.error("Error while starting Auto Sync process: Not able to find PCE Configuration with Sys ID: {0}", configSysId);
+                // Fail the record, do not just return. The job was inserted as `running` by
+                // whoever raised the event, and a `running` job that nothing will ever finish
+                // blocks every Illumio action on this PCE Configuration. The user's symptom is
+                // "none of my buttons work any more", which points nowhere near a missing PCE
+                // Configuration. It used to block every action on the instance, because
+                // getRunningJob queried the whole table; it is scoped now, so the blast radius
+                // is one configuration rather than all of them -- still worth failing the record.
+                utils.updateJobRecord(illumioJobId, {
+                    logs: "PCE Configuration " + configSysId + " could not be read. The job " +
+                        "cannot run. If the configuration exists, check that the running user " +
+                        "can read it -- this is a GlideRecordSecure query.",
+                    current_operation: "Synchronizing workloads to PCE",
+                    job_status: "failed",
+                    job_completed: new GlideDateTime()
+                });
                 return;
             }
 
@@ -81,22 +128,44 @@ IllumioAutoSyncWithPCE.prototype = {
             // global, so a workload matched by two Sync Filters is built and sent exactly once.
             // Nothing bigger than a list of sys_ids exists at this point.
             // ---------------------------------------------------------------------------
-            var syncFilterResult = utils.getEligibleWorkloadSysIdsByConfig(configSysId, 'inclusion');
+            // The progress sink writes a line per filter and per label term as they complete.
+            // Before it, this stretch wrote nothing until it was over -- on a large
+            // configuration that is minutes of a job that looks wedged.
+            var progress = utils.jobProgressLogger(illumioJobId);
+
+            // Per-row commentary. One line per PAYLOAD_ROW_SIZE workloads is 100 lines on a 100k
+            // run, so it goes to syslog and the job record keeps only the "Payload Batches: N"
+            // denominator and the Summary. See IllumioUtils.jobTraceLogger.
+            var trace = utils.jobTraceLogger(illumioJobId);
+
+            var syncFilterResult = new IllumioSyncFilterUtils()
+                .getEligibleWorkloadSysIdsByConfig(configSysId, 'inclusion', progress);
 
             if (syncFilterResult.hasFilter) {
                 sysIds = syncFilterResult.sysIds;
-                var syncFilterLog = 'Eligible workloads after sync filter: ' + sysIds.length;
-                gs.info('[IllumioAutoSyncWithPCE] ' + syncFilterLog);
-                illumioScheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] ' + syncFilterLog;
-                illumioScheduledJobsGr.update();
             } else {
-                // No Sync Filter: every workload of this configuration is a candidate.
+                // No Sync Filter: every workload of this configuration is a candidate. On a large
+                // table this single query is tens of seconds and used to write nothing at all --
+                // the "No active inclusion Sync Filters" line was immediately followed by silence.
+                progress('Selecting every eligible workload on this PCE Configuration (' +
+                    this.SYNC_CHUNK_QUERY + ').');
                 sysIds = repo.findSyncCandidateSysIds(configSysId, this.SYNC_CHUNK_QUERY);
+                progress(sysIds.length + ' candidate workload(s) selected.');
             }
 
+            // Re-read before anything below touches this record again. The progress sink writes
+            // the job's `logs` through its own GlideRecord, so the copy read at the top of this
+            // function is now stale -- and every write below is `logs += ...` on that copy
+            // followed by update(), which would put the stale value back and erase every
+            // progress line phase 1 just wrote.
+            illumioScheduledJobsGr.get(illumioJobId);
+
+            // A synchronous MID Server round trip to the PCE. Silent, and on a slow PCE it is the
+            // longest single step before anything is sent.
+            progress('Fetching critical label groups and labels from the PCE.');
             var status = utils.fetchLabelGroupsAndLabelsFromPCE(configGr);
             if (!status) {
-                gs.error("Error in auto sync process for PCE Configuration -  " + configGr.getValue("name"));
+                this.logger.error("Error in auto sync process for PCE Configuration -  " + configGr.getValue("name"));
                 var jobContent = {
                     logs: "Error in MID Server or Critical Label Group Configuration. Please check application logs.",
                     current_operation: "Synchronizing workloads to PCE",
@@ -115,21 +184,62 @@ IllumioAutoSyncWithPCE.prototype = {
             //
             // Expensive, so it is streamed a chunk at a time and never holds more than one
             // chunk of objects. The critical-label check, the label values and the PCE label
-            // hrefs are all resolved per chunk inside runWorkloadChunks; this callback only
+            // hrefs are all resolved per chunk inside prepareWorkloadsForPCE; this callback only
             // decides which list a finished object belongs in.
             // ---------------------------------------------------------------------------
             var self = this;
-            var outcome = utils.runWorkloadChunks({
+
+            // Predicted from the candidate count so that "Payload Prepared: x/N" has its
+            // denominator before the first row exists. A ceiling, not a promise: workloads
+            // dropped by the chunk query, by the critical-label check or by the threshold never
+            // reach a row, so finishing at 7 of 8 is a correct run and not a lost row.
+            var expectedRows = Math.ceil(sysIds.length / syncUtils.PAYLOAD_ROW_SIZE);
+
+            // Before the first row is written, not after the run: rows from a dead run are
+            // unreachable -- every consumer queries by job -- so nothing else will ever remove
+            // them. The same sweep the preview export has always done, on its own table.
+            repo.deleteStalePayloadRows(
+                syncUtils.AUTOSYNC_PAYLOAD_TABLE, illumioJobId, progress);
+
+            progress('Payload Batches: ' + expectedRows);
+
+            // Phase 2's clocks. phase2StartedAt is the one cumulative figure and it appears once,
+            // on the Summary; payloadRowStartedAt is per row and is reset by each flush.
+            var phase2StartedAt = new Date().getTime();
+            this.payloadRowStartedAt = phase2StartedAt;
+
+            var outcome = new IllumioSyncBuildUtils(syncUtils, repo).prepareWorkloadsForPCE({
                 pceConfigSysId: configSysId,
                 sysIds: sysIds,
                 chunkQuery: this.SYNC_CHUNK_QUERY,
                 skipCriticalLabels: true,
                 applyThreshold: true,
+                onProgress: progress,
                 appendRow: function(workloadObject) {
                     self.queueWorkloadForSync(workloadObject, userName, instanceURL);
-                    counter = self.addObjectToPayload(false, counter);
+
+                    // One payload row per PAYLOAD_ROW_SIZE workloads, NOT one per window. Tying
+                    // it to the window made every row the window size -- 500 -- and so made every
+                    // PCE bulk call half of what the endpoint accepts, with the MID's batch_size
+                    // unable to reach a value that mattered. See PAYLOAD_ROW_SIZE in
+                    // IllumioSyncUtils.
+                    //
+                    // A row now spans windows, so the three lists outlive the window that started
+                    // them and the tail has to be flushed by hand after the walk. That flush is
+                    // below.
+                    if (self.queuedForPayload() >= syncUtils.PAYLOAD_ROW_SIZE) {
+                        self.flushPayload(illumioJobId, trace, expectedRows);
+                    }
                 }
             });
+
+            // Re-read AGAIN. Same reason as the re-read before phase 2, and now it applies here
+            // too: fetchLabelGroupsAndLabelsFromPCE and prepareWorkloadsForPCE both write progress
+            // lines through their own GlideRecord. Every write below is `logs += ...` on this
+            // copy followed by update(), so without this the whole of phase 2's commentary is
+            // overwritten by the value read before phase 2 started -- which is exactly the bug
+            // the first re-read was added to fix.
+            illumioScheduledJobsGr.get(illumioJobId);
 
             skippedWorkloads = outcome.skippedCritical;
             var totalRecords = outcome.processed;
@@ -141,54 +251,69 @@ IllumioAutoSyncWithPCE.prototype = {
                 // the end, so cancelling means withdrawing the ones already written -- they
                 // describe work that must not happen. The old code got this for free by
                 // discarding an in-memory array.
-                var withdrawn = repo.deletePayloadRows(
-                    syncUtils.AUTOSYNC_PAYLOAD_TABLE, this.payloadSysIds);
-                gs.info("[IllumioAutoSyncWithPCE] Job cancelled on threshold limit, withdrew " +
+                var withdrawn = repo.deletePayloadRowsForJob(
+                    syncUtils.AUTOSYNC_PAYLOAD_TABLE, illumioJobId);
+                this.logger.info("[IllumioAutoSyncWithPCE] Job cancelled on threshold limit, withdrew " +
                     withdrawn + " payload record(s)");
-                this.payloadSysIds = [];
+                this.payloadRowCount = 0;
                 this.managedWorkloadsList = [];
                 this.unManagedWorkloadsList = [];
                 this.unknownWorkloadsList = [];
 
                 illumioScheduledJobsGr.logs +=
-                    "\n[" +
-                    new Date(new GlideDateTime().getNumericValue()).toISOString() +
-                    "] " + thresholdLimitLog;
+                    "\n" + thresholdLimitLog;
 
                 illumioScheduledJobsGr.job_status = "cancelled_threshold_limit_exceeded";
                 illumioScheduledJobsGr.job_completed = new GlideDateTime();
                 if (!illumioScheduledJobsGr.update()) {
-                    gs.error("Error while updating process monitor.");
+                    this.logger.error("Error while updating process monitor.");
                 }
                 return;
             } else if (!gs.nil(thresholdLimitLog)) {
                 partial_success = "true";
                 illumioScheduledJobsGr.logs +=
-                    "\n[" +
-                    new Date(new GlideDateTime().getNumericValue()).toISOString() +
-                    "] " + thresholdLimitLog;
+                    "\n" + thresholdLimitLog;
 
                 if (!illumioScheduledJobsGr.update()) {
-                    gs.error("Error while updating process monitor.");
+                    this.logger.error("Error while updating process monitor.");
                 }
             }
+
+            // The tail. A payload row spans windows now, so the walk almost always ends with a
+            // partial queue in hand -- without this the last 1..999 workloads would be counted in
+            // the summary and never sent.
+            //
+            // Here and not further down: it must be after the cancelJob branch above, because on
+            // that path the queue describes work that must not happen and writing it out just to
+            // withdraw it is work done to be undone -- and before the droppedOnInsert check
+            // below, because a tail row that fails to insert is exactly the loss that check
+            // exists to report.
+            this.flushPayload(illumioJobId, trace, expectedRows);
+
+            // Closes phase 2 with what was actually queued, the counterpart of the deletion
+            // path's Summary line. Counted as the objects were sorted rather than read off the
+            // three lists, which the flushes have emptied by now.
+            progress('Summary: ' + this.createdCount + ' for creation, ' +
+                this.updatedCount + ' for updation' +
+                (skippedWorkloads > 0 ? ', ' + skippedWorkloads + ' skipped' : '') +
+                syncUtils.since(phase2StartedAt));
+
+            // Re-read once more. Same reason as the two re-reads above: the flush and the Summary
+            // line just wrote `logs` through the progress sink's own GlideRecord, and every write
+            // below is `logs += ...` on this copy followed by update(). Without this, the last
+            // thing phase 2 says would be overwritten by the value read before it said it.
+            illumioScheduledJobsGr.get(illumioJobId);
 
             // check if there is unknown or inconsistent or retired workload
             if (totalRecords == 0) {
                 // Table is empty
-                gs.info("Auto synchronization : No unknown or inconsistent or retired workload found.");
+                this.logger.info("Auto synchronization : No unknown or inconsistent or retired workload found.");
                 illumioScheduledJobsGr.logs +=
-                    "\n[" +
-                    new Date(new GlideDateTime().getNumericValue()).toISOString() +
-                    '] Total critical label groups fetched : ' + countObject[configSysId];
+                    "\n" + 'Total critical label groups fetched : ' + countObject[configSysId];
                 illumioScheduledJobsGr.logs +=
-                    "\n[" +
-                    new Date(new GlideDateTime().getNumericValue()).toISOString() +
-                    "] No unknown or inconsistent or retired workload found";
+                    "\nNo unknown or inconsistent or retired workload found";
                 illumioScheduledJobsGr.logs +=
-                    "\n[" +
-                    new Date(new GlideDateTime().getNumericValue()).toISOString() +
-                    "] Synchronization with PCE completed" + '\n -------------------------------------\nTotal workloads: ' + skippedWorkloads + '\n Created unknown workloads: 0\n Updated managed workloads: 0\n Updated unmanaged workloads: 0\n Skipped workloads: ' + skippedWorkloads;
+                    "\nSynchronization with PCE completed" + '\n -------------------------------------\nTotal workloads: ' + skippedWorkloads + '\n Created unknown workloads: 0\n Updated managed workloads: 0\n Updated unmanaged workloads: 0\n Skipped workloads: ' + skippedWorkloads;
                 illumioScheduledJobsGr.current_operation =
                     "Synchronization with PCE completed";
 
@@ -198,27 +323,39 @@ IllumioAutoSyncWithPCE.prototype = {
                 return;
             }
 
-            gs.info("Sync process started for PCE Configuration: {0}", configGr.getValue("name"));
-            try {
-                // Skip the operation if no workload to process
-                if (
-                    this.managedWorkloadsList.length +
-                    this.unManagedWorkloadsList.length +
-                    this.unknownWorkloadsList.length ==
-                    0 &&
-                    this.payloadSysIds.length == 0
-                ) {
-                    gs.info("Auto synchronization : No unknown or inconsistent workload found for PCE Configuration {0}.", configGr.getValue("name"));
-                    illumioScheduledJobsGr.logs +=
-                        "\n[" +
-                        new Date(new GlideDateTime().getNumericValue()).toISOString() +
-                        '] Total critical label groups fetched : ' + countObject[configSysId];
-                    illumioScheduledJobsGr.logs +=
-                        "\n[" +
-                        new Date(new GlideDateTime().getNumericValue()).toISOString() +
-                        "] No unknown or inconsistent workload found";
+            // A payload row that could not be written is workloads the MID will never see, so the
+            // run did not do what its counts say it did. Said on the job record rather than left
+            // in syslog, and downgraded to partial success.
+            if (this.droppedOnInsert > 0) {
+                partial_success = "true";
+                totalRecords -= this.droppedOnInsert;
+                illumioScheduledJobsGr.logs +=
+                    "\n" + this.droppedOnInsert + " workload(s) were prepared but their payload " +
+                    "row could not be written and will not be sent to the PCE. See the " +
+                    "application logs (source IllumioAutoSyncWithPCE).";
+                illumioScheduledJobsGr.update();
+            }
 
-                    illumioScheduledJobsGr.logs += "\n[" + new Date(new GlideDateTime().getNumericValue()).toISOString() + "] Synchronization with PCE completed" + '\n -------------------------------------\nTotal workloads: ' + skippedWorkloads + '\n Created unknown workloads: ' + this.unknownWorkloadsList.length + '\n Updated managed workloads: ' + this.managedWorkloadsList.length + '\n Updated unmanaged workloads: ' + this.unManagedWorkloadsList.length + '\n Skipped workloads: ' + skippedWorkloads;
+            this.logger.info("Sync process started for PCE Configuration: {0}", configGr.getValue("name"));
+            try {
+                // Skip the operation if no workload to process.
+                //
+                // The three lists are not consulted any more: the tail flush above empties them,
+                // so they are always empty by this point and testing them only asked the same
+                // question twice. Whether there is anything for the MID Server to do is exactly
+                // whether a payload row was written.
+                if (this.payloadRowCount == 0) {
+                    this.logger.info("Auto synchronization : No unknown or inconsistent workload found for PCE Configuration {0}.", configGr.getValue("name"));
+                    illumioScheduledJobsGr.logs +=
+                        "\n" + 'Total critical label groups fetched : ' + countObject[configSysId];
+                    illumioScheduledJobsGr.logs +=
+                        "\nNo unknown or inconsistent workload found";
+
+                    // createdCount/updatedCount, not the three lists. The lists are emptied by
+                    // every flush, so by the time this line runs they are always zero -- which
+                    // used to be reported as "created 0, updated 0" on a branch where that
+                    // happens to be true, and would have gone on being reported if it were not.
+                    illumioScheduledJobsGr.logs += "\nSynchronization with PCE completed" + '\n -------------------------------------\nTotal workloads: ' + skippedWorkloads + '\n Created unknown workloads: ' + this.createdCount + '\n Updated workloads: ' + this.updatedCount + '\n Skipped workloads: ' + skippedWorkloads;
                     illumioScheduledJobsGr.current_operation =
                         "Synchronization with PCE completed";
                     illumioScheduledJobsGr.job_status = partial_success == "true" ? "partial_success" : "completed";
@@ -226,12 +363,20 @@ IllumioAutoSyncWithPCE.prototype = {
                     illumioScheduledJobsGr.update();
                     return;
                 }
-                this.addObjectToPayload(true, counter);
+
+                // No tail flush here: it already ran, above the droppedOnInsert check, so that a
+                // tail row that failed to insert is reported like any other.
 
                 // The probe parameters to the ECC request
                 var parameters = {
                     autoSync: "true",
-                    payloadSysIds: this.payloadSysIds + "",
+                    // No payloadSysIds. The MID Server finds its rows by querying the payload
+                    // table for jobSysId, which it already has. The list used to be a comma-
+                    // separated ECC parameter, and every ECC parameter becomes one XML attribute:
+                    // at one row per 500-workload window a 2M run put ~4,000 sys_ids, ~132 KB,
+                    // into a single attribute, and that number grew every time the window shrank.
+                    // The job reference is one sys_id whatever the run size.
+                    payloadRows: this.payloadRowCount + "",
                     jobSysId: illumioJobId,
                     partialSucc: partial_success,
                     skipped: skippedWorkloads,
@@ -246,13 +391,54 @@ IllumioAutoSyncWithPCE.prototype = {
                     ),
                     configSysId: configSysId,
                     time_zone: gs.getSession().getTimeZoneName(),
-                    batch_size: gs.getProperty(
-                        "x_illu2_illumio.bulk_operation_batch_size",
-                        1000
-                    ),
+                    // Was x_illu2_illumio.bulk_operation_batch_size, retired. Note this number
+                    // cannot currently make the PCE call any BIGGER: the MID chunks one payload
+                    // row at a time and a row holds WORKLOAD_CHUNK_SIZE (500), so anything above
+                    // 500 produces one slice and nothing else. See H5 in sync-callchain.MD.
+                    batch_size: BATCH_SIZE_STANDARD,
                     enable_pce_mid_proxy: pceConfig.enable_pce_mid_proxy,
                     retry_params: JSON.stringify(pceConfig.retry_params)
                 };
+                // ===================================================================
+                // TEMPORARY -- DIAGNOSTIC ABORT. REMOVE BEFORE SHIPPING.
+                //
+                // Stops the run at the last instant before the MID Server is handed the work, so
+                // the phase 1 + phase 2 timings can be read off the job log without waiting for
+                // (or actually performing) a 10k workload push to the PCE. Everything that used
+                // to happen silently in the gap has happened by this point: candidate selection,
+                // the label-group fetch, every chunk, and the final payload flush.
+                //
+                // Off unless the property exists and is 'true', so this is inert on an instance
+                // that never creates it. Toggling it does not need a re-push.
+                //
+                // Withdraws the payload rows on the way out. They describe work the MID will now
+                // never do, and leaving 10k of them behind would both litter the table and let a
+                // later run pick them up. Same call the threshold cancellation already uses.
+                // ===================================================================
+                if (gs.getProperty('x_illu2_illumio.abort_before_mid_handoff', 'false') == 'true') {
+                    var abortedRows = repo.deletePayloadRowsForJob(
+                        syncUtils.AUTOSYNC_PAYLOAD_TABLE, illumioJobId);
+
+                    // Re-read before appending: every `logs +=` in this method is a read-modify-
+                    // write, and the progress sink wrote through its own GlideRecord.
+                    illumioScheduledJobsGr.get(illumioJobId);
+                    illumioScheduledJobsGr.logs +=
+                        "\nDIAGNOSTIC ABORT (x_illu2_illumio.abort_before_mid_handoff is true). " +
+                        "Everything up to the MID Server handoff ran: " + totalRecords +
+                        " workload(s) were prepared and would have been sent now. " +
+                        abortedRows + " payload record(s) withdrawn. Nothing was sent to the PCE." +
+                        "\nSet the property to false to let the sync complete normally.";
+                    illumioScheduledJobsGr.current_operation = "Aborted before MID Server handoff";
+                    illumioScheduledJobsGr.job_status = "failed";
+                    illumioScheduledJobsGr.job_completed = new GlideDateTime();
+                    illumioScheduledJobsGr.update();
+
+                    this.logger.warn("[IllumioAutoSyncWithPCE] Diagnostic abort before MID handoff for " +
+                        "job " + illumioJobId + "; withdrew " + abortedRows + " payload row(s).");
+                    return;
+                }
+                // =============== END TEMPORARY DIAGNOSTIC ABORT ====================
+
                 // Add the request to ECC queue
                 var illumioAddToECCQueue = new IllumioAddToECCQueue(
                     "IllumioUpdateWorkloads",
@@ -261,12 +447,43 @@ IllumioAutoSyncWithPCE.prototype = {
                 );
                 illumioAddToECCQueue.insert();
 
-                gs.info("Started auto synchronization for PCE Configuration {0}", configGr.getValue("name"));
+                this.logger.info("Started auto synchronization for PCE Configuration {0}", configGr.getValue("name"));
             } catch (ex) {
-                gs.error("Exception occurred while preparing request data. Exception", ex);
+                this.logger.error("Exception occurred while preparing request data. Exception", ex);
+                // Rethrown so the outer handler fails the job record. Swallowing it here left the
+                // job `running` with the payload rows already written and nothing queued for the
+                // MID -- the run was over, but nothing said so and nothing else could start.
+                throw ex;
             }
         } catch (e) {
-            gs.error("Exception occurred while syncing", e);
+            this.logger.error("Exception occurred while syncing", e);
+
+            // Every exit from this method must leave the job in a terminal state. This catch used
+            // to log and return, which left job_status at `running` forever: getRunningJob then
+            // looked for ANY running job across the whole table, so one swallowed exception here
+            // made Start Sync, Start Workload Deletion and every preview refuse with "a job is
+            // already running" until someone cancelled the record by hand. The exception was in
+            // the application log; the connection between the two was in nobody's head.
+            //
+            // getRunningJob is scoped to a configuration now, so a repeat would strand this
+            // configuration instead of the instance. That is a smaller outage, not a fixed one:
+            // the terminal-state rule below still stands, and it is now also what keeps a
+            // stranded job out of the payload sweep's survivor list forever.
+            try {
+                utils.updateJobRecord(illumioJobId, {
+                    logs: "Synchronization failed with an exception: " + e +
+                        "\nSee the application logs (source IllumioAutoSyncWithPCE) for the " +
+                        "stack trace. Payload rows for this job, if any were written, were not " +
+                        "sent to the MID Server.",
+                    current_operation: "Synchronizing workloads to PCE",
+                    job_status: "failed",
+                    job_completed: new GlideDateTime()
+                });
+            } catch (finalizeEx) {
+                // Nothing left to try. Better a stuck job than a lost stack trace.
+                this.logger.error("Could not fail the scheduled job record after a sync exception: " +
+                    finalizeEx);
+            }
         }
     },
 
@@ -277,7 +494,7 @@ IllumioAutoSyncWithPCE.prototype = {
      * PCE already knows, that they carry the href to update. This is the "row builder" half of
      * the phase-2 parameterisation -- the deletion path supplies its own.
      *
-     * @param {Object} workloadObject Object from IllumioUtils.runWorkloadChunks
+     * @param {Object} workloadObject Object from IllumioSyncBuildUtils.prepareWorkloadsForPCE
      * @param {String} userName Display name of the job owner, for the audit note
      * @param {String} instanceURL Instance host, for the audit note
      */
@@ -288,13 +505,16 @@ IllumioAutoSyncWithPCE.prototype = {
             workloadObject["href"] = workloadObject["pce_workload_href"];
             workloadObject["description"] = "Updated by " + userName + signature;
             this.managedWorkloadsList.push(workloadObject);
+            this.updatedCount++;
         } else if (workloadObject["known_to_pce"] == "unmanaged") {
             workloadObject["href"] = workloadObject["pce_workload_href"];
             workloadObject["description"] = "Updated by " + userName + signature;
             this.unManagedWorkloadsList.push(workloadObject);
+            this.updatedCount++;
         } else {
             workloadObject["description"] = "Created by " + userName + signature;
             this.unknownWorkloadsList.push(workloadObject);
+            this.createdCount++;
         }
     },
 
@@ -329,50 +549,94 @@ IllumioAutoSyncWithPCE.prototype = {
     },
 
     /**
-     * this function will add the workload payload to table if couter exceeds or if its a last batch
-     * @param {boolean} pushBundle
-     * @param {number} objCounter
-     * @param {string} [payloadTable] Payload table, defaults to the auto sync payload table.
-     *   Parameterised because it is the single point at which the deletion path differs.
+     * How many finished workloads are waiting to be written as a payload row.
+     *
+     * Asked rather than counted. A separate counter beside the three lists is a second copy of a
+     * number they already hold, and the whole point of the rewrite documented under flushPayload
+     * was that the two copies could drift.
+     *
+     * @returns {Number}
      */
-    addObjectToPayload: function(pushBundle, objCounter, payloadTable) {
-        objCounter++;
+    queuedForPayload: function() {
+        return this.managedWorkloadsList.length +
+            this.unManagedWorkloadsList.length +
+            this.unknownWorkloadsList.length;
+    },
 
-        var sys_id = "";
+    /**
+     * Write the workloads queued so far as one payload row, and empty the queue.
+     *
+     * Called when the queue reaches IllumioSyncUtils.PAYLOAD_ROW_SIZE, and once more at the end of
+     * the walk for the tail. It used to be called once per phase-2 window, which made a row the
+     * window size -- 500 -- and so made every PCE bulk call half of what the endpoint accepts.
+     *
+     * It used to take a running count as a parameter and hand it back, alongside a flag saying
+     * "this is the last one". That count was a second copy of a number the three lists already
+     * held -- `objCounter` and `managed.length + unManaged.length + unknown.length` were the same
+     * value by construction -- so it had to be kept in step, and the one path that failed to keep
+     * it in step was the one that mattered: a failed insert returned the counter unreset with the
+     * lists still full, so the next workload pushed it past the limit again and re-inserted the
+     * same bundle plus one. Every subsequent workload did the same. One failure and the row grew
+     * without bound for the rest of the run, writing nothing and logging once per workload.
+     *
+     * Asking the lists how big they are removes the question. The lists are emptied whether or
+     * not the insert succeeded, and a failure is counted rather than carried.
+     *
+     * @param {String} illumioJobId Job the row belongs to. Stamped onto the row, and since R33
+     *        this is the ONLY thing connecting the row to its run -- the ECC message no longer
+     *        carries the sys_ids. A row written without it is invisible to the MID Server.
+     * @param {Function} [trace] SYSLOG sink, for the per-row "Payload Prepared" line. Not the
+     *        job-record progress sink: one line per PAYLOAD_ROW_SIZE workloads is 100 lines on a
+     *        100k run. See IllumioUtils.jobTraceLogger.
+     * @param {Number} [expectedRows] Predicted row count, the denominator of that line
+     */
+    flushPayload: function(illumioJobId, trace, expectedRows) {
+        var size = this.queuedForPayload();
 
-        if (objCounter >= this.maxSizeOfWorkloadPayload || pushBundle) {
-            if (
-                (this.managedWorkloadsList.length +
-                    this.unManagedWorkloadsList.length +
-                    this.unknownWorkloadsList.length) !=
-                0
-            ) {
-                var grPayload = new GlideRecordSecure(
-                    payloadTable || new IllumioSyncUtils().AUTOSYNC_PAYLOAD_TABLE
-                );
-                grPayload.initialize();
-                var payload = {
-                    updateManaged: this.managedWorkloadsList,
-                    updateUnManaged: this.unManagedWorkloadsList,
-                    createUnknown: this.unknownWorkloadsList,
-                    isAutoSync: true,
-                };
-                grPayload.payload = JSON.stringify(payload);
-                sys_id = grPayload.insert();
-                if (gs.nil(sys_id)) {
-                    gs.error(
-                        "[IllumioAutoSyncWithPCE] Error while inserting record in payload table"
-                    );
-                } else {
-                    this.payloadSysIds.push(sys_id);
-                    this.managedWorkloadsList = [];
-                    this.unManagedWorkloadsList = [];
-                    this.unknownWorkloadsList = [];
-                    objCounter = 0;
-                }
-            }
+        if (size === 0) {
+            return;
         }
-        return objCounter;
+
+        var syncUtils = new IllumioSyncUtils();
+        var grPayload = new GlideRecordSecure(syncUtils.AUTOSYNC_PAYLOAD_TABLE);
+        grPayload.initialize();
+        grPayload.payload = JSON.stringify({
+            updateManaged: this.managedWorkloadsList,
+            updateUnManaged: this.unManagedWorkloadsList,
+            createUnknown: this.unknownWorkloadsList,
+            isAutoSync: true
+        });
+        grPayload.setValue(syncUtils.PAYLOAD_JOB_FIELD, illumioJobId);
+
+        var sysId = grPayload.insert();
+
+        this.managedWorkloadsList = [];
+        this.unManagedWorkloadsList = [];
+        this.unknownWorkloadsList = [];
+
+        var rowStartedAt = this.payloadRowStartedAt;
+        // Reset on the failure path too. The next row's clock starts when this one ends whether
+        // or not the insert took, otherwise a single failure makes every later line report the
+        // time since the last row that happened to succeed.
+        this.payloadRowStartedAt = new Date().getTime();
+
+        if (gs.nil(sysId)) {
+            this.droppedOnInsert += size;
+            this.logger.error("[IllumioAutoSyncWithPCE] Payload row insert failed; " + size +
+                " workload(s) from this batch will not reach the MID Server.");
+            return;
+        }
+
+        this.payloadRowCount++;
+
+        // The insert used to be silent, so a run spent the whole of phase 2 showing nothing
+        // between the last progress line and the handoff to the MID Server. The job record keeps
+        // "Payload Batches: N" and the Summary; this per-row line is the detail behind them and
+        // goes to syslog.
+        if (typeof trace === 'function') {
+            trace('Payload Prepared: ' + this.payloadRowCount + '/' + expectedRows +
+                syncUtils.since(rowStartedAt));
+        }
     },
 
     type: "IllumioAutoSyncWithPCE",
@@ -382,14 +646,14 @@ IllumioAutoSyncWithPCE.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-10-01 06:20:45</sys_created_on>
         <sys_id>f14ad3f6db34274033c1a026ca96192e</sys_id>
-        <sys_mod_count>358</sys_mod_count>
+        <sys_mod_count>366</sys_mod_count>
         <sys_name>IllumioAutoSyncWithPCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_f14ad3f6db34274033c1a026ca96192e</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:58:01</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>f14ad3f6db34274033c1a026ca96192e</id>

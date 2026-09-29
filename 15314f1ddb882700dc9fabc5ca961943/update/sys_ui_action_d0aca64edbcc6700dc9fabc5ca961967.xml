@@ -47,7 +47,9 @@
     var selectedRecordsData = [],
         gaCustomTableData, dialog, answer, thresoldLimitLogs = {}, // FIXME: Typo in the thresoldLimitLogs variable name
         syncFilterLogs = {},
-        limitExceeded = false;
+        limitExceeded = false,
+        limitError = false,
+        limitErrorMessage = '';
 
     var userName = g_user.firstName + " " + g_user.lastName;
 
@@ -153,14 +155,21 @@
             instanceURL = answer.instanceURL;
             thresoldLimitLogs = answer.data.logMessage;
             limitExceeded = answer.data.limitExceeded;
+            limitError = answer.data.limitError;
+            limitErrorMessage = answer.data.limitErrorMessage;
 
             // Display the message to the user if the cancel job flag is true and threshold limit exceeds and end the sync process.
             if (answer.data.cancelJobOnLimitExceed) {
                 dialog = new GlideDialogWindow("x_illu2_illumio_IllumioInfoPopup");
-                dialog.setTitle("Cannot start the sync process as the threshold limit has been exceeded for one or more configurations.");
+                // limitError means the limits could not be read at all, which is a
+                // misconfiguration rather than a limit being hit.
+                dialog.setTitle(limitError ? limitErrorMessage :
+                    "Cannot start the sync process as the threshold limit has been exceeded for one or more configurations.");
                 dialog.render();
 
-                // NOTE: Can end the flow here if the cancel job checkbox is checked and the threshold limit is exceeded.
+                // The flow ends here. It used to fall through to preparePayload(), which found
+                // totalRecordsToSync == 0 and rendered a second dialog over the first one.
+                return false;
             }
 
             preparePayload();
@@ -177,7 +186,9 @@
         // The flow ends if there are no valid workloads to sync.
         if (totalRecordsToSync == 0) {
             dialogModal = new GlideDialogWindow("x_illu2_illumio_IllumioInfoPopup");
-            if (limitExceeded)
+            if (limitError)
+                dialogModal.setTitle(limitErrorMessage);
+            else if (limitExceeded)
                 dialogModal.setTitle("Cannot start the sync process as the threshold limit has been exceeded for one or more configurations.");
             else
                 dialogModal.setTitle("No valid workloads are selected. Please select the workloads which are not marked as duplicate and have conflicts.");
@@ -318,7 +329,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>d0aca64edbcc6700dc9fabc5ca961967</sys_id>
-        <sys_mod_count>353</sys_mod_count>
+        <sys_mod_count>354</sys_mod_count>
         <sys_name>Sync selected servers with PCE</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -326,7 +337,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_d0aca64edbcc6700dc9fabc5ca961967</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-05-08 14:35:29</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:46</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_workload</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>true</ui16_compatible>

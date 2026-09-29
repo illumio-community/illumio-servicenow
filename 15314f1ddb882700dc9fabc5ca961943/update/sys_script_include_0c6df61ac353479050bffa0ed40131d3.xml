@@ -15,14 +15,14 @@ IllumioDiscoveryRepository.prototype = {
     // Maximum number of elements ServiceNow can safely take in a single IN clause
     IN_CLAUSE_BATCH_SIZE: 500,
 
-    WORKLOAD_TABLE: "x_illu2_illumio_illumio_pce_workload",
-    WORKLOAD_FIELD_VALUE_TABLE: "x_illu2_illumio_illumio_pce_workload_field_value",
-    WORKLOAD_MAPPING_TABLE: "x_illu2_illumio_illumio_pce_workloads_mapping",
-    INCIDENT_MAPPING_TABLE: "x_illu2_illumio_illumio_incident_mapping",
-    LABELS_MAPPING_TABLE: "x_illu2_illumio_illumio_pce_labels_mapping",
-    LABEL_DIMENSION_TABLE: "x_illu2_illumio_illumio_label_dimension",
-    CLASS_FIELD_MAPPING_TABLE: "x_illu2_illumio_illumio_class_field_mapping",
-    JOB_TABLE: "x_illu2_illumio_illumio_scheduled_jobs",
+    WORKLOAD_TABLE: TABLE_PCE_WORKLOAD,
+    WORKLOAD_FIELD_VALUE_TABLE: TABLE_PCE_WORKLOAD_FIELD_VALUE,
+    WORKLOAD_MAPPING_TABLE: TABLE_PCE_WORKLOADS_MAPPING,
+    INCIDENT_MAPPING_TABLE: TABLE_INCIDENT_MAPPING,
+    LABELS_MAPPING_TABLE: TABLE_PCE_LABELS_MAPPING,
+    LABEL_DIMENSION_TABLE: TABLE_LABEL_DIMENSION,
+    CLASS_FIELD_MAPPING_TABLE: TABLE_CLASS_FIELD_MAPPING,
+    JOB_TABLE: TABLE_SCHEDULED_JOBS,
 
     /**
      * Both dependencies are optional so the zero-argument construction used by every
@@ -33,6 +33,7 @@ IllumioDiscoveryRepository.prototype = {
      * @param {Object} [discoveryUtils] IllumioDiscoveryUtils instance
      */
     initialize: function(utils, discoveryUtils) {
+        this.logger = new IllumioLogger(null, 'IllumioDiscoveryRepository');
         this.utils = utils || new IllumioUtils();
         this.discoveryUtils = discoveryUtils || new IllumioDiscoveryUtils();
     },
@@ -186,47 +187,87 @@ IllumioDiscoveryRepository.prototype = {
      * Moved from IllumioUtils:1617. Rewired: STALE_DISCOVERY_DATA now lives on
      * IllumioDiscoveryUtils, the log string is now a formatter, and updateJobRecord is
      * reached through this.utils since it stays shared.
+     *
+     * EVERY step is verified by counting what is left, batched or not, and a step that leaves
+     * rows behind fails the whole run. Discovery's entire picture of the PCE is built by
+     * comparing CMDB against these tables, so surviving rows from the previous run are not a
+     * cosmetic problem -- they are workloads that will be compared, synced and considered for
+     * deletion as though this run had found them. Carrying on past a refused delete produces a
+     * confidently wrong result, which is worse than producing none.
+     *
+     * The unbatched step is counted too. It had no way to report failure at all before: a
+     * deleteMultiple that deleted nothing returned exactly like one that deleted everything.
+     *
      * @param {String} pceConfigId sys_id of the PCE Configuration
      * @param {String} jobId sys_id of the scheduled job to log against
+     * @returns {Boolean} false if any step left rows behind. Cancellation returns true -- a
+     *          cancelled run is not a failed one, and the caller's own cancel check handles it.
      */
     deleteStaleDiscoveryData: function(pceConfigId, jobId) {
         var steps = this.discoveryUtils.STALE_DISCOVERY_DATA;
 
         for (var index = 0; index < steps.length; index++) {
             if (this.isCancelled(jobId)) {
-                return;
+                return true;
             }
 
             var step = steps[index];
             var stepStartTime = Date.now();
 
             if (step.batched) {
-                this._deleteStaleInBatches(step, pceConfigId, jobId);
+                if (!this._deleteStaleInBatches(step, pceConfigId, jobId)) {
+                    return false;
+                }
             } else {
                 this._staleDeleteRecord(step, pceConfigId, false);
+
+                var left = this._countStaleRows(step, pceConfigId);
+                if (left > 0) {
+                    this.log(jobId, this.discoveryUtils.formatDeletionRefusedLog(step.label, left));
+                    this.logger.error('[IllumioDiscoveryRepository] Stale ' + step.label + ' delete left ' +
+                        left + ' row(s) for configuration ' + pceConfigId + '. Discovery cannot ' +
+                        'continue: it would compare CMDB against the previous run\'s data.');
+                    return false;
+                }
             }
 
-            this.log(jobId, this.discoveryUtils.formatDeletionLog(step.label, Date.now() - stepStartTime));
+            this.log(jobId, this.discoveryUtils.formatDeletionLog(step.label, stepStartTime));
         }
+
+        return true;
     },
 
     /**
      * Clear one stale-data table in DELETE_BATCH_SIZE chunks, logging progress after each.
      *
-     * Progress is assumed rather than measured. _staleDeleteRecord is a plain GlideRecord
-     * delete -- no ACLs, no business rules, nothing to veto it -- so a call that returns
-     * without throwing has removed its batch. Counting after every batch to confirm that
-     * would be guarding against a broken platform, and the unbatched steps in this same list
-     * never did.
+     * Progress is MEASURED, by counting what is left after each batch, rather than assumed with
+     * `deleted += DELETE_BATCH_SIZE`.
      *
-     * One thing to know when reading a job log: deleteMultiple has been seen on this instance
-     * to ignore the setLimit and clear the whole matched set in one call. The later batches
-     * then delete nothing while their lines still count up to the total. The giveaway is the
-     * timing -- milliseconds each, against the first batch's seconds.
+     * MEASURED ON THE INSTANCE, 2026-09-25: `setLimit` DOES bound `deleteMultiple` here. A run
+     * over 5,556 rows at DELETE_BATCH_SIZE 2000 logged exactly 2000, then 4000, then 5556, in the
+     * three batches the up-front `Math.ceil` predicted. An earlier version of this comment
+     * asserted the opposite -- that deleteMultiple "has been seen to ignore the setLimit and
+     * clear the whole matched set in the first call" -- and that was an inference from batch
+     * timings, never a measurement. It was wrong. Do not reintroduce it.
+     *
+     * The counting stays anyway, and not out of caution about the above. `setLimit` is documented
+     * as limiting the records a QUERY returns, and `deleteMultiple` as deleting everything
+     * matching the current where clause; nothing in the API contract says the first bounds the
+     * second, so what was measured is this instance's behaviour and not a guarantee. The count is
+     * also what makes a refused delete reportable at all -- see deleteStaleDiscoveryData -- which
+     * is a separate job from bounding the batch and would be wanted even if the contract were
+     * explicit.
+     *
+     * The count costs one GlideAggregate per batch, against a deleteMultiple over up to
+     * DELETE_BATCH_SIZE rows. It also ends the loop as soon as the table is clear, so if a future
+     * instance DOES over-delete, every batch after the first is skipped rather than wasted.
      *
      * @param {Object} step Entry from STALE_DISCOVERY_DATA
      * @param {String} pceConfigId sys_id of the PCE Configuration
      * @param {String} jobId sys_id of the scheduled job to log against
+     * @returns {Boolean} false if the table still holds rows when this returns. Cancellation
+     *          returns true: the rows left behind are the caller's cancel to explain, not a
+     *          delete that was refused.
      */
     _deleteStaleInBatches: function(step, pceConfigId, jobId) {
         var total = this._countStaleRows(step, pceConfigId);
@@ -237,22 +278,61 @@ IllumioDiscoveryRepository.prototype = {
         // Exact, not a ceiling: each pass clears one batch, so this is how many it takes.
         var batches = Math.ceil(total / this.discoveryUtils.DELETE_BATCH_SIZE);
         var deleted = 0;
+        var remaining = total;
 
         for (var batch = 1; batch <= batches; batch++) {
             var batchStartTime = Date.now();
-            
+
             if (this.isCancelled(jobId)) {
-                gs.info('[IllumioDiscoveryRepository] Job ' + jobId + ' cancelled; stopped deleting ' +
+                this.logger.info('[IllumioDiscoveryRepository] Job ' + jobId + ' cancelled; stopped deleting ' +
                     step.label + ' after ' + deleted + ' of ' + total + ' records.');
-                return;
+                return true;
             }
 
             this._staleDeleteRecord(step, pceConfigId, true);
-            deleted = Math.min(deleted + this.discoveryUtils.DELETE_BATCH_SIZE, total);
 
-            this.log(jobId, this.discoveryUtils.formatDeletionBatchLog(
-                batch, deleted, total, Date.now() - batchStartTime));
+            remaining = this._countStaleRows(step, pceConfigId);
+            var previouslyDeleted = deleted;
+            deleted = total - remaining;
+
+            // Syslog, not the job record: one line per DELETE_BATCH_SIZE rows. The record keeps
+            // the start line and "Total records found: N", which together bound this, and the
+            // phase-end line reports what actually went. See IllumioUtils.jobTraceLogger.
+            this.logger.setContext(jobId).info(this.discoveryUtils.formatDeletionBatchLog(
+                batch, deleted, total, batchStartTime));
+
+            if (remaining <= 0) {
+                // Everything is gone, whether this batch took its share or the first batch took
+                // the lot. Either way the remaining passes have nothing to delete.
+                break;
+            }
+
+            if (deleted <= previouslyDeleted) {
+                // A batch that removed nothing and left rows behind. The loop is bounded, so
+                // this is not a hang -- it is a delete that is being refused, and running the
+                // remaining passes would write identical lines instead of saying so.
+                this.logger.warn('[IllumioDiscoveryRepository] Batch ' + batch + ' of ' + step.label +
+                    ' deleted no rows and ' + remaining + ' remain. Stopping; something is ' +
+                    'preventing the delete.');
+                break;
+            }
         }
+
+        if (remaining > 0) {
+            // Two ways to land here: the refusal above, or the loop running out of batches with
+            // rows still present -- which happens when each pass deleted FEWER than
+            // DELETE_BATCH_SIZE, so the batch count computed up front was too small. Both mean
+            // the same thing to the caller, and neither is survivable, so neither gets to be a
+            // warning the run continues past.
+            this.log(jobId, this.discoveryUtils.formatDeletionRefusedLog(step.label, remaining));
+            this.logger.error('[IllumioDiscoveryRepository] Stale ' + step.label + ' delete left ' +
+                remaining + ' of ' + total + ' row(s) for configuration ' + pceConfigId +
+                '. Discovery cannot continue: it would compare CMDB against the previous ' +
+                'run\'s data.');
+            return false;
+        }
+
+        return true;
     },
 
     /**
@@ -713,7 +793,7 @@ IllumioDiscoveryRepository.prototype = {
                 return evaluator.getVariable('answer');
             }
         } catch (e) {
-            gs.error("[getValueFromScript] Error while fetching value from cmdb record", e);
+            this.logger.error("[getValueFromScript] Error while fetching value from cmdb record", e);
         }
         return "";
     },
@@ -737,7 +817,7 @@ IllumioDiscoveryRepository.prototype = {
             }
             return tempGR[dotWalkableFieldArray[fIndex]] + "";
         } catch (e) {
-            gs.error("[getValueFromDotWalkableField] Error while fetching value from cmdb record", e);
+            this.logger.error("[getValueFromDotWalkableField] Error while fetching value from cmdb record", e);
         }
         return "";
     },
@@ -748,13 +828,13 @@ IllumioDiscoveryRepository.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>0c6df61ac353479050bffa0ed40131d3</sys_id>
-        <sys_mod_count>11</sys_mod_count>
+        <sys_mod_count>18</sys_mod_count>
         <sys_name>IllumioDiscoveryRepository</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0c6df61ac353479050bffa0ed40131d3</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-16 18:09:16</sys_updated_on>
+        <sys_updated_on>2026-09-29 12:56:35</sys_updated_on>
     </sys_script_include>
 </record_update>

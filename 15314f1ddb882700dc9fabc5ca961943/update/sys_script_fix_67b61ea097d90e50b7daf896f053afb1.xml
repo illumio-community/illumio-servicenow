@@ -5,7 +5,11 @@
 We introduced the support of multiple label dimensions and introduced new tables and deprecated the old tables. To prevent the loss of existing data present in the old tables, we introduced the fix scripts to migrate the data present in the tables, while upgrading to the new version.</description>
         <name>Migrate configurations</name>
         <record_for_rollback>false</record_for_rollback>
-        <script><![CDATA[var labelDimensionObject = {}, configClassObject = {};
+        <script><![CDATA[// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Migrate configurations');
+
+var labelDimensionObject = {}, configClassObject = {};
 var script = 
 "answer = function (sourceGr) {var cmdbGr = new GlideRecord('SOURCE_TABLE');cmdbGr.addQuery('HOST_NAME_FIELD', sourceGr.getValue('CURRENT_HOST_NAME_FIELD'));cmdbGr.setLimit(1);cmdbGr.query();if (cmdbGr.next()) {return cmdbGr.getValue('CI_FIELD');}return '';}(sourceGr);";
 
@@ -273,10 +277,10 @@ function startMigration() {
         configGr.setLimit(1);
         configGr.query();
         if (configGr.next()) {        
-            gs.info("[FIX SCRIPT] Started migration of Critical Label Group Configuration");
+            illumioLogger.info("[FIX SCRIPT] Started migration of Critical Label Group Configuration");
             migrateCriticalGroupConfig(configGr);
 
-            gs.info("[FIX SCRIPT] Started migration of Illumio PCE Field Mappings");
+            illumioLogger.info("[FIX SCRIPT] Started migration of Illumio PCE Field Mappings");
             createConfigClass(configGr.getUniqueValue());
 
             evaluateConfigClassObject();
@@ -284,12 +288,12 @@ function startMigration() {
 			configGr.setValue("cancel_job_on_limit_exceed", true);
 			configGr.update();
 
-            gs.info("[FIX SCRIPT] Completed migration of all configurations");
+            illumioLogger.info("[FIX SCRIPT] Completed migration of all configurations");
         } else {
-            gs.info("[FIX SCRIPT] There is no Illumio PCE Configuration found");
+            illumioLogger.info("[FIX SCRIPT] There is no Illumio PCE Configuration found");
         }
     } catch (ex) {
-        gs.error("[FIX SCRIPT] Error while executing fix script Migrate configurations", ex);
+        illumioLogger.error("[FIX SCRIPT] Error while executing fix script Migrate configurations", ex);
     }
 }
 
@@ -299,14 +303,14 @@ startMigration();
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2024-03-29 08:02:10</sys_created_on>
         <sys_id>67b61ea097d90e50b7daf896f053afb1</sys_id>
-        <sys_mod_count>8</sys_mod_count>
+        <sys_mod_count>9</sys_mod_count>
         <sys_name>Migrate configurations</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_fix_67b61ea097d90e50b7daf896f053afb1</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-20 15:45:32</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
         <unloadable>false</unloadable>
     </sys_script_fix>
     <sys_es_latest_script action="INSERT_OR_UPDATE">

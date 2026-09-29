@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_properties">
+    <sys_properties action="DELETE">
+        <choices/>
+        <description>The batch size to perform bulk operation on PCE - Default 1000</description>
+        <ignore_cache>false</ignore_cache>
+        <is_private>false</is_private>
+        <name>x_illu2_illumio.bulk_operation_batch_size</name>
+        <read_roles>x_illu2_illumio.illumio_admin,admin</read_roles>
+        <suffix>bulk_operation_batch_size</suffix>
+        <sys_class_name>sys_properties</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2020-05-26 08:02:42</sys_created_on>
+        <sys_id>53b7c9051b095c109732a6c8ec4bcbdb</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>x_illu2_illumio.bulk_operation_batch_size</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_properties_53b7c9051b095c109732a6c8ec4bcbdb</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2025-02-05 15:50:50</sys_updated_on>
+        <type>integer</type>
+        <value>1000</value>
+        <write_roles>x_illu2_illumio.illumio_admin,admin</write_roles>
+    </sys_properties>
+    <sys_translated_text action="DELETE" query="documentkey=53b7c9051b095c109732a6c8ec4bcbdb"/>
+<sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>265197833bafced0c55a348aa4e45a7a</instance_id>
+        <instance_name>dev279711</instance_name>
+        <name>sys_properties_53b7c9051b095c109732a6c8ec4bcbdb</name>
+        <payload><![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_properties">
+    <sys_properties action="INSERT_OR_UPDATE">
+        <choices/>
+        <description>The batch size to perform bulk operation on PCE - Default 1000</description>
+        <ignore_cache>false</ignore_cache>
+        <is_private>false</is_private>
+        <name>x_illu2_illumio.bulk_operation_batch_size</name>
+        <read_roles>x_illu2_illumio.illumio_admin,admin</read_roles>
+        <suffix>bulk_operation_batch_size</suffix>
+        <sys_class_name>sys_properties</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2020-05-26 08:02:42</sys_created_on>
+        <sys_id>53b7c9051b095c109732a6c8ec4bcbdb</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>x_illu2_illumio.bulk_operation_batch_size</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_properties_53b7c9051b095c109732a6c8ec4bcbdb</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2025-02-05 15:50:50</sys_updated_on>
+        <type>integer</type>
+        <value>1000</value>
+        <write_roles>x_illu2_illumio.illumio_admin,admin</write_roles>
+    </sys_properties>
+    <sys_translated_text action="delete_multiple" query="documentkey=53b7c9051b095c109732a6c8ec4bcbdb"/>
+</record_update>]]></payload>
+        <payload_hash>-627062190</payload_hash>
+        <record_name>x_illu2_illumio.bulk_operation_batch_size</record_name>
+        <reverted_from/>
+        <source>846b38c0c392031050bffa0ed40131a5</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-07-20 13:55:17</sys_created_on>
+        <sys_id>8eebb088c392031050bffa0ed40131b2</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>19f7fcf454e0000001</sys_recorded_at>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-07-20 13:55:17</sys_updated_on>
+        <type>System Property</type>
+        <update_guid>c6ebb08817920310151ad9c095b630b2</update_guid>
+        <update_guid_history>c6ebb08817920310151ad9c095b630b2:0,71c93c88525203104a8dcb27373c6b67:-1918433869,3f556ece8182875085399a653604bfab:0,b1f3a6822d828750fe8a6154f9ee7747:-1653087733,5199b4b463c68b10c5585c970542b7ef:0,58e73cf4da868b1076139bd9f2cc1bb8:2114899330,97f30830388e4b105c09ab901ec88c18:0,5605243b8c794310190caf9e3e5dac93:0,fdf8d74e31b14fd0c3c1cdb0169a0b59:-1548961846,14c1178ded3507d0bd7bac6969e24e43:0,a7fb0345c2f107d05132d19b264cbb49:-1987138303,b9781bebdc900f10f8b5efa0423f54a8:0,fd951b2f06500f101b629f13efd50c4b:1939292559,5f43acba24980710663df42e6491941e:0,c9f12c7e03580710ebc10687ef86c9ab:-400904288,4340907e8a54071095b04d12f1ac93d8:501990538</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-24 05:37:55</sys_created_on>
+        <sys_db_object display_value="" name="sys_properties">sys_properties</sys_db_object>
+        <sys_id>746412bcd5cd4721936a0b9aafa65bc9</sys_id>
+        <sys_metadata>53b7c9051b095c109732a6c8ec4bcbdb</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio.bulk_operation_batch_size</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sys_properties_53b7c9051b095c109732a6c8ec4bcbdb</sys_update_name>
+        <sys_update_version display_value="sys_properties_53b7c9051b095c109732a6c8ec4bcbdb">8eebb088c392031050bffa0ed40131b2</sys_update_version>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-24 05:37:55</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

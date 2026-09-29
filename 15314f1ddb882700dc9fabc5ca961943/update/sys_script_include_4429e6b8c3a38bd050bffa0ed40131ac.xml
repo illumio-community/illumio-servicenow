@@ -1,0 +1,989 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioSyncFilterUtils</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioSyncFilterUtils</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var IllumioSyncFilterUtils = Class.create();
+
+/**
+ * Sync Filter evaluation: turning a filter into the workload sys_ids it matches, and rendering
+ * those workloads as CSV.
+ *
+ * The fourth file of the split, and the one that was missing. IllumioSyncUtils is pure helpers
+ * (no database, no `gs`, so the condition parser is testable in a plain Node harness),
+ * IllumioSyncRepoUtils is data access, and IllumioUtils is coordination -- but IllumioUtils had
+ * become coordination *of everything*: PCE configuration, label groups, job records, discovery,
+ * deletion and, sitting in the middle of it, the Sync Filter evaluator. At 2,800 lines the
+ * evaluator was hard to find and harder to reason about as a unit, and it has exactly one
+ * subject.
+ *
+ * Nothing here belongs in the other two. Every method touches the database or calls `gs`, so
+ * IllumioSyncUtils is out by its own rule; none of them is a single query, so
+ * IllumioSyncRepoUtils is out too. They are coordination, which is what this file is for --
+ * coordination of one thing rather than of everything.
+ *
+ * ONE SUBJECT: given a Sync Filter (or every Sync Filter on a PCE Configuration), which workloads
+ * does it match, and what do those workloads look like as a file. Sync, deletion and every
+ * preview enter here and nowhere else, which is what keeps a preview a preview -- it resolves
+ * workloads by the same code the sync it is previewing will use.
+ *
+ * @see IllumioSyncUtils     pure helpers
+ * @see IllumioSyncRepoUtils data access
+ * @see JIRA/sync-optimization/sync-callchain.MD  phase 1 of the sync chain is this file
+ */
+IllumioSyncFilterUtils.prototype = {
+
+    /**
+     * @param {Object} [syncUtils] IllumioSyncUtils instance, constructed when omitted
+     * @param {Object} [repo] IllumioSyncRepoUtils instance, constructed when omitted
+     */
+    initialize: function(syncUtils, repo) {
+        this.logger = new IllumioLogger(null, 'IllumioSyncFilterUtils');
+        this.syncUtils = syncUtils || new IllumioSyncUtils();
+        this.repo = repo || new IllumioSyncRepoUtils(this.syncUtils);
+    },
+
+    // Workloads per query when reading rows back out for the CSV. Same value as everywhere else
+    // that builds an IN clause; see IllumioSyncUtils.CI_CHUNK_SIZE.
+    CSV_BATCH_SIZE: 500,
+
+    CSV_HEADERS: ['sys_id', 'hostname', 'source_table', 'known_to_pce', 'conflicts',
+        'pce_workload_href', 'servicenow_cmdb_identifier', 'labels'],
+
+    /**
+     * Report progress to whoever is watching, if anyone is.
+     *
+     * Phase 1 is set-based and fast per query, but a single GlideAggregate over a large label
+     * table is tens of seconds on its own, and a CMDB drain is longer. It used to write nothing
+     * at all until it finished -- 26 seconds of silence on an 83k run, minutes on a bigger one --
+     * which is indistinguishable from a job that is wedged. The caller decides where the line
+     * goes, because this evaluator is also called from UI Actions that have no job record.
+     *
+     * syslog gets the line either way, so behaviour is unchanged for callers that pass nothing.
+     *
+     * @param {Function} onProgress Optional - called with the message
+     * @param {String} message Human-readable, addressed to whoever clicked the button
+     */
+    _progress: function(onProgress, message) {
+        this.logger.info('[IllumioSyncFilterUtils] ' + message);
+
+        if (typeof onProgress === 'function') {
+            try {
+                onProgress(message);
+            } catch (ex) {
+                // A progress sink that throws must never take the evaluation down with it. The
+                // work is the point; the commentary is not.
+                this.logger.warn('[IllumioSyncFilterUtils] Progress callback threw: ' + ex);
+            }
+        }
+    },
+
+    /**
+     * Syslog only. For lines that exist to diagnose a hang rather than to tell the operator what
+     * the run decided.
+     *
+     * The per-term and per-drain lines were on the job record and are the reason a run with a
+     * handful of filters produced dozens of near-identical lines naming the same filter. They are
+     * still worth having: one GlideAggregate over a large label table is the single
+     * longest-running query in phase 1, and without a line per term that whole stretch looks like
+     * one hang. Keeping them in syslog means "which term is it stuck on" is still answerable from
+     * the application logs without the job record carrying it.
+     *
+     * @param {String} message
+     */
+    _trace: function(message) {
+        this.logger.info('[IllumioSyncFilterUtils] ' + message);
+    },
+
+    /**
+     * Eligible workload sys_ids for a PCE Configuration, across all its Sync Filters of one type.
+     *
+     * Multiple active filters are OR'd and globally deduplicated: a workload matched by two of
+     * them must still reach the payload once.
+     *
+     * @param {String} configSysId sys_id of the PCE Configuration
+     * @param {String} type 'inclusion' or 'deletion'
+     * @param {Function} [onProgress] Called with each progress line
+     * @returns {Object} { hasFilter: Boolean, sysIds: Array or null }
+     *   - No active Sync Filter of this type: { hasFilter: false, sysIds: null }. The two callers
+     *     read that opposite ways on purpose -- sync falls back to every candidate workload,
+     *     deletion refuses. See sync-callchain.MD.
+     */
+    getEligibleWorkloadSysIdsByConfig: function(configSysId, type, onProgress) {
+        var result = {
+            hasFilter: false,
+            sysIds: null
+        };
+
+        // Read as plain objects in one query rather than evaluated straight off a live cursor.
+        // Evaluating a filter opens further queries, and this one would otherwise have to stay
+        // open across all of them.
+        var filters = this.repo.getActiveSyncFilters(configSysId, type);
+
+        if (filters.length === 0) {
+            // No claim about what happens next. The two callers read this outcome opposite ways
+            // -- sync falls back to every candidate workload, deletion refuses -- and this line
+            // used to assert the sync reading on both, so a deletion that stopped here said "all
+            // workloads are eligible for sync" immediately before deleting nothing.
+            this._progress(onProgress, 'Active ' + type + ' Sync Filter(s) found: 0.');
+            return result;
+        }
+
+        result.hasFilter = true;
+
+        // The type is named here and not in evaluateFilters, which is deliberately scope-blind --
+        // it is handed a list and does not know or care whether it came from a configuration, a
+        // type, or a single record. Someone reading a deletion job's log needs to see the word
+        // "deletion" before the work starts.
+        this._progress(onProgress, 'Active ' + type + ' Sync Filter(s) found: ' + filters.length +
+            '.');
+
+        result.sysIds = this.evaluateFilters(filters, configSysId, onProgress).sysIds;
+
+        return result;
+    },
+
+    /**
+     * Evaluate a list of Sync Filters into one deduplicated set of workload sys_ids.
+     *
+     * THE one phase 1. Sync, deletion, the PCE-Configuration exports and the single-filter
+     * preview all arrive here; a PCE Configuration passes every eligible filter, a Sync Filter
+     * preview passes a list of one. There is no fast path for the list of one -- it builds the
+     * same set and calls the same setToArray as a list of twenty. A preview that took a different
+     * route through phase 1 would be previewing something other than the run it claims to
+     * predict, and the saving it bought was one pass over a list the caller is about to render to
+     * CSV anyway.
+     *
+     * OR across filters, deduplicated globally: a workload matched by two of them must still
+     * reach the payload once -- syncing it twice would mean a wasted bulk_update, or a duplicate
+     * bulk_create for an unknown workload.
+     *
+     * Filters write their matches DIRECTLY into the run's set. Each one used to return its own
+     * array, which the caller then unioned in, so at the peak of filter N the run held that
+     * filter's array, its label set, and the accumulated set all at once.
+     *
+     * SATURATION. Once the set holds every workload the configuration has, no later filter can
+     * add anything -- they are ORed, and every filter shape ends in a query carrying
+     * `duplicate=false` on this configuration, which is exactly what the ceiling counts. The loop
+     * stops there. It can only ever truncate the loop and never adds a sys_id, so the result is
+     * always a subset of what the full loop would produce; the failure mode of a wrong ceiling is
+     * "too few", never "too many". Equality is pigeonhole, not a heuristic.
+     *
+     * @param {Array} filters Filter objects from IllumioSyncRepoUtils
+     * @param {String} configSysId sys_id of the PCE Configuration they all belong to
+     * @param {Function} [onProgress] Called with each progress line
+     * @returns {Object} { sysIds: Array, skipped: Array of { name, errors } }
+     */
+    evaluateFilters: function(filters, configSysId, onProgress) {
+        var outcome = {
+            sysIds: [],
+            skipped: []
+        };
+
+        var allSysIds = {};
+        var distinct = 0;
+
+        // The saturation ceiling, taken once and only where it can change the outcome: a run with
+        // a single filter ends after that filter whatever the count says, so taking it there is a
+        // COUNT aggregate over the whole workload table done purely to be ignored. -1 means "not
+        // taken yet"; 0 is a real answer (a configuration with no eligible workloads).
+        //
+        // The line reporting it is emitted where it is computed rather than up front, for the
+        // same reason: it is the saturation check's denominator, so runs that never test
+        // saturation neither pay for it nor mention it.
+        var population = -1;
+
+        var considered = 0;
+        var phaseStartedAt = new Date().getTime();
+
+        for (var index = 0; index < filters.length; index++) {
+            considered++;
+
+            var evaluated = this.evaluateSyncFilter(
+                filters[index], allSysIds, onProgress,
+                (index + 1) + '/' + filters.length);
+
+            // A filter that cannot be parsed contributes nothing rather than everything. Failing
+            // open here would sync workloads nobody asked for. Reported as well as logged,
+            // because the single-filter preview shows the author this message.
+            if (evaluated.errors.length > 0) {
+                this._progress(onProgress, 'Skipping Sync Filter "' + filters[index].name +
+                    '": ' + evaluated.errors.join(' '));
+                outcome.skipped.push({
+                    name: filters[index].name,
+                    errors: evaluated.errors
+                });
+                continue;
+            }
+
+            distinct += evaluated.added;
+
+            // Nothing left to skip, so there is nothing to decide and no reason to count.
+            if (index >= filters.length - 1) {
+                continue;
+            }
+
+            if (population === -1) {
+                var countStartedAt = new Date().getTime();
+                population = this.repo.countEligibleWorkloads(configSysId);
+                this._progress(onProgress, 'Total Candidate Workloads - ' + population +
+                    this.syncUtils.since(countStartedAt));
+            }
+
+            // Counted, never measured. setToArray(allSysIds).length here would build a full array
+            // of every matched sys_id once per filter and throw each one away -- a second
+            // full-size allocation per iteration, for a comparison two integers answer.
+            if (population > 0 && distinct >= population) {
+                this._progress(onProgress, 'Saturated: all ' + population +
+                    ' candidate workload(s) are matched. Skipping the remaining ' +
+                    (filters.length - index - 1) + ' Sync Filter(s) -- they are ORed with what ' +
+                    'is already matched and cannot add anything.');
+                break;
+            }
+        }
+
+        outcome.sysIds = this.syncUtils.setToArray(allSysIds);
+
+        // `considered`, not filters.length: a saturated run stops short, and a count that claimed
+        // to have evaluated filters it skipped would contradict the line above it. Only said when
+        // the two differ -- on the ordinary run where every filter ran it is noise.
+        if (considered < filters.length) {
+            this._trace(considered + ' of ' + filters.length + ' filter(s) evaluated.');
+        }
+
+        this._progress(onProgress, 'Eligible Workloads: ' + outcome.sysIds.length +
+            this.syncUtils.since(phaseStartedAt));
+
+        return outcome;
+    },
+
+    /**
+     * Workloads matching one Sync Filter.
+     *
+     * A filter is two encoded queries authored in condition builders -- one over the label table,
+     * one over the CMDB source table -- ANDed together. Sync Filter Groups and filter items are
+     * gone; see JIRA/sync-optimization/points.MD R6-R8 for why.
+     *
+     * @param {String} syncFilterSysId sys_id of the Sync Filter record
+     * @param {Boolean} [skipActiveCheck] Skip the active check (a preview is most useful on a
+     *   filter that is not switched on yet)
+     * @param {Boolean} [sysIdsOnly] Return sysIds rather than full workload objects
+     * @param {Function} [onProgress] Called with each progress line
+     * @returns {Object} { success, workloads, message }, or { success, sysIds, message }
+     */
+    getWorkloadsBySyncFilter: function(syncFilterSysId, skipActiveCheck, sysIdsOnly, onProgress) {
+        var result = {
+            success: false,
+            workloads: [],
+            message: ''
+        };
+
+        try {
+            var filter = this.repo.getSyncFilter(syncFilterSysId);
+            if (!filter) {
+                result.message = 'Sync Filter not found';
+                return result;
+            }
+
+            if (!skipActiveCheck && !filter.active) {
+                result.message = 'Sync Filter is not active';
+                return result;
+            }
+
+            if (gs.nil(filter.pce_configuration)) {
+                result.message = 'No PCE Configuration associated with Sync Filter';
+                return result;
+            }
+
+            // A list of one, through the same loop every other caller uses. Not a shortcut past
+            // it: the saturation ceiling, the deduplication and the final setToArray all run
+            // exactly as they would for a configuration with twenty filters, so what a preview
+            // shows is what the sync would do.
+            var evaluated = this.evaluateFilters(
+                [filter], filter.pce_configuration, onProgress);
+
+            // Reported rather than swallowed: this is the path the preview UI actions use, and
+            // the author needs to see the same message the save-time rule would have shown.
+            if (evaluated.skipped.length > 0) {
+                result.message = evaluated.skipped[0].errors.join(' ');
+                return result;
+            }
+
+            var finalSysIds = evaluated.sysIds;
+
+            if (sysIdsOnly) {
+                result.sysIds = finalSysIds;
+                result.success = true;
+                result.message = 'Found ' + finalSysIds.length + ' matching workloads';
+            } else {
+                if (finalSysIds.length > 0) {
+                    result.workloads = this._fetchWorkloadRecords(finalSysIds);
+                }
+                result.success = true;
+                result.message = 'Found ' + result.workloads.length + ' matching workloads';
+            }
+
+        } catch (ex) {
+            this.logger.error('[IllumioSyncFilterUtils.getWorkloadsBySyncFilter] Exception: ' + ex);
+            result.message = 'Exception occurred: ' + ex;
+        }
+
+        return result;
+    },
+
+    /**
+     * Evaluate one Sync Filter, adding the workloads it matches to the run's set.
+     *
+     * The two conditions are independent and ANDed. Which side is materialised is not a
+     * decision: the label side resolves to workload sys_ids and so is bounded by the workload
+     * count, while the CMDB side is bounded only by the size of a CMDB table. The CMDB side is
+     * therefore always the streamed one, and the label side is the guard it is filtered against.
+     *
+     * The extent is a third predicate, ANDed with whatever the conditions matched. It is no
+     * longer a separate pass: every shape below ends in a workload query, and the extent rides on
+     * that query beside `duplicate=false` rather than being applied to its output afterwards.
+     * A filter carrying only an extent is a valid filter, not an empty one.
+     *
+     * FOUR SHAPES, and each one ends by writing into allSysIds rather than returning an array:
+     *
+     *   A  nothing set          SKIP
+     *   B  extent only          one streamed workload query
+     *   C  label (no cmdb)      label aggregates, then the label set windowed back through the
+     *                           workload table for `duplicate` and the extent
+     *   D  cmdb (± label)       CI drain, each batch resolved to workloads with `duplicate` and
+     *                           the extent already in the query, guarded by the label set
+     *
+     * @param {Object} filter Filter object from IllumioSyncRepoUtils
+     * @param {Object} allSysIds The run's result set. GROWN IN PLACE, and read as the negative
+     *   guard: whatever an earlier filter already matched is skipped rather than re-resolved.
+     * @param {Function} [onProgress] Called with each progress line
+     * @param {String} [position] "2/3", for the progress lines when evaluating several
+     * @returns {Object} { added: Number, errors: Array } - errors non-empty means matched nothing
+     */
+    evaluateSyncFilter: function(filter, allSysIds, onProgress, position) {
+        var self = this;
+        var evaluated = {
+            added: 0,
+            errors: []
+        };
+
+        var label = 'Sync Filter "' + filter.name + '"' + (position ? ' (' + position + ')' : '');
+
+        // The count the most recent condition line put on the job record. The closing "Matched:"
+        // line is emitted ONLY when the filter's contribution differs from it -- on the ordinary
+        // shapes the last condition line already carries the total and a second line saying the
+        // same number is the redundancy this restructure exists to remove.
+        var lastReported = null;
+
+        this._progress(onProgress, 'Evaluating Sync Filter ' + (position || '1/1') + ' - ' +
+            filter.name);
+
+        var hasLabelCondition = !this.syncUtils.isConditionEmpty(filter.label_condition);
+        var hasCmdbCondition = !this.syncUtils.isConditionEmpty(filter.cmdb_condition);
+
+        // Split once here and passed down. Every shape needs it, and shape D's query runs once
+        // per 500 CIs -- splitting inside that callback would be thousands of identical parses.
+        var extentList = this.syncUtils.splitExtent(filter.extent);
+        var hasExtent = extentList.length > 0;
+
+        // SHAPE A. Empty means all three empty, not just the two conditions. The extent is a
+        // predicate over the workload like any other -- "every unmanaged workload in this
+        // configuration" is a complete, deliberate filter.
+        //
+        // With all three empty it is still SKIP rather than match-everything: a filter with
+        // nothing set at all is far more likely to be half-finished than a deliberate
+        // "sync every workload".
+        if (!hasLabelCondition && !hasCmdbCondition && !hasExtent) {
+            this._progress(onProgress, 'No conditions and no extent set. Matching nothing.');
+            return evaluated;
+        }
+
+        // Run-time enforcement of the deletion extent rules, which until now lived ONLY in the
+        // `Validate Sync Filter Extent` business rule. That rule fires on save, so a filter
+        // arriving by update set, import or setWorkflow(false) never meets it -- and an import is
+        // exactly how a filter reaches a production instance.
+        //
+        // What the gap costs: shapes C and D apply the extent by ORing conditions onto a query
+        // (IllumioSyncRepoUtils._addExtentConditions), so an empty extentList adds NO conditions
+        // at all and the filter silently widens to every non-duplicate workload its conditions
+        // matched -- `unknown` ones included. On a deletion run that is workloads nobody selected.
+        // Shape A is unaffected and is deliberately checked above this: all-empty already matches
+        // nothing, so it stays a quiet skip rather than becoming a reported error. Shape B cannot
+        // reach here with an empty extent -- with no conditions it would have been shape A.
+        //
+        // Errors rather than a throw, unlike the threshold limits. An unresolvable limit cancels
+        // the job because it is a property of the whole run; a misconfigured extent is a property
+        // of ONE filter, and this method already skips a filter it cannot parse (the CMDB
+        // condition with no table, below). Skipping contributes nothing, which is the fail-closed
+        // direction, and evaluateFilters reports it by name.
+        if (filter.type === 'deletion') {
+            if (!hasExtent) {
+                evaluated.errors.push('Deletion Sync Filters must have at least one Extent value ' +
+                    'selected. This one has none, so it would target every workload its ' +
+                    'conditions match, including workloads that are not on the PCE. Set the ' +
+                    'Extent to "Managed" and/or "Unmanaged".');
+                return evaluated;
+            }
+
+            for (var extentIndex = 0; extentIndex < extentList.length; extentIndex++) {
+                // Exact compare, not split("-")[0]. `unknown` means the workload is not on the
+                // PCE yet, so there is no enforcement mode that could qualify it and the choice
+                // list offers no `unknown-*` value. Settled 2026-09-29 -- and this deliberately
+                // mirrors the business rule character for character, because two checks of the
+                // same rule that disagree are worse than one.
+                if (extentList[extentIndex] === 'unknown') {
+                    evaluated.errors.push('Deletion Sync Filters cannot include "Unknown" in the ' +
+                        'Extent. Only Managed and Unmanaged workloads exist on the PCE to be ' +
+                        'deleted.');
+                    return evaluated;
+                }
+            }
+        }
+
+        // Syslog only now. The job record gets the three condition lines below, which say the
+        // same thing with counts attached; this one said it before the work so that a job sitting
+        // at "Evaluating filter" showed what it was sitting on, and syslog still serves that.
+        this._trace(label + ': evaluating ' +
+            this._describeSides(hasLabelCondition, hasCmdbCondition, hasExtent) + '.');
+
+        // SHAPE B, extent only. There is no matched set to narrow, so the extent runs as the
+        // query itself instead of as a predicate over one -- streamed, because the result of an
+        // extent-only filter is bounded by the workload count and returning it whole would put a
+        // full-size array beside the set it is about to be merged into.
+        if (!hasLabelCondition && !hasCmdbCondition) {
+            var extentStartedAt = new Date().getTime();
+
+            var scanned = this.repo.eachWorkloadSysIdInExtent(
+                filter.pce_configuration, extentList, filter.source_table,
+                this.syncUtils.WORKLOAD_CHUNK_SIZE,
+                function(batch) {
+                    evaluated.added += self.syncUtils.unionInto(allSysIds, batch);
+                });
+
+            this._progress(onProgress, 'Label Condition: Not set');
+            this._progress(onProgress, 'CMDB Condition: Not set');
+            this._progress(onProgress, 'Extent: Found (Matched ' + evaluated.added +
+                ' workload(s)' + this._newOf(scanned, evaluated.added) + ')' +
+                this.syncUtils.since(extentStartedAt));
+
+            return evaluated;
+        }
+
+        if (hasCmdbCondition && gs.nil(filter.source_table)) {
+            evaluated.errors.push('The CMDB Condition has no table to run against. ' +
+                'Set a Class Mapping on the Sync Filter.');
+            return evaluated;
+        }
+
+        var labelStartedAt = new Date().getTime();
+
+        var labelMatches = hasLabelCondition ?
+            this._matchLabelCondition(filter, evaluated.errors, label) : null;
+
+        if (evaluated.errors.length > 0) {
+            return evaluated;
+        }
+
+        if (hasLabelCondition) {
+            // The label condition's OWN result, before `duplicate` and the extent narrow it and
+            // before the negative guard drops what an earlier filter already matched. Reporting
+            // the post-narrowing number here instead would hide the gap between "the condition
+            // selected this many" and "this many survived", which is usually the interesting part.
+            lastReported = labelMatches.distinct;
+            this._progress(onProgress, 'Label Condition: Found (Matched ' + lastReported +
+                ' workload(s))' + this.syncUtils.since(labelStartedAt));
+        } else {
+            this._progress(onProgress, 'Label Condition: Not set');
+        }
+
+        // SHAPE D. The label set stays alive as the guard for the whole drain, which is the
+        // reason the CMDB side is the streamed one and not the other way round. No explicit
+        // release afterwards any more: the set is handed to exactly one consumer and this
+        // function returns the moment that consumer does, so there is no stretch where it is
+        // dead but still reachable.
+        if (hasCmdbCondition) {
+            var cmdbStartedAt = new Date().getTime();
+
+            var drained = this._matchCmdbCondition(
+                filter, extentList, labelMatches, allSysIds, label);
+
+            evaluated.added = drained.added;
+
+            this._progress(onProgress, 'CMDB Condition: Found (Matched ' + drained.added +
+                ' workload(s) from ' + drained.ciTotal + ' CI(s) in ' + filter.source_table +
+                ')' + this.syncUtils.since(cmdbStartedAt));
+
+            // NOT "skipped". The extent is applied -- it rides on the same workload query as
+            // `duplicate=false`, inside the drain, so it has already narrowed the number on the
+            // line above. What is unavailable is a SEPARATE count for it, because there is no
+            // point in the shape where the extent has been applied and the CMDB condition has
+            // not. Saying "skipping extent" here would describe a run that did not happen.
+            this._progress(onProgress, hasExtent ?
+                'Extent: Applied within the CMDB query (included in the count above)' :
+                'Extent: Not set');
+
+            // No closing "Matched:" line. The CMDB line above already carries this filter's whole
+            // contribution -- the drain adds to the run and nothing narrows it afterwards.
+            return evaluated;
+        }
+
+        // SHAPE C. The label aggregate deliberately leaves `duplicate` out -- it lives on the
+        // workload table, so checking it there would be a join on every row of every term -- so
+        // the label set has to come back through the workload table once. That pass carries the
+        // extent too.
+        this._progress(onProgress, 'CMDB Condition: Not set');
+
+        var resolveStartedAt = new Date().getTime();
+        var resolved = this._resolveLabelMatches(extentList, labelMatches, allSysIds, label);
+
+        evaluated.added = resolved.added;
+
+        if (hasExtent) {
+            // Same query as the duplicate check, so this count is "survived both", not "survived
+            // the extent". Named for the extent because that is the only predicate the filter's
+            // author set; `duplicate=false` is applied on every shape and is not theirs to tune.
+            //
+            // `considered` and not labelMatches.distinct as the "of": the difference between
+            // those two is what the negative guard skipped, which the run already has, and
+            // counting it as dropped here would read as the extent rejecting workloads it never
+            // saw.
+            lastReported = resolved.added;
+            this._progress(onProgress, 'Extent: Found (Matched ' + resolved.added +
+                ' workload(s) of ' + resolved.considered + ' checked)' +
+                this.syncUtils.since(resolveStartedAt));
+        } else {
+            // Not "Not set and nothing measured": the resolve pass still ran, for
+            // `duplicate=false`, and its cost belongs on a line. This is the only one there is.
+            this._progress(onProgress, 'Extent: Not set' +
+                this.syncUtils.since(resolveStartedAt));
+        }
+
+        this._reportFilterTotal(onProgress, evaluated.added, lastReported);
+        return evaluated;
+    },
+
+    /**
+     * Close a filter out with its contribution, but only when that number is not already the last
+     * one on the job record.
+     *
+     * Shapes B, C-with-extent and D all end on a condition line that carries the filter's total,
+     * and repeating it is exactly the duplication this restructure removes. Shape C without an
+     * extent does not: its last line is the label condition's own count, which is taken before
+     * `duplicate` and the negative guard narrow it. There the closing line is the only place the
+     * filter's real contribution appears.
+     *
+     * @param {Function} onProgress
+     * @param {Number} added The filter's contribution to the run
+     * @param {Number|null} lastReported Count on the most recent condition line
+     */
+    _reportFilterTotal: function(onProgress, added, lastReported) {
+        if (lastReported === added) {
+            return;
+        }
+
+        this._progress(onProgress, 'Matched: ' + added + ' workload(s) added to this run');
+    },
+
+    /**
+     * ", N already matched by an earlier filter" -- suppressed when every match was new, which is
+     * the case on the first filter and on any run whose filters do not overlap.
+     *
+     * Only meaningful where the gap between the two numbers is the union and nothing else, which
+     * is shape B: the extent query returns every workload it matched and unionInto reports how
+     * many of those the run did not already have. Shapes C and D narrow on other predicates in
+     * the same pass, so their gap is not this.
+     *
+     * @param {Number} scanned Workloads the query returned
+     * @param {Number} added Workloads that were new to the run
+     * @returns {String} Empty string, or a clause to append inside the count parenthesis
+     */
+    _newOf: function(scanned, added) {
+        if (scanned === added) {
+            return '';
+        }
+
+        return ', ' + (scanned - added) + ' already matched by an earlier filter';
+    },
+
+    /**
+     * "a label condition, a CMDB condition and an extent" -- for the progress line.
+     *
+     * @returns {String} Human-readable list of the sides that are set
+     */
+    _describeSides: function(hasLabelCondition, hasCmdbCondition, hasExtent) {
+        var sides = [];
+
+        if (hasLabelCondition) {
+            sides.push('a label condition');
+        }
+        if (hasCmdbCondition) {
+            sides.push('a CMDB condition');
+        }
+        if (hasExtent) {
+            sides.push('an extent');
+        }
+
+        if (sides.length === 1) {
+            return sides[0];
+        }
+
+        return sides.slice(0, sides.length - 1).join(', ') + ' and ' + sides[sides.length - 1];
+    },
+
+    /**
+     * Workloads matching a filter's label condition.
+     *
+     * Each ^NQ group of the condition is one DNF term, evaluated in a single GlideAggregate and
+     * ORed with the rest. One query per group however many dimensions the group ANDs, so the
+     * query count scales with how the filter was authored and not with how much data there is.
+     *
+     * @param {Object} filter Filter object from IllumioSyncRepoUtils
+     * @param {Array} errors Collects parse errors, in place
+     * @param {String} [label] Filter label for the trace lines
+     * @returns {Object|null} { workloadSysIdsMatchingLabelConditions: Object, distinct: Number },
+     *   null when the condition would not parse. The count travels with the set because the only
+     *   other way to get it back is Object.keys, which at 2M members is a full-size array built
+     *   to be measured and dropped.
+     */
+    _matchLabelCondition: function(filter, errors, label) {
+        var parsed = this.syncUtils.parseLabelCondition(filter.label_condition);
+
+        // Fail closed. A mis-parsed condition that silently syncs the wrong workloads is worse
+        // than one that syncs none, and the save-time business rule reports these same strings
+        // from this same call, so validation and evaluation cannot drift apart.
+        if (parsed.errors.length > 0) {
+            for (var errorIndex = 0; errorIndex < parsed.errors.length; errorIndex++) {
+                errors.push(parsed.errors[errorIndex]);
+            }
+            return null;
+        }
+
+        var workloadSysIdsMatchingLabelConditions = {};
+
+        // Counted as we go, from unionInto's return value. The progress line used to call
+        // setToArray(...).length on this, which builds a full array of every matched sys_id and
+        // throws it away one expression later -- a second full-size allocation for a log line.
+        var distinct = 0;
+
+        for (var termIndex = 0; termIndex < parsed.terms.length; termIndex++) {
+            // Per term, because one GlideAggregate over a large label table is the single
+            // longest-running query in phase 1. A filter with four OR'd terms spends four of
+            // these back to back, and without a line each the whole stretch looks like one hang.
+            //
+            // Syslog, not the job record: the caller now prints one "Label Condition: Found"
+            // line with the total, and a filter authored with several terms used to put that many
+            // near-identical lines in front of it naming the same filter.
+            this._trace(label + ': matching label term ' + (termIndex + 1) +
+                ' of ' + parsed.terms.length + '.');
+
+            distinct += this.syncUtils.unionInto(
+                workloadSysIdsMatchingLabelConditions,
+                this.repo.aggregateLabelTermWorkloads(filter.pce_configuration,
+                    filter.class_mapping, parsed.terms[termIndex]));
+        }
+
+        this._trace(label + ': label condition matched ' + distinct +
+            ' workload(s) across ' + parsed.terms.length + ' term(s).');
+
+        return {
+            workloadSysIdsMatchingLabelConditions: workloadSysIdsMatchingLabelConditions,
+            distinct: distinct
+        };
+    },
+
+    /**
+     * SHAPE C. Narrow a label-only filter's matches to the non-duplicates inside the extent, and
+     * add the survivors to the run's set.
+     *
+     * The label set is walked directly, a 500-member window at a time. setToArray on it would
+     * build an array the size of the set purely to be iterated in order and dropped -- and at the
+     * peak of a label-only filter the set is the largest thing in the run.
+     *
+     * NEGATIVE GUARD. Members already in allSysIds never reach a query. Filters are ORed, so a
+     * workload an earlier filter already matched is in the result whatever this one decides; the
+     * workload query would only re-derive an answer that is already recorded. At the far end of a
+     * run this can be most of the set.
+     *
+     * @param {Array} extentList Extent entries from IllumioSyncUtils.splitExtent
+     * @param {Object} labelMatches Result of _matchLabelCondition
+     * @param {Object} allSysIds The run's result set. Grown in place, and read as the guard.
+     * @param {String} [label] Filter label for the trace lines
+     * @returns {Object} { added: Number, considered: Number } -- workloads added to the run, and
+     *   how many label matches reached a query at all. The caller needs both: `added` is the
+     *   filter's contribution and the gap between them is what the negative guard skipped.
+     */
+    _resolveLabelMatches: function(extentList, labelMatches, allSysIds, label) {
+        var self = this;
+        var added = 0;
+        var considered = 0;
+
+        this.syncUtils.eachSetWindow(labelMatches.workloadSysIdsMatchingLabelConditions,
+            this.syncUtils.WORKLOAD_CHUNK_SIZE, allSysIds,
+            function(window) {
+                considered += window.length;
+                added += self.syncUtils.unionInto(
+                    allSysIds, self.repo.findSurvivingWorkloads(window, extentList));
+            });
+
+        this._trace(label + ': ' + added + ' workload(s) added (' + considered +
+            ' of ' + labelMatches.distinct + ' label match(es) checked for duplicate and ' +
+            'extent, ' + (labelMatches.distinct - considered) +
+            ' already matched by an earlier filter).');
+
+        return { added: added, considered: considered };
+    },
+
+    /**
+     * SHAPE D. Workloads matching a filter's CMDB condition, guarded by the label result, added
+     * to the run's set.
+     *
+     * The condition goes to the source table verbatim -- it is flat, one row per CI with real
+     * columns, so the condition builder's own AND/OR structure is already correct there. Only
+     * the label table needs parsing, because it is EAV.
+     *
+     * The matching CI list is never materialised. It is drained a batch at a time, each batch
+     * resolved to workloads, and only the ones the label side also matched are kept.
+     *
+     * The resolve query carries `duplicate=false` and the extent, so there is no pass after this
+     * one. It used to collect every survivor into an array and hand that array to filterWorkloads
+     * afterwards, which chunked it back through the same table with the same chunk size -- the
+     * workload table queried twice per 500 CIs, and `duplicate=false` applied in both.
+     *
+     * @param {Object} filter Filter object from IllumioSyncRepoUtils
+     * @param {Array} extentList Extent entries from IllumioSyncUtils.splitExtent
+     * @param {Object} labelMatches Result of _matchLabelCondition; null when the filter has no
+     *   label condition, which keeps everything the CMDB side resolves. The set inside it is the
+     *   guard that makes the AND an AND, so it has to outlive the drain.
+     * @param {Object} allSysIds The run's result set. Grown in place.
+     * @param {String} [label] Filter label for the trace lines
+     * @returns {Object} { added: Number, ciTotal: Number } -- workloads added to the run, and how
+     *   many CIs the condition matched. The caller reports both on one line, because "matched 12
+     *   workloads" out of 12 CIs and out of 40,000 are different findings.
+     */
+    _matchCmdbCondition: function(filter, extentList, labelMatches, allSysIds, label) {
+        var self = this;
+        var added = 0;
+        var pceConfigSysId = filter.pce_configuration;
+        var sourceTable = filter.source_table;
+        var guardSet = labelMatches ?
+            labelMatches.workloadSysIdsMatchingLabelConditions : null;
+
+        // Progress inside the drain is deliberately coarse, and syslog only. The CI list has no
+        // useful ceiling -- it is bounded by the size of a CMDB table, not by the workload count
+        // -- so this is the stretch most likely to run long and the one worth being able to watch.
+        // It is not on the job record because the operator gets one "CMDB Condition: Found" line
+        // carrying the same totals; this is here so that "which batch is it stuck on" stays
+        // answerable from the application logs. Every 20 batches is 10,000 CIs.
+        var batches = 0;
+
+        var total = this.repo.eachCmdbCiSysId(sourceTable, filter.cmdb_condition,
+            this.syncUtils.CI_CHUNK_SIZE,
+            function(ciSysIds) {
+                added += self.syncUtils.unionIntoGuarded(
+                    allSysIds,
+                    self.repo.findWorkloadSysIdsBySourceRecords(
+                        pceConfigSysId, ciSysIds, sourceTable, extentList),
+                    guardSet);
+
+                batches++;
+                if (batches % 20 === 0) {
+                    self._trace(label + ': drained ' +
+                        (batches * self.syncUtils.CI_CHUNK_SIZE) + ' CI(s) from ' + sourceTable +
+                        ', ' + added + ' workload(s) added so far.');
+                }
+            });
+
+        this._trace(label + ': drained ' + total + ' CI(s) from ' + sourceTable +
+            ', ' + added + ' workload(s) added.');
+
+        return { added: added, ciTotal: total };
+    },
+
+    /**
+     * Render workloads as CSV.
+     *
+     * Two modes, one walk. Without a callback it returns the whole file as a string, which is
+     * what the exports that have not been moved to jobs still do. With one it hands over each
+     * batch as it is rendered and returns null -- the preview export takes that route so the
+     * file never exists in memory on the instance; at 200k workloads the string form is ~120 MB.
+     *
+     * The header is emitted as the first chunk rather than prepended by the caller, so whoever
+     * is concatenating chunks treats all of them alike.
+     *
+     * @param {Array} sysIds Workload sys_ids to include
+     * @param {Function} [onChunk] Called with each rendered batch, header first
+     * @returns {String} CSV with headers, or null when onChunk is given
+     */
+    generateWorkloadCsv: function(sysIds, onChunk) {
+        var self = this;
+
+        // Streaming and collecting are the same walk, differing only in what happens to a
+        // finished batch.
+        var collected = onChunk ? null : [];
+        var emit = function(text) {
+            if (onChunk) {
+                onChunk(text);
+            } else {
+                collected.push(text);
+            }
+        };
+
+        // The header is emitted as a chunk like any other, so a consumer appending chunks in
+        // order needs no special case for the first one and cannot get the columns out of step
+        // with the rows -- both come from CSV_HEADERS here.
+        emit(this.syncUtils.csvRow(this.CSV_HEADERS));
+
+        // eachChunk rather than chunkArray: sysIds is the whole run's result and building every
+        // 500-window up front would put a second full-size structure alongside it for the length
+        // of the render, which is the longest phase there is.
+        this.syncUtils.eachChunk(sysIds, this.CSV_BATCH_SIZE, function(chunkSysIds, c) {
+            var labelsByWorkload = {};
+
+            try {
+                // Was an inline GlideRecord duplicating this repo method, down to the dot-walked
+                // dimension key. One copy now, so the N+1 noted in sync-callchain.MD is one
+                // problem in one place rather than two that can drift.
+                var labelValues = self.repo.getLabelValuesByWorkload(chunkSysIds);
+                labelsByWorkload = self._formatLabelCells(labelValues);
+            } catch (labelEx) {
+                // Labels degrade to empty rather than failing the export: every other column is
+                // still worth having, and this is a preview.
+                self.logger.error('[IllumioSyncFilterUtils.generateWorkloadCsv] Error fetching labels ' +
+                    'for batch ' + c + ': ' + labelEx);
+            }
+
+            var batch = [];
+
+            self.repo.eachWorkloadInBatch(chunkSysIds, null, function(gr) {
+                var row = [];
+                var workloadSysId = gr.getUniqueValue();
+
+                for (var h = 0; h < self.CSV_HEADERS.length; h++) {
+                    if (self.CSV_HEADERS[h] === 'labels') {
+                        row.push(labelsByWorkload[workloadSysId] || '');
+                    } else {
+                        row.push(gr.getValue(self.CSV_HEADERS[h]) || '');
+                    }
+                }
+
+                // Quoting is csvField's job, which also quotes on CR and LF. The check this
+                // replaced covered only comma and double quote, so a value with an embedded
+                // newline split one workload across two records and shifted every column after
+                // it -- a corrupt file that opens without complaint.
+                batch.push(self.syncUtils.csvRow(row));
+            });
+
+            emit(batch.join(''));
+        });
+
+        return onChunk ? null : collected.join('');
+    },
+
+    /**
+     * Turn the repo's label map into one "key:value; key:value" cell per workload.
+     *
+     * Dimension keys are sorted so the cell is stable across runs. They used to come out in
+     * whatever order the label query returned, which made two exports of unchanged data differ.
+     *
+     * @param {Object} labelValues { workloadSysId: { dimensionKey: { cmdb_value, pce_value } } }
+     * @returns {Object} { workloadSysId: "key:value; key:value" }
+     */
+    _formatLabelCells: function(labelValues) {
+        var cells = {};
+
+        for (var workloadSysId in labelValues) {
+            if (!labelValues.hasOwnProperty(workloadSysId)) {
+                continue;
+            }
+
+            var byDimension = labelValues[workloadSysId];
+            var keys = [];
+
+            for (var dimensionKey in byDimension) {
+                if (byDimension.hasOwnProperty(dimensionKey)) {
+                    keys.push(dimensionKey);
+                }
+            }
+
+            keys.sort();
+
+            var parts = [];
+            for (var index = 0; index < keys.length; index++) {
+                // PCE value wins. This is a preview of what the PCE holds where it holds
+                // anything, falling back to what ServiceNow would send.
+                var value = byDimension[keys[index]].pce_value ||
+                    byDimension[keys[index]].cmdb_value || '';
+
+                if (value) {
+                    parts.push(keys[index] + ':' + value);
+                }
+            }
+
+            if (parts.length > 0) {
+                cells[workloadSysId] = parts.join('; ');
+            }
+        }
+
+        return cells;
+    },
+
+    /**
+     * Full workload records by sys_id, for callers that want objects rather than sys_ids.
+     *
+     * @param {Array} sysIds Workload sys_ids
+     * @returns {Array} Workload objects
+     */
+    _fetchWorkloadRecords: function(sysIds) {
+        var self = this;
+        var workloads = [];
+
+        this.syncUtils.eachChunk(sysIds, this.CSV_BATCH_SIZE, function(window) {
+            self.repo.eachWorkloadInBatch(window, null, function(gr) {
+                workloads.push(self._workloadToObject(gr));
+            });
+        });
+
+        return workloads;
+    },
+
+    _workloadToObject: function(gr) {
+        return {
+            sys_id: gr.getUniqueValue(),
+            hostname: gr.getValue('hostname'),
+            source_table: gr.getValue('source_table'),
+            known_to_pce: gr.getValue('known_to_pce'),
+            conflicts: gr.getValue('conflicts'),
+            duplicate: gr.getValue('duplicate'),
+            pce_workload_href: gr.getValue('pce_workload_href'),
+            servicenow_cmdb_identifier: gr.getValue('servicenow_cmdb_identifier'),
+            public_ip_address: gr.getValue('public_ip_address'),
+            ven_href: gr.getValue('ven_href'),
+            ven_status: gr.getValue('ven_status'),
+            enforcement_mode: gr.getValue('enforcement_mode'),
+            illumio_pce_configuration: gr.getValue('illumio_pce_configuration')
+        };
+    },
+
+    type: 'IllumioSyncFilterUtils'
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-23 09:06:25</sys_created_on>
+        <sys_id>4429e6b8c3a38bd050bffa0ed40131ac</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>IllumioSyncFilterUtils</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_4429e6b8c3a38bd050bffa0ed40131ac</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:56:35</sys_updated_on>
+    </sys_script_include>
+</record_update>

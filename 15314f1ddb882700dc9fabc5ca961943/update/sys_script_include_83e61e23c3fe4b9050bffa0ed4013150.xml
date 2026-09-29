@@ -9,9 +9,12 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioTestUtils</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioTestUtils = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioTestUtils = Class.create();
 IllumioTestUtils.prototype = {
-    initialize: function() {},
+    initialize: function() {
+        this.logger = new IllumioLogger(null, 'IllumioTestUtils');
+    },
 
     constants: function() {
         return {
@@ -119,7 +122,7 @@ IllumioTestUtils.prototype = {
                 if (sysId) {
                     sysIds.push(sysId + '');
                 } else {
-                    gs.warn('[IllumioTestUtils.seed] Failed to insert record #' + globalIndex + ' into ' + table);
+                    this.logger.warn('[IllumioTestUtils.seed] Failed to insert record #' + globalIndex + ' into ' + table);
                 }
 
                 globalIndex++;
@@ -131,7 +134,7 @@ IllumioTestUtils.prototype = {
                 values: batchValues
             });
 
-            gs.info('[IllumioTestUtils.seed] Batch ' + b + ': created ' + sysIds.length + ' records in ' + table);
+            this.logger.info('[IllumioTestUtils.seed] Batch ' + b + ': created ' + sysIds.length + ' records in ' + table);
         }
 
         var total = 0;
@@ -139,7 +142,7 @@ IllumioTestUtils.prototype = {
             total += batches[t].sysIds.length;
         }
 
-        gs.info('[IllumioTestUtils.seed] Done. Total: ' + total + ' records in ' + table + ' with prefix "' + prefix + '"');
+        this.logger.info('[IllumioTestUtils.seed] Done. Total: ' + total + ' records in ' + table + ' with prefix "' + prefix + '"');
 
         return {
             total: total,
@@ -168,7 +171,7 @@ IllumioTestUtils.prototype = {
             total = parseInt(ga.getAggregate('COUNT'), 10);
         }
 
-        gs.info('[IllumioTestUtils.count] Found ' + total + ' records in ' + table + ' with prefix "' + prefix + '"');
+        this.logger.info('[IllumioTestUtils.count] Found ' + total + ' records in ' + table + ' with prefix "' + prefix + '"');
         return total;
     },
 
@@ -193,7 +196,7 @@ IllumioTestUtils.prototype = {
             deleted++;
         }
 
-        gs.info('[IllumioTestUtils.cleanup] Deleted ' + deleted + ' records from ' + table + ' with prefix "' + prefix + '"');
+        this.logger.info('[IllumioTestUtils.cleanup] Deleted ' + deleted + ' records from ' + table + ' with prefix "' + prefix + '"');
         return deleted;
     },
 
@@ -201,7 +204,7 @@ IllumioTestUtils.prototype = {
      * Validate that all workloads matched by active inclusion sync filters for a
      * PCE Configuration have been successfully synced.
      *
-     * Reads all active inclusion sync filters, calls getWorkloadsBySyncFilter for
+     * Reads all active inclusion sync filters, calls IllumioSyncFilterUtils.getWorkloadsBySyncFilter for
      * each, deduplicates the workload sys_ids, then checks every matched workload
      * has conflicts=false and known_to_pce is 'managed' or 'unmanaged'.
      *
@@ -215,7 +218,7 @@ IllumioTestUtils.prototype = {
      * }
      */
     validateSyncFilters: function(pceConfigId) {
-        var utils = new IllumioUtils();
+        var filterUtils = new IllumioSyncFilterUtils();
         var result = {
             passed: false,
             total: 0,
@@ -224,7 +227,7 @@ IllumioTestUtils.prototype = {
             filterBreakdown: []
         };
 
-        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        var sfGr = new GlideRecord(TABLE_SYNC_FILTER);
         sfGr.addQuery('pce_configuration', pceConfigId);
         sfGr.addQuery('type', 'inclusion');
         sfGr.addQuery('active', true);
@@ -236,7 +239,7 @@ IllumioTestUtils.prototype = {
             var filterSysId = sfGr.getUniqueValue();
             var filterName = sfGr.getValue('name');
 
-            var filterResult = utils.getWorkloadsBySyncFilter(filterSysId);
+            var filterResult = filterUtils.getWorkloadsBySyncFilter(filterSysId);
             var filterCount = 0;
 
             if (filterResult.success) {
@@ -253,19 +256,19 @@ IllumioTestUtils.prototype = {
                 workloadCount: filterCount
             });
 
-            gs.info('[IllumioTestUtils.validateSyncFilters] Filter "' + filterName + '": ' + filterCount + ' workloads');
+            this.logger.info('[IllumioTestUtils.validateSyncFilters] Filter "' + filterName + '": ' + filterCount + ' workloads');
         }
 
         var uniqueSysIds = Object.keys(allSysIds);
         result.total = uniqueSysIds.length;
 
         if (uniqueSysIds.length === 0) {
-            gs.info('[IllumioTestUtils.validateSyncFilters] No workloads matched any inclusion filter');
+            this.logger.info('[IllumioTestUtils.validateSyncFilters] No workloads matched any inclusion filter');
             result.passed = true;
             return result;
         }
 
-        var wlGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
+        var wlGr = new GlideRecord(TABLE_PCE_WORKLOAD);
         wlGr.addQuery('sys_id', 'IN', uniqueSysIds.join(','));
         wlGr.query();
 
@@ -287,7 +290,7 @@ IllumioTestUtils.prototype = {
 
         result.passed = result.failures.length === 0;
 
-        gs.info('[IllumioTestUtils.validateSyncFilters] Result: ' + result.synced + '/' + result.total + ' synced. ' +
+        this.logger.info('[IllumioTestUtils.validateSyncFilters] Result: ' + result.synced + '/' + result.total + ' synced. ' +
             (result.passed ? 'PASSED' : 'FAILED — ' + result.failures.length + ' workload(s) with issues'));
 
         return result;
@@ -326,7 +329,7 @@ IllumioTestUtils.prototype = {
      * }
      */
     validateSyncFiltersFullAssessment: function(pceConfigId, prefix) {
-        var utils = new IllumioUtils();
+        var filterUtils = new IllumioSyncFilterUtils();
         var result = {
             passed: false,
             included: { total: 0, synced: 0, failures: [] },
@@ -335,7 +338,7 @@ IllumioTestUtils.prototype = {
         };
 
         // Step 1: Collect all workload sys_ids matched by inclusion filters
-        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        var sfGr = new GlideRecord(TABLE_SYNC_FILTER);
         sfGr.addQuery('pce_configuration', pceConfigId);
         sfGr.addQuery('type', 'inclusion');
         sfGr.addQuery('active', true);
@@ -347,7 +350,7 @@ IllumioTestUtils.prototype = {
             var filterSysId = sfGr.getUniqueValue();
             var filterName = sfGr.getValue('name');
 
-            var filterResult = utils.getWorkloadsBySyncFilter(filterSysId);
+            var filterResult = filterUtils.getWorkloadsBySyncFilter(filterSysId);
             var filterCount = 0;
 
             if (filterResult.success) {
@@ -366,11 +369,11 @@ IllumioTestUtils.prototype = {
                 workloadCount: filterCount
             });
 
-            gs.info('[validateSyncFiltersFullAssessment] Filter "' + filterName + '": ' + filterCount + ' workloads');
+            this.logger.info('[validateSyncFiltersFullAssessment] Filter "' + filterName + '": ' + filterCount + ' workloads');
         }
 
         // Step 2: Query workloads scoped to the prefix and split into included vs excluded
-        var allWlGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
+        var allWlGr = new GlideRecord(TABLE_PCE_WORKLOAD);
         allWlGr.addQuery('illumio_pce_configuration', pceConfigId);
         allWlGr.addQuery('duplicate', false);
         allWlGr.addQuery('hostname', 'STARTSWITH', prefix);
@@ -413,9 +416,9 @@ IllumioTestUtils.prototype = {
 
         result.passed = result.included.failures.length === 0 && result.excluded.failures.length === 0;
 
-        gs.info('[validateSyncFiltersFullAssessment] INCLUDED: ' + result.included.synced + '/' + result.included.total + ' synced correctly');
-        gs.info('[validateSyncFiltersFullAssessment] EXCLUDED: ' + result.excluded.untouched + '/' + result.excluded.total + ' untouched correctly');
-        gs.info('[validateSyncFiltersFullAssessment] Result: ' + (result.passed ? 'PASSED' :
+        this.logger.info('[validateSyncFiltersFullAssessment] INCLUDED: ' + result.included.synced + '/' + result.included.total + ' synced correctly');
+        this.logger.info('[validateSyncFiltersFullAssessment] EXCLUDED: ' + result.excluded.untouched + '/' + result.excluded.total + ' untouched correctly');
+        this.logger.info('[validateSyncFiltersFullAssessment] Result: ' + (result.passed ? 'PASSED' :
             'FAILED — ' + result.included.failures.length + ' included not synced, ' +
             result.excluded.failures.length + ' excluded wrongly synced'));
 
@@ -442,21 +445,21 @@ IllumioTestUtils.prototype = {
      *   }
      */
     getConfigFieldMappings: function(pceConfigId, table) {
-        var configClassGr = new GlideRecord('x_illu2_illumio_illumio_config_class_mapping');
+        var configClassGr = new GlideRecord(TABLE_CONFIG_CLASS_MAPPING);
         configClassGr.addQuery('illumio_pce_configuration', pceConfigId);
         configClassGr.addQuery('source_table', table);
         configClassGr.addActiveQuery();
         configClassGr.query();
 
         if (!configClassGr.next()) {
-            gs.warn('[IllumioTestUtils.getConfigFieldMappings] No config class mapping for table ' + table);
+            this.logger.warn('[IllumioTestUtils.getConfigFieldMappings] No config class mapping for table ' + table);
             return null;
         }
 
         var classMappingSysId = configClassGr.getUniqueValue();
         var labelFields = {};
 
-        var mappingGr = new GlideRecord('x_illu2_illumio_illumio_class_field_mapping');
+        var mappingGr = new GlideRecord(TABLE_CLASS_FIELD_MAPPING);
         mappingGr.addQuery('illumio_config_class_mapping', classMappingSysId);
         mappingGr.addQuery('type', 'label_dimension');
         mappingGr.addQuery('advanced', false);
@@ -472,7 +475,7 @@ IllumioTestUtils.prototype = {
             };
         }
 
-        gs.info('[IllumioTestUtils.getConfigFieldMappings] Found ' +
+        this.logger.info('[IllumioTestUtils.getConfigFieldMappings] Found ' +
             Object.keys(labelFields).length + ' label-mapped fields for ' + table);
 
         return {
@@ -512,7 +515,7 @@ IllumioTestUtils.prototype = {
             }
         }
 
-        gs.warn('[IllumioTestUtils.getSysDictionarySysId] No sys_dictionary entry for ' + table + '.' + element);
+        this.logger.warn('[IllumioTestUtils.getSysDictionarySysId] No sys_dictionary entry for ' + table + '.' + element);
         return null;
     },
 
@@ -569,7 +572,7 @@ IllumioTestUtils.prototype = {
         }
 
         // Create sync filter
-        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        var sfGr = new GlideRecord(TABLE_SYNC_FILTER);
         sfGr.initialize();
         sfGr.setValue('name', prefix + '-filter');
         sfGr.setValue('pce_configuration', pceConfigId);
@@ -581,14 +584,14 @@ IllumioTestUtils.prototype = {
             throw new Error('Failed to create sync filter');
         }
 
-        gs.info('[IllumioTestUtils.createSyncFilter] Created sync filter: ' + sfSysId);
+        this.logger.info('[IllumioTestUtils.createSyncFilter] Created sync filter: ' + sfSysId);
 
         var groups = [];
         var totalLabelItems = 0;
         var totalFieldItems = 0;
 
         for (var g = 0; g < numGroups; g++) {
-            var groupGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter_group');
+            var groupGr = new GlideRecord(TABLE_SYNC_FILTER_GROUP);
             groupGr.initialize();
             groupGr.setValue('name', prefix + '-group-' + g);
             groupGr.setValue('sync_filter', sfSysId);
@@ -602,7 +605,7 @@ IllumioTestUtils.prototype = {
                 var val = values[fi].data[g];
 
                 if (mappings.labelFields[fld]) {
-                    var lfiGr = new GlideRecord('x_illu2_illumio_illumio_label_filter_item');
+                    var lfiGr = new GlideRecord(TABLE_LABEL_FILTER_ITEM);
                     lfiGr.initialize();
                     lfiGr.setValue('illumio_sync_filter', sfSysId);
                     lfiGr.setValue('sync_filter_group', groupSysId);
@@ -613,7 +616,7 @@ IllumioTestUtils.prototype = {
                     totalLabelItems++;
                     items.push({ type: 'label', field: fld, value: val });
                 } else {
-                    var wfGr = new GlideRecord('x_illu2_illumio_illumio_workload_field_filter_item');
+                    var wfGr = new GlideRecord(TABLE_WORKLOAD_FIELD_FILTER_ITEM);
                     wfGr.initialize();
                     wfGr.setValue('illumio_sync_filter', sfSysId);
                     wfGr.setValue('sync_filter_group', groupSysId);
@@ -630,7 +633,7 @@ IllumioTestUtils.prototype = {
             groups.push({ sysId: groupSysId, name: prefix + '-group-' + g, items: items });
         }
 
-        gs.info('[IllumioTestUtils.createSyncFilter] Created ' + numGroups + ' groups, ' +
+        this.logger.info('[IllumioTestUtils.createSyncFilter] Created ' + numGroups + ' groups, ' +
             totalLabelItems + ' label items, ' + totalFieldItems + ' field items');
 
         return {
@@ -654,7 +657,7 @@ IllumioTestUtils.prototype = {
         var counts = { groups: 0, labelItems: 0, fieldItems: 0 };
 
         // Find all groups for this filter
-        var groupGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter_group');
+        var groupGr = new GlideRecord(TABLE_SYNC_FILTER_GROUP);
         groupGr.addQuery('sync_filter', syncFilterSysId);
         groupGr.query();
 
@@ -665,7 +668,7 @@ IllumioTestUtils.prototype = {
 
         // Delete label filter items for all groups
         if (groupSysIds.length > 0) {
-            var lfiGr = new GlideRecord('x_illu2_illumio_illumio_label_filter_item');
+            var lfiGr = new GlideRecord(TABLE_LABEL_FILTER_ITEM);
             lfiGr.addQuery('sync_filter_group', 'IN', groupSysIds.join(','));
             lfiGr.query();
             while (lfiGr.next()) {
@@ -674,7 +677,7 @@ IllumioTestUtils.prototype = {
             }
 
             // Delete workload field filter items for all groups
-            var wfGr = new GlideRecord('x_illu2_illumio_illumio_workload_field_filter_item');
+            var wfGr = new GlideRecord(TABLE_WORKLOAD_FIELD_FILTER_ITEM);
             wfGr.addQuery('sync_filter_group', 'IN', groupSysIds.join(','));
             wfGr.query();
             while (wfGr.next()) {
@@ -683,7 +686,7 @@ IllumioTestUtils.prototype = {
             }
 
             // Delete groups
-            var delGroupGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter_group');
+            var delGroupGr = new GlideRecord(TABLE_SYNC_FILTER_GROUP);
             delGroupGr.addQuery('sync_filter', syncFilterSysId);
             delGroupGr.query();
             while (delGroupGr.next()) {
@@ -693,12 +696,12 @@ IllumioTestUtils.prototype = {
         }
 
         // Delete the sync filter itself
-        var sfGr = new GlideRecord('x_illu2_illumio_illumio_sync_filter');
+        var sfGr = new GlideRecord(TABLE_SYNC_FILTER);
         if (sfGr.get(syncFilterSysId)) {
             sfGr.deleteRecord();
         }
 
-        gs.info('[IllumioTestUtils.cleanupSyncFilter] Deleted: ' + counts.groups + ' groups, ' +
+        this.logger.info('[IllumioTestUtils.cleanupSyncFilter] Deleted: ' + counts.groups + ' groups, ' +
             counts.labelItems + ' label items, ' + counts.fieldItems + ' field items');
 
         return counts;
@@ -719,14 +722,14 @@ IllumioTestUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-08-25 14:04:08</sys_created_on>
         <sys_id>83e61e23c3fe4b9050bffa0ed4013150</sys_id>
-        <sys_mod_count>0</sys_mod_count>
+        <sys_mod_count>3</sys_mod_count>
         <sys_name>IllumioTestUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_83e61e23c3fe4b9050bffa0ed4013150</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-08-25 14:04:08</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>83e61e23c3fe4b9050bffa0ed4013150</id>

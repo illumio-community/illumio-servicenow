@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_ws_operation">
+    <sys_ws_operation action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <consumes>application/json,application/xml,text/xml</consumes>
+        <consumes_customized>false</consumes_customized>
+        <default_operation_uri/>
+        <enforce_acl/>
+        <http_method>POST</http_method>
+        <name>Push</name>
+        <operation_script><![CDATA[(function process( /*RESTAPIRequest*/ request, /*RESTAPIResponse*/ response) {
+
+    // W5: the MID Server's log sink.
+    //
+    // The MID writes with ms.log(), which lands in agent0.log on the MID host -- the one sink
+    // nobody debugging from the instance can reach. This endpoint is how an error raised out
+    // there ends up in Application Logs next to the server-side lines that surround it, so one
+    // filtered view shows both halves of a run in order.
+    //
+    // It touches NO GlideRecord, on purpose and not for want of a use. The cross-scope 500 that
+    // killed UpdateLabelDimensionsValue came out of record access from an inbound call, and a
+    // sink that cannot fail that way is worth more than one that could store a richer payload.
+    // Everything here is gs.error / gs.warn and nothing else. Keep it that way.
+    //
+    // Messages arrive already carrying their correlation prefix -- `[<job>][MID.<Component>] ` --
+    // built by IllumioLogUtil.line(). They are emitted verbatim so that the retrieval filter
+    // `message STARTSWITH "[<job sys_id>]"` finds MID and server lines together. Do not prepend
+    // anything here: the job sys_id has to stay first.
+
+    // Bounded independently of anything the MID does. IllumioLogUtil sends one line per request
+    // (two on the push that announces its budget is spent), so our own client never approaches
+    // this -- but the endpoint is reachable by anything that can authenticate, and one gs.error
+    // per element means the request size alone decides how much work it does. The cap stays.
+    var MAX_LINES = 500;
+
+    var result = {
+        accepted: 0,
+        rejected: 0
+    };
+
+    var body = request.body && request.body.data ? request.body.data : null;
+    var lines = body ? body.lines : null;
+
+    // Duck-typed on purpose. This was `lines instanceof Array` and it rejected every MID push
+    // with a 400 on 2026-09-29: request.body.data is parsed outside this script's realm, so the
+    // array handed back is not an instance of *this* scope's Array constructor and instanceof
+    // is false for a perfectly well-formed body. Array.isArray() would also survive that, but a
+    // length check cannot be defeated by a realm boundary at all. The string exclusion has to
+    // come first -- strings have a numeric length too.
+    if (!lines || typeof lines === 'string' || typeof lines.length !== 'number') {
+        response.setStatus(400);
+        response.setBody({
+            accepted: 0,
+            rejected: 0,
+            error: 'Expected a body of the form { "lines": [ { "level": "error|warn", "message": "..." } ] }'
+        });
+
+        // The caller cannot see that response body -- IllumioHTTPClient reports the status code
+        // and nothing else, so a rejection is invisible from agent0.log beyond "status: 400".
+        // Leave the shape that actually arrived where someone debugging from the instance can
+        // find it, next to the run's other lines.
+        gs.warn('[-][APP.IllumioMIDLogPush] Rejected a push. body=' +
+            (body === null || body === undefined ? String(body) : typeof body) + ' lines=' +
+            (lines === null || lines === undefined ? String(lines) : typeof lines) + '.');
+        return;
+    }
+
+    var count = lines.length > MAX_LINES ? MAX_LINES : lines.length;
+
+    for (var i = 0; i < count; i++) {
+        var entry = lines[i];
+        if (!entry || gs.nil(entry.message)) {
+            result.rejected++;
+            continue;
+        }
+
+        // Anything that is not explicitly a warning or a boundary line is logged as an error.
+        // The MID only ever sends these three levels, and a level that arrived garbled is better
+        // loud than dropped.
+        if (entry.level === 'warn') {
+            gs.warn(String(entry.message));
+        } else if (entry.level === 'info') {
+            // W6 boundary lines only. IllumioLogUtil does not push ordinary info.
+            gs.info(String(entry.message));
+        } else {
+            gs.error(String(entry.message));
+        }
+        result.accepted++;
+    }
+
+    if (lines.length > count) {
+        var discarded = lines.length - count;
+        result.rejected += discarded;
+        gs.warn('[-][APP.IllumioMIDLogPush] Log push carried ' + lines.length +
+            ' line(s); ' + discarded + ' over the ' + MAX_LINES +
+            ' line cap were discarded. Those lines remain in agent0.log on the MID host.');
+    }
+
+    response.setStatus(200);
+    response.setBody(result);
+
+})(request, response);
+]]></operation_script>
+        <operation_uri>/api/x_illu2_illumio/illumio_mid_log/push</operation_uri>
+        <produces>application/json,application/xml,text/xml</produces>
+        <produces_customized>false</produces_customized>
+        <relative_path>/push</relative_path>
+        <request_example/>
+        <requires_acl_authorization>false</requires_acl_authorization>
+        <requires_authentication>true</requires_authentication>
+        <requires_snc_internal_role>true</requires_snc_internal_role>
+        <short_description/>
+        <support_trailing_slash>false</support_trailing_slash>
+        <sys_class_name>sys_ws_operation</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-29 12:20:19</sys_created_on>
+        <sys_id>4efe8a72c3e74f1450bffa0ed40131da</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>Push</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_ws_operation_4efe8a72c3e74f1450bffa0ed40131da</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:32:51</sys_updated_on>
+        <web_service_definition display_value="IllumioMIDLog">eb36c6f2c3a74f1450bffa0ed40131f2</web_service_definition>
+        <web_service_version/>
+    </sys_ws_operation>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>4efe8a72c3e74f1450bffa0ed40131da</id>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-29 12:20:18</sys_created_on>
+        <sys_id>ee0f86f6c3e74f1450bffa0ed4013105</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:20:18</sys_updated_on>
+        <table>sys_ws_operation</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

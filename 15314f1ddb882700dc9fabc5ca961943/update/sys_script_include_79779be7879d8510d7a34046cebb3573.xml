@@ -9,8 +9,13 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioUtilsAJAX</name>
         <sandbox_callable>true</sandbox_callable>
-        <script><![CDATA[var IllumioUtilsAJAX = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioUtilsAJAX = Class.create();
 IllumioUtilsAJAX.prototype = Object.extendsObject(global.AbstractAjaxProcessor, {
+
+    // On the prototype, not in initialize -- see the note in IllumioUpdatePCE.
+    logger: new IllumioLogger(null, 'IllumioUtilsAJAX'),
+
     FIELD_NAME_TYPE: "field_name",
 
 	/**
@@ -19,7 +24,7 @@ IllumioUtilsAJAX.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
      */
     getFieldNameTypeFields: function() {
         var eligibleFields = [];
-        var mappingsGR = new GlideRecordSecure("x_illu2_illumio_illumio_pce_field_mapping");
+        var mappingsGR = new GlideRecordSecure(TABLE_PCE_FIELD_MAPPING);
         mappingsGR.initialize();
         for (var field in mappingsGR) {
             if (field.startsWith("sys_") || field == "order_by_column_name")
@@ -28,11 +33,86 @@ IllumioUtilsAJAX.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
                 if (mappingsGR.getElement(field).getED().getInternalType() == this.FIELD_NAME_TYPE)
                     eligibleFields.push(field);
             } catch (e) {
-                gs.error("Exception while fetching fields: " + e);
+                this.logger.error("Exception while fetching fields: " + e);
             }
 
         }
         return JSON.stringify(eligibleFields);
+    },
+
+    /**
+     * Render a Sync Filter's Label Condition as a readable expression.
+     *
+     * For DISPLAY ONLY. Nothing is stored -- the caller passes the condition currently on the
+     * form, not a saved record, so the expression tracks what the author is building rather than
+     * what was last saved.
+     *
+     * The rendering runs on the server because it needs the parser the evaluator itself uses
+     * (so the description cannot drift from the query) and because resolving a dimension sys_id
+     * to its key is a database read.
+     *
+     * @returns {String} JSON { text: String, errors: Array } -- text is "" when the condition
+     *                   does not parse
+     */
+    describeLabelCondition: function() {
+        try {
+            var syncUtils = new IllumioSyncUtils();
+            var described = syncUtils.describeLabelCondition(
+                this.getParameter("sysparm_label_condition"));
+
+            return JSON.stringify({
+                text: described.text,
+                errors: described.errors
+            });
+        } catch (ex) {
+            this.logger.error("[describeLabelCondition] Exception while describing a label condition. " +
+                "Exception: " + ex);
+            return JSON.stringify({
+                text: "",
+                errors: []
+            });
+        }
+    },
+
+    /**
+     * Is an Illumio job running right now?
+     *
+     * The client half of the one-job-at-a-time guard, and only the client half. It exists so a
+     * button that cannot proceed says so immediately instead of submitting the form and coming
+     * back with an error message. The authoritative check runs server-side immediately before
+     * the job record is inserted -- two people clicking within the same second both pass this
+     * one.
+     *
+     * Reads sysparm_config_sys_id and scopes the check to that PCE Configuration. When the
+     * parameter is absent the check stays instance-wide, which blocks more than necessary rather
+     * than less -- the recoverable direction for a guard, and what every caller did before.
+     *
+     * The parameter is not validated against anything. It is only ever fed to an addQuery on a
+     * value the client already has on the form it is sitting on, and a junk sys_id matches no
+     * rows, so the worst outcome is the guard reporting idle. The server-side check is
+     * authoritative regardless.
+     *
+     * @returns {String} JSON { running: Boolean, message: String }
+     */
+    hasRunningJob: function() {
+        try {
+            var utils = new IllumioUtils();
+            var runningJob = utils.getRunningJob(this.getParameter("sysparm_config_sys_id"));
+
+            return JSON.stringify({
+                running: !!runningJob,
+                message: utils.describeRunningJob(runningJob)
+            });
+        } catch (ex) {
+            this.logger.error("[hasRunningJob] Exception while checking for a running job. " +
+                "Exception: " + ex);
+            // Fail open. The server-side check is what actually enforces this, and blocking the
+            // button on an error here would make a transient fault look like a permanent one.
+            return JSON.stringify({
+                running: false,
+                message: ""
+            });
+        }
     },
 
     type: 'IllumioUtilsAJAX'
@@ -41,13 +121,13 @@ IllumioUtilsAJAX.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2022-02-02 11:45:57</sys_created_on>
         <sys_id>79779be7879d8510d7a34046cebb3573</sys_id>
-        <sys_mod_count>18</sys_mod_count>
+        <sys_mod_count>23</sys_mod_count>
         <sys_name>IllumioUtilsAJAX</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_79779be7879d8510d7a34046cebb3573</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-04-30 14:27:08</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:42</sys_updated_on>
     </sys_script_include>
 </record_update>

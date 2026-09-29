@@ -12,7 +12,15 @@
         <script><![CDATA[gs.include("IllumioConstants");
 var IllumioUtils = Class.create();
 IllumioUtils.prototype = {
-    initialize: function() {},
+    /**
+     * @param {String} [jobSysId] sys_id of the scheduled job this instance is working for. Only
+     *                 used to correlate log lines. Most of the 25 construction sites have no job
+     *                 -- Business Rules, UI Actions, AJAX -- and those lines are prefixed [-].
+     *                 Methods that take a jobSysId of their own re-point the logger themselves.
+     */
+    initialize: function(jobSysId) {
+        this.logger = new IllumioLogger(jobSysId, 'IllumioUtils');
+    },
 
     VALID_IP_REGEX: /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/,
 
@@ -21,8 +29,64 @@ IllumioUtils.prototype = {
      * @param {String} jobId System id of the scheduled job
      * @param {JSON} jobContent Object to add in the job record
      */
+    /**
+     * A progress sink that writes to a scheduled job's log.
+     *
+     * IllumioSyncFilterUtils takes an `onProgress(message)` and does not know what a scheduled
+     * job is -- it is called from UI Actions that have none. This is the adapter, in one place
+     * because sync, deletion and every preview want the same behaviour: append the line to the
+     * job log, and do nothing at all when there is no job.
+     *
+     * Each call is a read and a write of the job record. That is affordable because the lines
+     * are per filter and per term, not per row -- anything per row would have to buffer instead.
+     *
+     * @param {String} jobSysId sys_id of the scheduled job, nil for a sink that discards
+     * @returns {Function} Callback for onProgress
+     */
+    jobProgressLogger: function(jobSysId) {
+        var self = this;
+
+        if (gs.nil(jobSysId)) {
+            return function() {};
+        }
+
+        return function(message) {
+            self.updateJobRecord(jobSysId, { logs: message });
+        };
+    },
+
+    /**
+     * Same signature as jobProgressLogger, syslog only.
+     *
+     * For commentary that is emitted once per BATCH or per WINDOW. Those lines scale with the
+     * size of the run -- a 100k sync writes one per payload row, one per discovery window -- and
+     * on the job record that is a read-append-write of the whole `logs` field for each of them,
+     * against a field with a finite max_length. They belong in the correlated trail, where they
+     * cost one insert each and can be pulled back with
+     *
+     *     message STARTSWITH "[<job sys_id>]"
+     *
+     * Deliberately NOT nil-guarded into a no-op the way jobProgressLogger is: a line with no job
+     * id still belongs in syslog, it just carries the `[-]` prefix. The guard exists there
+     * because updateJobRecord with no sys_id has nothing to write to.
+     *
+     * The job record keeps the counts that bound these lines -- "Payload Batches: N",
+     * "Processing N records in M batches", "Total records found: N" -- and the phase-end
+     * summaries. Per-batch detail is reachable from those, not absent.
+     *
+     * @param {String} jobSysId sys_id of the scheduled job; nil degrades the prefix, not the line
+     * @returns {Function} function(message)
+     */
+    jobTraceLogger: function(jobSysId) {
+        var self = this;
+
+        return function(message) {
+            self.logger.setContext(jobSysId).info(String(message));
+        };
+    },
+
     updateJobRecord: function(jobId, jobContent) {
-        var jobGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
+        var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
 
         if (jobGr.get(jobId)) {
 
@@ -35,16 +99,33 @@ IllumioUtils.prototype = {
                         if (key != "logs") {
                             jobGr[key] = jobContent[key];
                         } else {
-                            jobGr[key] += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] ' + jobContent[key];
+                            // W1: no per-line timestamp. The same line is emitted to
+                            // syslog_app_scope, which timestamps it there, and the job log is a
+                            // milestone list rather than a trace.
+                            var existing = jobGr.getValue('logs') || '';
+                            jobGr.logs = existing + (existing ? '\n' : '') + jobContent[key];
+
+                            // W2: the job log and Application Logs carry the same milestones.
+                            // Anything worth a line on the job record is worth one in the
+                            // correlated trail, where it sits in order next to the detail that
+                            // produced it -- and where it is still readable after the job record
+                            // has been trimmed or the run cancelled. This is the funnel, so every
+                            // caller of updateJobRecord gets it without changing.
+                            //
+                            // Context is set from the jobId argument rather than left at whatever
+                            // this instance was constructed with: one IllumioUtils is reused
+                            // across jobs in the discovery and sync paths, and a milestone filed
+                            // under the wrong job is worse than one filed under none.
+                            this.logger.setContext(jobId).info(String(jobContent[key]));
                         }
                     }
                 }
                 jobGr.update();
             } else {
-                gs.info('[_updateJobRecord] Given job is invalidated. Aborting further actions');
+                this.logger.info('[_updateJobRecord] Given job is invalidated. Aborting further actions');
             }
         } else {
-            gs.error('[_updateJobRecord] Scheduled job record for given sys_id (' + jobId + ') does not exist.');
+            this.logger.error('[_updateJobRecord] Scheduled job record for given sys_id (' + jobId + ') does not exist.');
         }
     },
 
@@ -59,17 +140,25 @@ IllumioUtils.prototype = {
      * @param {String} message Final log line, also shown as the current operation
      */
     finalizeCancelledJob: function(jobId, message) {
-        var jobGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
+        var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
 
         if (!jobGr.get(jobId)) {
-            gs.error('[finalizeCancelledJob] Scheduled job record for given sys_id (' + jobId + ') does not exist.');
+            this.logger.error('[finalizeCancelledJob] Scheduled job record for given sys_id (' + jobId + ') does not exist.');
             return;
         }
 
-        jobGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] ' + message;
+        // W1: no per-line timestamp -- see updateJobRecord above. job_completed below is the
+        // timestamp that matters on this particular line.
+        var existingLogs = jobGr.getValue('logs') || '';
+        jobGr.logs = existingLogs + (existingLogs ? '\n' : '') + message;
         jobGr.current_operation = message;
         jobGr.job_completed = new GlideDateTime();
         jobGr.update();
+
+        // W2: both sinks, same as updateJobRecord. This one especially -- it is the last line a
+        // cancelled run writes anywhere, and it is the line someone asking "where did it stop"
+        // goes looking for.
+        this.logger.setContext(jobId).info(String(message));
     },
 
     /**
@@ -79,7 +168,7 @@ IllumioUtils.prototype = {
      **/
     getCritical: function(configSysId) {
         var criticalGroupConfig = {};
-        var criticalConfigGr = new GlideRecordSecure('x_illu2_illumio_illumio_critical_label_group_configuration');
+        var criticalConfigGr = new GlideRecordSecure(TABLE_CRITICAL_LABEL_GROUP_CONFIG);
         criticalConfigGr.addQuery('illumio_pce_configuration', configSysId);
         criticalConfigGr.query();
         while (criticalConfigGr.next()) {
@@ -114,7 +203,7 @@ IllumioUtils.prototype = {
         }
         for (var type in criticalGroupConfig) {
             if (!criticalGroupConfig[type]['visited']) {
-                gs.info('The Critical Label Group ({0}) for the Configuration named {1} does not match any label groups at PCE', [criticalGroupConfig[type]['groupName'], pceConfig.getDisplayValue()]);
+                this.logger.info('The Critical Label Group ({0}) for the Configuration named {1} does not match any label groups at PCE', [criticalGroupConfig[type]['groupName'], pceConfig.getDisplayValue()]);
             }
         }
         //If any invalid Critical Group Configuration is found, we will terminate the process
@@ -131,7 +220,7 @@ IllumioUtils.prototype = {
             ) {
                 criticalGroupConfig[response[resIndex].key]['visited'] = true;
                 for (var labelIndex = 0; labelIndex < response[resIndex].labels.length; labelIndex++) {
-                    labelGroupGr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_label_group_details');
+                    labelGroupGr = new GlideRecordSecure(TABLE_PCE_LABEL_GROUP_DETAILS);
                     labelGroupGr.label_group_name = response[resIndex].name;
                     labelGroupGr.label_group_path = response[resIndex].href;
                     labelGroupGr.label_group_type = response[resIndex].key;
@@ -139,7 +228,7 @@ IllumioUtils.prototype = {
                     labelGroupGr.label_path = response[resIndex].labels[labelIndex].href;
                     labelGroupGr.illumio_pce_configuration = pceConfig.getUniqueValue();
                     if (!labelGroupGr.insert()) {
-                        gs.error(
+                        this.logger.error(
                             '[parseLabelsInResponse] Error while inserting the record'
                         );
                     }
@@ -157,7 +246,7 @@ IllumioUtils.prototype = {
      */
     fetchLabelGroupsAndLabelsFromPCE: function(pceConfig) {
         try {
-            var lgDetailsGr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_label_group_details');
+            var lgDetailsGr = new GlideRecordSecure(TABLE_PCE_LABEL_GROUP_DETAILS);
             lgDetailsGr.addQuery('illumio_pce_configuration', pceConfig.getUniqueValue());
             lgDetailsGr.query();
             lgDetailsGr.deleteMultiple();
@@ -166,7 +255,7 @@ IllumioUtils.prototype = {
 
             if (!gs.nil(criticalGroupConfig)) {
                 if (!(pceConfig.mid_server.status == MID_SERVER_UP_STATUS && pceConfig.mid_server.validated == 'true')) {
-                    gs.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
+                    this.logger.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
                     return false;
                 }
 
@@ -196,23 +285,28 @@ IllumioUtils.prototype = {
             }
             return true;
         } catch (ex) {
-            gs.error('Exception while fetching data from PCE. ', ex);
+            this.logger.error('Exception while fetching data from PCE. ', ex);
             return false;
         }
     },
 
     /**
-     * Fetch the details of label group from label groups table
-     * @param {String} pceConfigSysId SysId of the PCE Configuration
-     * @returns {JSON} JSON object of the critical label group and its labels
+     * The critical label values of a PCE Configuration, by dimension.
+     *
+     * getCritical says which label group is critical for each dimension; this expands each of
+     * those groups into the label values it contains. A workload whose label value for a
+     * dimension appears in this list is skipped by the sync -- see hasCriticalLabelConflict.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @returns {Object} { dimensionKey: [labelValue, ...] }
      */
-    getDataFromTable: function(pceConfigSysId) {
+    getCriticalLabelsForPceConfig: function(pceConfigSysId) {
         var criticalGroupConfig = this.getCritical(pceConfigSysId);
         var dataObj = {};
         if (!gs.nil(criticalGroupConfig)) {
             for (var type in criticalGroupConfig) {
                 dataObj[type] = [];
-                var labelGroupGr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_label_group_details');
+                var labelGroupGr = new GlideRecordSecure(TABLE_PCE_LABEL_GROUP_DETAILS);
                 labelGroupGr.addQuery('illumio_pce_configuration', pceConfigSysId);
                 labelGroupGr.addQuery('label_group_name', criticalGroupConfig[type]['groupName']);
                 labelGroupGr.addQuery('label_group_type', type);
@@ -234,7 +328,7 @@ IllumioUtils.prototype = {
     removeRec: function(rec, sys_id) {
         var ax;
         while ((ax = rec.indexOf(sys_id + "")) !== -1) {
-            gs.info("Skipped workload as label is critical (sys_id: " + sys_id + ")");
+            this.logger.info("Skipped workload as label is critical (sys_id: " + sys_id + ")");
             rec.splice(ax, 1);
         }
         return rec;
@@ -250,7 +344,7 @@ IllumioUtils.prototype = {
         try {
 
             for (var configIndex in configSysIds) {
-                var countGa = new GlideAggregate('x_illu2_illumio_illumio_pce_label_group_details');
+                var countGa = new GlideAggregate(TABLE_PCE_LABEL_GROUP_DETAILS);
                 countGa.addQuery("illumio_pce_configuration", configSysIds[configIndex]);
                 countGa.groupBy("label_group_name");
 				countGa.addAggregate('COUNT');
@@ -262,7 +356,7 @@ IllumioUtils.prototype = {
 				countObject[configSysIds[configIndex]] = count;
             }
         } catch (err) {
-            gs.error("Error while fetching the count of labels", err);
+            this.logger.error("Error while fetching the count of labels", err);
         } finally {
             return countObject;
         }
@@ -282,7 +376,7 @@ IllumioUtils.prototype = {
 
             // for each configuration fetch critical label data
             for (var configSysId in selectedRecordsObject) {
-                var labelData = this.getDataFromTable(configSysId);
+                var labelData = this.getCriticalLabelsForPceConfig(configSysId);
                 arrRecords = selectedRecordsObject[configSysId];
                 retRec = [];
 
@@ -296,7 +390,7 @@ IllumioUtils.prototype = {
                         if (gs.nil(labelData[type]) || labelData[type].length == 0)
                             continue;
 
-                        var fieldValueGr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_workload_field_value');
+                        var fieldValueGr = new GlideRecordSecure(TABLE_PCE_WORKLOAD_FIELD_VALUE);
                         fieldValueGr.addQuery('illumio_pce_workload', arrRecords[arrIndex]);
                         fieldValueGr.addQuery('illumio_label_dimension.key', type);
                         fieldValueGr.addQuery(
@@ -321,14 +415,14 @@ IllumioUtils.prototype = {
                         retRec.push(arrRecords[arrIndex] + '');
                         totalRecords += 1;
                     } else {
-                        gs.info('Skipped workload as label is critical (sys_id: {0})', arrRecords[arrIndex]);
+                        this.logger.info('Skipped workload as label is critical (sys_id: {0})', arrRecords[arrIndex]);
                     }
 
                 }
                 retObject[configSysId] = retRec;
             }
         } catch (exc) {
-            gs.error('Exception occurred while checking critical records', exc);
+            this.logger.error('Exception occurred while checking critical records', exc);
         } finally {
             return {
                 filteredRecords: retObject,
@@ -356,7 +450,7 @@ IllumioUtils.prototype = {
             return result;
 
         } catch (ex) {
-            gs.error("Exception occurred while getting total number of records", ex);
+            this.logger.error("Exception occurred while getting total number of records", ex);
         }
     },
 
@@ -449,12 +543,12 @@ IllumioUtils.prototype = {
 
                 cmdbValue = interfaceObject[cmdbKey]["cmdb_value"];
                 if (gs.nil(visitedIps[cmdbValue]) && this.canSyncIP(cmdbKey, state[cmdbKey], hostname))
-                    gs.info("Skipping IP address {0} for workload with hostname {1} as there are already {2} IP addresses in the PCE", [cmdbKey, hostname, MAX_IP_ADDRESSES]);
+                    this.logger.info("Skipping IP address {0} for workload with hostname {1} as there are already {2} IP addresses in the PCE", [cmdbKey, hostname, MAX_IP_ADDRESSES]);
 
                 cmdbIndex++;
             }
         } catch (ex) {
-            gs.error("[getInterfacesObject] Exception occurred while generating valid interfaces object. Exception", ex);
+            this.logger.error("[getInterfacesObject] Exception occurred while generating valid interfaces object. Exception", ex);
         } finally {
             return {
                 interfaces: interfaces,
@@ -490,15 +584,15 @@ IllumioUtils.prototype = {
         switch (state) {
             case STATES.INVALID:
                 if (key != "umw0")
-                    gs.error("Skipping IP address " + key + " for workload with hostname " + hostname + " as there is an invalid IP address");
+                    this.logger.error("Skipping IP address " + key + " for workload with hostname " + hostname + " as there is an invalid IP address");
                 else
-                    gs.error("Skipping Public IP address for workload with hostname " + hostname + " as there is an invalid IP address");
+                    this.logger.error("Skipping Public IP address for workload with hostname " + hostname + " as there is an invalid IP address");
                 return false;
             case STATES.NOT_MAPPED_AND_VALID:
                 if (key != "umw0")
-                    gs.error("Skipping IP address " + key + " for workload with hostname " + hostname + " as it is not mapped in field mapping");
+                    this.logger.error("Skipping IP address " + key + " for workload with hostname " + hostname + " as it is not mapped in field mapping");
                 else
-                    gs.error("Skipping Public IP address for workload with hostname " + hostname + " as it is not mapped in field mapping");
+                    this.logger.error("Skipping Public IP address for workload with hostname " + hostname + " as it is not mapped in field mapping");
                 return false;
             case STATES.VALID:
                 return true;
@@ -533,7 +627,7 @@ IllumioUtils.prototype = {
                 return true;
             }
             var sourceTable = current.getValue("source_table");
-            var workloadFieldValueGr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_workload_field_value');
+            var workloadFieldValueGr = new GlideRecordSecure(TABLE_PCE_WORKLOAD_FIELD_VALUE);
             workloadFieldValueGr.addQuery('illumio_pce_workload', current.getUniqueValue());
             workloadFieldValueGr.addQuery('illumio_label_dimension.key', "IN", mappedFields[sourceTable]);
             workloadFieldValueGr.query();
@@ -564,7 +658,7 @@ IllumioUtils.prototype = {
             }
             return false;
         } catch (ex) {
-            gs.error("Exception while checking conflicts", ex);
+            this.logger.error("Exception while checking conflicts", ex);
         }
     },
     /**
@@ -576,7 +670,7 @@ IllumioUtils.prototype = {
         switch (type) {
             case CLIENT_ERROR_TYPE:
                 gs.addErrorMessage(obj.message);
-                gs.error(obj.message);
+                this.logger.error(obj.message);
                 if (current)
                     current.setAbortAction(true);
                 break;
@@ -666,13 +760,13 @@ IllumioUtils.prototype = {
             if (this.scheduledJobsGr.job_status == "cancelled") return;
 
             this.scheduledJobsGr.job_status = 'failed';
-            this.scheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] ' + operation;
-            this.scheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] Authentication failed';
+            this.scheduledJobsGr.logs += '\n' + operation;
+            this.scheduledJobsGr.logs += '\nAuthentication failed';
             this.scheduledJobsGr.job_completed = new GlideDateTime();
             this.scheduledJobsGr.update();
-            gs.error(message);
+            this.logger.error(message);
         } else {
-            gs.error("Cannot find the scheduled job with sys_id: " + jobSysId);
+            this.logger.error("Cannot find the scheduled job with sys_id: " + jobSysId);
         }
     },
 
@@ -735,7 +829,7 @@ IllumioUtils.prototype = {
      * @param {object} GlideRecord object of PCE configuration
      */
     persistLabelDimensions: function(pceConfig) {
-        var labelDimensionGr = new GlideRecordSecure("x_illu2_illumio_illumio_label_dimension");
+        var labelDimensionGr = new GlideRecordSecure(TABLE_LABEL_DIMENSION);
         labelDimensionGr.addQuery("illumio_pce_configuration", pceConfig.getUniqueValue());
         labelDimensionGr.addNotNullQuery("href");
         labelDimensionGr.query();
@@ -796,7 +890,7 @@ IllumioUtils.prototype = {
             };
 
             if (!(pceConfig.mid_server.status == MID_SERVER_UP_STATUS && pceConfig.mid_server.validated == 'true')) {
-                gs.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
+                this.logger.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
                 return returnDict;
             }
 
@@ -814,7 +908,7 @@ IllumioUtils.prototype = {
             returnDict["status"] = true;
 
         } catch (exc) {
-            gs.error("Exception while making the API call to get the label dimensions for PCE configuration " + pceConfig.getValue("name") + ". Error - " + exc);
+            this.logger.error("Exception while making the API call to get the label dimensions for PCE configuration " + pceConfig.getValue("name") + ". Error - " + exc);
         }
         return returnDict;
     },
@@ -826,7 +920,7 @@ IllumioUtils.prototype = {
      */
     createOrUpdateLabelDimensionRecord: function(details, pceConfig) {
         try {
-            var labelDimensionGr = new GlideRecordSecure("x_illu2_illumio_illumio_label_dimension");
+            var labelDimensionGr = new GlideRecordSecure(TABLE_LABEL_DIMENSION);
             labelDimensionGr.addQuery("key", details["key"]);
             labelDimensionGr.addQuery("illumio_pce_configuration", pceConfig.getUniqueValue());
             labelDimensionGr.query();
@@ -847,7 +941,7 @@ IllumioUtils.prototype = {
             labelDimensionGr.setWorkflow(false);
             labelDimensionGr.update();
         } catch (exc) {
-            gs.warn("Error occurred while creating/updating the record for Label Dimension " + details["key"] + ". ");
+            this.logger.warn("Error occurred while creating/updating the record for Label Dimension " + details["key"] + ". ");
         }
     },
 
@@ -856,13 +950,13 @@ IllumioUtils.prototype = {
      */
     fetchLabelDimensionsFromPCE: function() {
         try {
-            var pceConfig = new GlideRecordSecure("x_illu2_illumio_illumio_pce_conf");
+            var pceConfig = new GlideRecordSecure(TABLE_PCE_CONF);
             pceConfig.query();
 
             while (pceConfig.next()) {
                 var responseDict = this.getLabelDimensions(pceConfig);
                 if (responseDict && !responseDict["status"]) {
-                    gs.error("Failed fetching of Label Dimensions from Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
+                    this.logger.error("Failed fetching of Label Dimensions from Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
                     this.persistLabelDimensions(pceConfig);
                     continue;
                 }
@@ -875,14 +969,14 @@ IllumioUtils.prototype = {
                     for (var i = 0; i < response.length; i++) {
                         this.createOrUpdateLabelDimensionRecord(response[i], pceConfig);
                     }
-                    gs.debug("Successfully fetched " + response.length + " label dimensions from Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
+                    this.logger.debug("Successfully fetched " + response.length + " label dimensions from Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
                 } else {
-                    gs.error("Error while fetching label dimensions from Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
+                    this.logger.error("Error while fetching label dimensions from Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
                     this.persistLabelDimensions(pceConfig);
                 }
             }
         } catch (exc) {
-            gs.error("Exception while fetching label dimensions from PCE. " + exc);
+            this.logger.error("Exception while fetching label dimensions from PCE. " + exc);
         }
     },
 
@@ -896,7 +990,7 @@ IllumioUtils.prototype = {
         try {
             var matchFound = false;
 
-            var pceConfig = new GlideRecordSecure("x_illu2_illumio_illumio_pce_conf");
+            var pceConfig = new GlideRecordSecure(TABLE_PCE_CONF);
             if (pceConfig.get(pceConfigSysId)) {
                 var responseDict = this.getLabelDimensions(pceConfig);
                 if (!responseDict["status"]) {
@@ -913,15 +1007,15 @@ IllumioUtils.prototype = {
 
                         if (response[i]["key"] == key) {
                             matchFound = true;
-                            gs.debug("A label dimension with key " + key + " is already present on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". Replacing the label dimension details with the ones obtained from Illumio PCE.");
+                            this.logger.debug("A label dimension with key " + key + " is already present on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". Replacing the label dimension details with the ones obtained from Illumio PCE.");
                         }
                     }
                 } else {
-                    gs.error("Error while validating the creation of label dimension with key - " + key + " for the PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
+                    this.logger.error("Error while validating the creation of label dimension with key - " + key + " for the PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
                 }
             }
         } catch (exc) {
-            gs.error("Error while validating the creation of label dimension with key - " + key + ". Error - " + exc);
+            this.logger.error("Error while validating the creation of label dimension with key - " + key + ". Error - " + exc);
             return false;
         }
         return matchFound;
@@ -933,7 +1027,7 @@ IllumioUtils.prototype = {
      * This method would retry creating the label dimensions aaded on ServiceNow onto the coorelating Illumio PCE tenant.
      */
     retryFailedLabelDimensionCreation: function() {
-        var labelDimensionGr = new GlideRecordSecure("x_illu2_illumio_illumio_label_dimension");
+        var labelDimensionGr = new GlideRecordSecure(TABLE_LABEL_DIMENSION);
         labelDimensionGr.addNullQuery("href");
         labelDimensionGr.query();
         while (labelDimensionGr.next()) {
@@ -946,7 +1040,7 @@ IllumioUtils.prototype = {
                     "illumio_pce_configuration": labelDimensionGr.getValue("illumio_pce_configuration")
                 };
 
-                gs.debug("Trying to create label dimension " + details["key"] + " on Illumio PCE for PCE configuration " + details["illumio_pce_configuration"] + ".");
+                this.logger.debug("Trying to create label dimension " + details["key"] + " on Illumio PCE for PCE configuration " + details["illumio_pce_configuration"] + ".");
 
                 var responseDict = this.createLabelDimensionsInPCE(details);
                 if (responseDict["status"] && !gs.nil(responseDict["href"])) {
@@ -958,7 +1052,7 @@ IllumioUtils.prototype = {
                 labelDimensionGr.setWorkflow(false);
                 labelDimensionGr.update();
             } catch (exc) {
-                gs.error("Error while retrying to create the label dimension " + labelDimensionGr.getValue("key") + ". Error - " + exc);
+                this.logger.error("Error while retrying to create the label dimension " + labelDimensionGr.getValue("key") + ". Error - " + exc);
             }
         }
     },
@@ -973,10 +1067,10 @@ IllumioUtils.prototype = {
             "href": "",
         };
         try {
-            var pceConfig = new GlideRecordSecure("x_illu2_illumio_illumio_pce_conf");
+            var pceConfig = new GlideRecordSecure(TABLE_PCE_CONF);
             if (pceConfig.get(labelDimensionData["illumio_pce_configuration"])) {
                 if (!(pceConfig.mid_server.status == MID_SERVER_UP_STATUS && pceConfig.mid_server.validated == 'true')) {
-                    gs.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
+                    this.logger.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
                     returnDict["status"] = false;
                     return returnDict;
                 }
@@ -1005,19 +1099,19 @@ IllumioUtils.prototype = {
 
                 if (response_status >= 200 && response_status < 300) {
                     returnDict["href"] = response["href"];
-                    gs.debug("Label dimension " + labelDimensionData["key"] + " created successfully on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
+                    this.logger.debug("Label dimension " + labelDimensionData["key"] + " created successfully on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
                     returnDict["status"] = true;
                 } else if (response_status == 406) {
                     response = response[0];
-                    gs.error("Error while creating label dimension " + labelDimensionData["key"] + " on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". " + response["message"] + "");
+                    this.logger.error("Error while creating label dimension " + labelDimensionData["key"] + " on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". " + response["message"] + "");
                     returnDict["status"] = false;
                 } else {
-                    gs.error("Error while creating label dimension " + labelDimensionData["key"] + " on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ", it will be retried with the next scheduled script execution. Status code - " + response_status + ". Response - " + JSON.stringify(response));
+                    this.logger.error("Error while creating label dimension " + labelDimensionData["key"] + " on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ", it will be retried with the next scheduled script execution. Status code - " + response_status + ". Response - " + JSON.stringify(response));
                     returnDict["status"] = false;
                 }
             }
         } catch (exc) {
-            gs.error("Exception while creating label dimension on Illumio PCE. " + exc);
+            this.logger.error("Exception while creating label dimension on Illumio PCE. " + exc);
         }
         return returnDict;
     },
@@ -1028,10 +1122,10 @@ IllumioUtils.prototype = {
      */
     updateLabelDimension: function(labelDimensionData) {
         try {
-            var pceConfig = new GlideRecordSecure("x_illu2_illumio_illumio_pce_conf");
+            var pceConfig = new GlideRecordSecure(TABLE_PCE_CONF);
             if (pceConfig.get(labelDimensionData["illumio_pce_configuration"])) {
                 if (!(pceConfig.mid_server.status == MID_SERVER_UP_STATUS && pceConfig.mid_server.validated == 'true')) {
-                    gs.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
+                    this.logger.error("The configured MID Server with configuration record " + pceConfig.getValue("name") + " is down.");
                     return false;
                 }
 
@@ -1058,15 +1152,15 @@ IllumioUtils.prototype = {
                 var response = JSON.parse(outputs['response']); // JSON
 
                 if (response_status >= 200 && response_status < 300) {
-                    gs.debug("Label Dimension " + labelDimensionData["key"] + " updated successfully on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
+                    this.logger.debug("Label Dimension " + labelDimensionData["key"] + " updated successfully on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ".");
                     return true;
                 } else {
-                    gs.error("Error while updating label dimension " + labelDimensionData["key"] + " on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
+                    this.logger.error("Error while updating label dimension " + labelDimensionData["key"] + " on Illumio PCE for PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
                     return false;
                 }
             }
         } catch (exc) {
-            gs.error("Exception while updating label dimension on Illumio PCE. " + exc);
+            this.logger.error("Exception while updating label dimension on Illumio PCE. " + exc);
         }
         return false;
     },
@@ -1077,7 +1171,7 @@ IllumioUtils.prototype = {
      * @returns SysId of the PCE Configuration record
      */
     getConfigurationId: function(jobSysId) {
-        var jobGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
+        var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
         if (jobGr.get(jobSysId)) {
             return jobGr.getValue('illumio_pce_configuration');
         }
@@ -1101,15 +1195,34 @@ IllumioUtils.prototype = {
             },
             cancelJobOnLimitExceed = false,
             limitExceeded = false,
+            limitError = false,
+            limitErrorMessage = '',
             syncUtils = new IllumioSyncUtils(),
             logMessage = {};
         // for each configuration fetch field mapping
         for (var configSysId in checkedRecords) {
-            var workloadGr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_workload');
+            var workloadGr = new GlideRecordSecure(TABLE_PCE_WORKLOAD);
             var arrRecords = checkedRecords[configSysId],
                 retVal = [];
-            var mappedFields = configUtil.getMappedFields(configSysId);
-            var wlLimitObject = thresholdLimit.getThresholdLimit(configSysId);
+            var mappedFields = configUtil.getLabelDimensionsBySourceTable(configSysId);
+
+            var wlLimitObject;
+            try {
+                wlLimitObject = thresholdLimit.getThresholdLimit(configSysId);
+            } catch (limitEx) {
+                // Limits that cannot be resolved are not the same as no limits. Nothing is
+                // returned for any configuration, so the caller cannot sync a partial set under
+                // a threshold nobody could read.
+                limitError = true;
+                limitErrorMessage = 'Threshold limits could not be resolved. Nothing was synced.';
+                limitExceeded = true;
+                this.logger.error('[getWorkloadData] ' + limitErrorMessage + ' ' + limitEx);
+                retObject = {};
+                count = 0;
+                cancelJobOnLimitExceed = true;
+                break;
+            }
+
             var isLimitExceed = false;
 
             // for each sys_id prepare workload object
@@ -1157,7 +1270,7 @@ IllumioUtils.prototype = {
                             }
                         }
                     } catch (err) {
-                        gs.info("Exception occurred while preparing workload object. Error", err);
+                        this.logger.info("Exception occurred while preparing workload object. Error", err);
                     }
                 }
             }
@@ -1176,214 +1289,23 @@ IllumioUtils.prototype = {
             totalRecords: count,
             cancelJobOnLimitExceed: cancelJobOnLimitExceed,
             limitExceeded: limitExceeded,
+            // limitExceeded means "a configured limit was hit". limitError means the limits
+            // could not be read at all -- a different thing that used to be reported as the
+            // first one, sending the operator to check a threshold that was never the problem.
+            limitError: limitError,
+            limitErrorMessage: limitErrorMessage,
             logMessage: logMessage
         };
     },
 
-    /**
-     * Phase 2 of the sync pipeline: turn a list of workload sys_ids into payload objects, one
-     * bounded chunk at a time.
-     *
-     * Phase 1 decided WHICH workloads (getEligibleWorkloadSysIdsByConfig, or the whole eligible
-     * population when no Sync Filter exists) and must have finished before this starts, so that
-     * a workload matched by two filters is built once. This function decides WHAT each one
-     * becomes, and never holds more than one chunk of objects at a time.
-     *
-     * Every per-workload query the old path ran is now per chunk:
-     *
-     *   critical labels    skipRecordsForSync, 1 query per workload per critical dimension
-     *   label values       prepareWorkloadObject, 1 query per workload
-     *   label hrefs        getUseCreateLabelsList, 1 query per workload per dimension
-     *
-     * all three answered from maps built once per chunk and released with it. The PCE labels
-     * mapping table holds ~100k rows in production, so those maps must never become per-run.
-     *
-     * Parameterised rather than hardcoded because the deletion path reuses it: the chunk
-     * predicate, what a row becomes, and where the payload lands are the only three things that
-     * differ between syncing and deleting.
-     *
-     * @param {Object} params
-     *   {String}   pceConfigSysId  sys_id of the PCE Configuration
-     *   {Array}    sysIds          Workload sys_ids from phase 1
-     *   {String}   chunkQuery      Extra conditions applied to every chunk, e.g.
-     *                              "duplicate=false^conflicts=true". Cheap here and it is what
-     *                              lets phase 1 skip the eligibility pass entirely.
-     *   {Boolean}  skipCriticalLabels  Drop workloads whose critical labels disagree with the PCE
-     *   {Boolean}  applyThreshold  Enforce the configured workload/label creation limits
-     *   {Object}   [wlLimitObject] Limit object, fetched when omitted
-     *   {Function} appendRow       Called with (workloadObject) per surviving workload
-     *   {Function} [buildShell]    Builds one row object from its GlideRecord. Defaults to
-     *                              prepareWorkloadShell. Return null to drop the record -- that
-     *                              happens before threshold accounting, so an ineligible workload
-     *                              never spends budget.
-     *   {Boolean}  [skipLabelData] Skip the label pass entirely. The deletion path reads three
-     *                              columns off the record and never looks at a label, so without
-     *                              this it would pay two extra queries per chunk plus a
-     *                              selectLabelData call per workload to build maps it discards.
-     *   {String}   [operation]     Fixed threshold operation ("delete"). Defaults to create/update
-     *                              chosen per workload from known_to_pce.
-     *   {Boolean}  [secure]        Read the chunk through ACLs. The deletion path does.
-     * @returns {Object} { processed, skippedCritical, skippedLimit, cancelJob, limitExceeded, logMessage }
-     */
-    runWorkloadChunks: function(params) {
-        var self = this;
-        var syncUtils = new IllumioSyncUtils();
-        var repo = new IllumioSyncRepoUtils(syncUtils);
-
-        var outcome = {
-            processed: 0,
-            skippedCritical: 0,
-            skippedLimit: 0,
-            cancelJob: false,
-            limitExceeded: false,
-            logMessage: ''
-        };
-
-        if (!params.sysIds || params.sysIds.length === 0) {
-            return outcome;
-        }
-
-        var configSysId = params.pceConfigSysId;
-        // Only the default shell builder needs the field mappings; a caller supplying its own
-        // builder would be paying for a configuration read it never consults.
-        var mappedFields = params.buildShell ?
-            null : new IllumioGetPCEConfiguration().getMappedFields(configSysId);
-        var criticalLabels = params.skipCriticalLabels ? this.getDataFromTable(configSysId) : {};
-        var wlLimitObject = params.wlLimitObject ||
-            new IllumioThresholdLimit().getThresholdLimit(configSysId);
-        var operationByKind = {
-            "managed": "update",
-            "unmanaged": "update",
-            "unknown": "create"
-        };
-
-        var chunks = syncUtils.chunkArray(params.sysIds, syncUtils.WORKLOAD_CHUNK_SIZE);
-
-        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-            // Pass one: the record-derived half of each object, which needs the GlideRecord.
-            var shells = [];
-            var shellSysIds = [];
-
-            repo.eachWorkloadInBatch(chunks[chunkIndex], params.chunkQuery, function(workloadGr) {
-                try {
-                    var shell = params.buildShell ?
-                        params.buildShell(workloadGr) :
-                        self.prepareWorkloadShell(workloadGr, mappedFields);
-
-                    // A builder returns null for a record it wants dropped, and does its own
-                    // tallying. Dropping here rather than inside appendRow is what keeps the
-                    // eligibility test ahead of threshold accounting.
-                    if (!shell) {
-                        return;
-                    }
-
-                    shells.push(shell);
-                    shellSysIds.push(workloadGr.getUniqueValue());
-                } catch (shellEx) {
-                    gs.error('[runWorkloadChunks] Skipped workload ' + workloadGr.getUniqueValue() +
-                        ': ' + shellEx);
-                }
-            }, params.secure);
-
-            if (shells.length === 0) {
-                continue;
-            }
-
-            // Pass two: the label half, in bulk for the whole chunk. Skipped wholesale by callers
-            // that do not act on labels -- see skipLabelData.
-            var labelValuesByWorkload = {};
-            var labelDataByWorkload = {};
-            var hrefByPair = {};
-
-            if (!params.skipLabelData) {
-                labelValuesByWorkload = repo.getLabelValuesByWorkload(shellSysIds);
-                for (var shellIndex = 0; shellIndex < shells.length; shellIndex++) {
-                    labelDataByWorkload[shells[shellIndex].sys_id] = syncUtils.selectLabelData(
-                        labelValuesByWorkload[shells[shellIndex].sys_id] || {},
-                        shells[shellIndex].updateFields);
-                }
-                hrefByPair = repo.getLabelHrefsByPair(configSysId,
-                    syncUtils.collectLabelPairs(labelDataByWorkload));
-            }
-
-            for (var index = 0; index < shells.length; index++) {
-                var workloadObject = shells[index];
-                var labelValues = labelValuesByWorkload[workloadObject.sys_id] || {};
-
-                if (params.skipCriticalLabels &&
-                    syncUtils.hasCriticalLabelConflict(labelValues, criticalLabels)) {
-                    outcome.skippedCritical++;
-                    gs.info('Skipped workload as label is critical (sys_id: {0})', workloadObject.sys_id);
-                    continue;
-                }
-
-                var createLabelCount = 0;
-
-                if (!params.skipLabelData) {
-                    workloadObject.label_data = labelDataByWorkload[workloadObject.sys_id];
-                    var split = syncUtils.splitLabelsForSync(workloadObject.label_data, hrefByPair);
-                    workloadObject.labels = split.labels;
-                    workloadObject.createlabels = split.createlabels;
-                    createLabelCount = split.createlabels.length;
-                }
-
-                if (params.applyThreshold) {
-                    var operation = params.operation ||
-                        operationByKind[workloadObject.known_to_pce];
-
-                    if (!syncUtils.hasOperationBudget(wlLimitObject, operation)) {
-                        outcome.limitExceeded = true;
-                        wlLimitObject["wlLimit"][operation + "LimitExceeded"] = true;
-                        if (wlLimitObject.cancelJobOnLimitExceed) {
-                            outcome.cancelJob = true;
-                            break;
-                        }
-                        outcome.skippedLimit++;
-                        continue;
-                    }
-
-                    if (!syncUtils.hasLabelCreationBudget(wlLimitObject, createLabelCount)) {
-                        outcome.limitExceeded = true;
-                        wlLimitObject["wlLimit"]["labelCreateLimitExceeded"] = true;
-                        if (wlLimitObject.cancelJobOnLimitExceed) {
-                            outcome.cancelJob = true;
-                            break;
-                        }
-                        outcome.skippedLimit++;
-                        continue;
-                    }
-
-                    syncUtils.consumeBudget(wlLimitObject, operation, createLabelCount);
-                }
-
-                outcome.processed++;
-                params.appendRow(workloadObject);
-            }
-
-            // Released before the next chunk is read rather than left to fall out of scope at
-            // the end of the function: `var` is function-scoped, so a chunk's maps would
-            // otherwise stay reachable for the whole run.
-            shells = null;
-            shellSysIds = null;
-            labelValuesByWorkload = null;
-            labelDataByWorkload = null;
-            hrefByPair = null;
-
-            if (outcome.cancelJob) {
-                break;
-            }
-        }
-
-        if (outcome.limitExceeded) {
-            outcome.logMessage = this.logLimitExceedMessage(wlLimitObject, configSysId);
-        }
-
-        gs.info('[runWorkloadChunks] ' + outcome.processed + ' workloads prepared, ' +
-            outcome.skippedCritical + ' skipped for critical labels, ' +
-            outcome.skippedLimit + ' skipped for threshold limits');
-
-        return outcome;
-    },
+    // Phase 2 of the sync pipeline -- turning workload sys_ids into finished PCE payload
+    // objects -- moved out to IllumioSyncBuildUtils.prepareWorkloadsForPCE. It was the one
+    // function every sync and every deletion passes through, and it was buried in the middle
+    // of PCE configuration, job records, attachments and discovery. Same move that took the
+    // Sync Filter evaluator (phase 1) out to IllumioSyncFilterUtils; this is the other half.
+    //
+    // No delegating wrapper left behind on purpose. A wrapper is how this file became
+    // coordination of everything in the first place.
 
     /**
      * Log message for threshold limit exceeded
@@ -1421,7 +1343,7 @@ IllumioUtils.prototype = {
         else
             message = "Cancelled the job as " + message + " exceeded";
 
-        gs.info(message + " for Illumio PCE Configuration with sys_id " + configSysId);
+        this.logger.info(message + " for Illumio PCE Configuration with sys_id " + configSysId);
         return message;
     },
 
@@ -1431,6 +1353,23 @@ IllumioUtils.prototype = {
      * @param {Object} mappedFields JSON object of mapped fields
      * @returns {Object}
      */
+    /**
+     * A repository instance cached on this IllumioUtils, for the label dimension map alone.
+     *
+     * Lazy rather than built in initialize, because IllumioUtils is constructed all over the
+     * codebase by callers that never touch a label and should not pay for a repo -- and because
+     * IllumioSyncRepoUtils constructs IllumioSyncUtils, which is a cycle this file keeps lazy on
+     * purpose (same rule as IllumioSyncBuildUtils.initialize).
+     *
+     * @returns {Object} IllumioSyncRepoUtils
+     */
+    _labelDimensionRepo: function() {
+        if (!this._repo) {
+            this._repo = new IllumioSyncRepoUtils();
+        }
+        return this._repo;
+    },
+
     prepareWorkloadObject: function(workloadGr, mappedFields) {
         var workloadObject = this.prepareWorkloadShell(workloadGr, mappedFields);
         var labelValues = {};
@@ -1438,11 +1377,21 @@ IllumioUtils.prototype = {
         // One query for one workload. The chunked sync pipeline does NOT come through here --
         // it builds the same map for a whole chunk in a single query
         // (IllumioSyncRepoUtils.getLabelValuesByWorkload) and calls selectLabelData itself.
-        var labelGr = new GlideRecordSecure("x_illu2_illumio_illumio_pce_workload_field_value");
+        //
+        // The dimension key comes from the cached map rather than a dot-walk, for the reason
+        // given on IllumioSyncRepoUtils.getDimensionKeyBySysId: a dot-walk inside a `next()` loop
+        // is a record load per row, not a join. The stake is far smaller here -- this path is the
+        // "sync checked records" UI Action, bounded by what a user ticks in a list -- but it is
+        // the same defect and there is no reason to leave one copy of it behind. The repo is
+        // cached on `this` so the caller's loop over the checked records builds the map once.
+        var dimensionKeyBySysId = this._labelDimensionRepo().getDimensionKeyBySysId();
+
+        var labelGr = new GlideRecordSecure(TABLE_PCE_WORKLOAD_FIELD_VALUE);
         labelGr.addQuery("illumio_pce_workload", workloadObject["sys_id"]);
         labelGr.query();
         while (labelGr.next()) {
-            var labelDimensionKey = labelGr.illumio_label_dimension.key + "";
+            var labelDimensionKey =
+                dimensionKeyBySysId[labelGr.getValue("illumio_label_dimension")] || "";
             if (labelDimensionKey === "") {
                 continue;
             }
@@ -1467,7 +1416,7 @@ IllumioUtils.prototype = {
      * should keep using prepareWorkloadObject.
      *
      * @param {GlideRecord} workloadGr GlideRecord positioned on a Workload
-     * @param {Object} mappedFields Output of IllumioGetPCEConfiguration.getMappedFields
+     * @param {Object} mappedFields Output of IllumioGetPCEConfiguration.getLabelDimensionsBySourceTable
      * @returns {Object} Workload object without label_data
      */
     prepareWorkloadShell: function(workloadGr, mappedFields) {
@@ -1507,12 +1456,113 @@ IllumioUtils.prototype = {
          * This method is called internally during discovery and sync operations.
          * Hence we do not need ACLs. Use GlideRecord to speedup.
          */
-        var scheduledJobGr = new GlideRecord('x_illu2_illumio_illumio_scheduled_jobs');
+        var scheduledJobGr = new GlideRecord(TABLE_SCHEDULED_JOBS);
         if (scheduledJobGr.get(jobSysId)) {
             return scheduledJobGr.getValue('job_status') == 'cancelled';
         }
 
         return false;
+    },
+
+    /**
+     * The job currently running, if any.
+     *
+     * SCOPED TO A PCE CONFIGURATION when given one. It was unconditionally global, and that was
+     * a deliberate choice resting on two shared resources that a second concurrent run would
+     * corrupt:
+     *
+     *   1. IllumioSyncRepoUtils.deleteStalePayloadRows swept "every row that is not this job"
+     *      from tables with no configuration column, so a second run deleted the first's
+     *      in-flight payload rows. Fixed: the sweep is now scoped by whether the owning job is
+     *      still open, so a concurrent run's rows are not candidates.
+     *   2. IllumioGeneratePreviewFile._sweepOrphanFiles deleted every prefix-matching temp file
+     *      on the MID Server, so a second preview deleted the first's part-written file. Fixed:
+     *      the sweep now only considers files older than ORPHAN_MIN_AGE_MS, and an assembling
+     *      file is seconds old by definition.
+     *
+     * Both were the same mistake -- "anything that is not mine is dead" -- and this guard was the
+     * thing holding them together. With both fixed, the global scope was no longer protecting
+     * anything; it was only stopping an operator from previewing configuration B while
+     * configuration A ran a long sync, which was the accepted consequence and is now unnecessary.
+     *
+     * Four entry points were already per-configuration and always had been (IllumioStartDiscovery,
+     * Illumio Data Collection, IllumioDeletionHandler, IllumioManageJobs), so "one job at a time"
+     * was never actually true instance-wide. That mismatch is what made both bugs reachable.
+     *
+     * CALLING IT WITH NO ARGUMENT STILL SEARCHES EVERY CONFIGURATION, on purpose. If a caller
+     * passes an undefined variable by mistake it blocks too much rather than too little, which is
+     * the recoverable direction for a guard.
+     *
+     * Runs as GlideRecord, not GlideRecordSecure, and that is the security-relevant choice rather
+     * than an oversight. This is a guard: a caller who cannot read the scheduled jobs table must
+     * not therefore be told the instance is idle and allowed to start a second job. The client
+     * half of the guard reaches this through IllumioUtilsAJAX, but it only ever learns that
+     * something is running and what it is called -- which anyone able to press the button may
+     * know.
+     *
+     * @param {String} [configSysId] PCE Configuration to limit the search to. Omit to search all.
+     * @returns {Object} { sysId, jobType, startedAt, scopedToConfig } for the oldest running job,
+     *                   or null when nothing is running
+     */
+    getRunningJob: function(configSysId) {
+        var scoped = !gs.nil(configSysId);
+
+        var jobGr = new GlideRecord(TABLE_SCHEDULED_JOBS);
+        jobGr.addQuery('job_status', 'running');
+
+        if (scoped) {
+            jobGr.addQuery('illumio_pce_configuration', configSysId);
+        }
+
+        // Oldest first: if several are somehow running, the one that has been stuck longest is
+        // the one the user needs to know about.
+        jobGr.orderBy('job_started');
+        jobGr.setLimit(1);
+        jobGr.query();
+
+        if (!jobGr.next()) {
+            return null;
+        }
+
+        return {
+            sysId: jobGr.getUniqueValue(),
+            jobType: jobGr.getDisplayValue('job_type') || jobGr.getValue('job_type') || 'Unknown',
+            startedAt: jobGr.getDisplayValue('job_started') || '',
+            scopedToConfig: scoped
+        };
+    },
+
+    /**
+     * The message shown when the running-job guard refuses.
+     *
+     * Shared so the client-side check, the server-side check and the job log all say the same
+     * thing, and so all three name the blocking job -- "another job is running" leaves the user
+     * with nothing to act on, and the action they need is usually Cancel Scheduled Job.
+     *
+     * The wording follows the scope the caller actually asked for. It used to say "Only one job
+     * may run at a time" unconditionally, which is now wrong for the scoped callers and was
+     * always misleading for the four entry points that had their own per-configuration guard --
+     * a user told that would go looking for a job that does not exist on their configuration.
+     *
+     * @param {Object} runningJob Result of getRunningJob
+     * @returns {String} Message naming the job and when it started
+     */
+    describeRunningJob: function(runningJob) {
+        if (!runningJob) {
+            return '';
+        }
+
+        var started = runningJob.startedAt ? ', started ' + runningJob.startedAt : '';
+
+        if (runningJob.scopedToConfig) {
+            return 'Another Illumio job is already running for this PCE Configuration (' +
+                runningJob.jobType + started + '). Only one job may run at a time per ' +
+                'configuration. Wait for it to finish, or cancel it from Scheduled Jobs.';
+        }
+
+        return 'Another Illumio job is already running (' + runningJob.jobType + started +
+            '). Only one job may run at a time. Wait for it to finish, or cancel it from ' +
+            'Scheduled Jobs.';
     },
 
     /**
@@ -1522,7 +1572,7 @@ IllumioUtils.prototype = {
      **/
 
     getHttpConfiguration: function(configSysId) {
-        var pceConfig = new GlideRecordSecure('x_illu2_illumio_illumio_pce_conf');
+        var pceConfig = new GlideRecordSecure(TABLE_PCE_CONF);
         if (pceConfig.get(configSysId)) {
 
             return {
@@ -1536,417 +1586,113 @@ IllumioUtils.prototype = {
         }
     },
 
-    /**
-     * Get eligible workload sys_ids for a PCE Configuration based on its Sync Filters
-     * If multiple active Sync Filters exist, results are UNION'd (OR logic across filters)
-     * @param {String} configSysId sys_id of the PCE Configuration
-     * @returns {Object} { hasFilter: Boolean, sysIds: Array or null }
-     *   - If no active Sync Filter exists: { hasFilter: false, sysIds: null }
-     *   - If Sync Filter(s) exist: { hasFilter: true, sysIds: [...] }
-     */
-    getEligibleWorkloadSysIdsByConfig: function(configSysId, type) {
-        var result = {
-            hasFilter: false,
-            sysIds: null
-        };
-
-        gs.info('[getEligibleWorkloadSysIdsByConfig] Looking for Sync Filters for config: ' + configSysId);
-
-        var syncUtils = new IllumioSyncUtils();
-        var repo = new IllumioSyncRepoUtils(syncUtils);
-
-        // Read as plain objects in one query rather than evaluated straight off a live cursor.
-        // Evaluating a filter opens further queries, and this one would otherwise have to stay
-        // open across all of them.
-        var filters = repo.getActiveSyncFilters(configSysId, type);
-
-        if (filters.length === 0) {
-            gs.info('[getEligibleWorkloadSysIdsByConfig] No active Sync Filters found');
-            return result;
-        }
-
-        result.hasFilter = true;
-
-        // Deduplicated across filters. OR across filters is the rule, and a workload matched by
-        // two of them must still reach the payload once -- syncing it twice would mean a wasted
-        // bulk_update, or a duplicate bulk_create for an unknown workload.
-        var allSysIds = {};
-
-        for (var index = 0; index < filters.length; index++) {
-            var evaluated = this.evaluateSyncFilter(filters[index], syncUtils, repo);
-
-            // A filter that cannot be parsed contributes nothing rather than everything. Failing
-            // open here would sync workloads nobody asked for.
-            if (evaluated.errors.length > 0) {
-                gs.error('[getEligibleWorkloadSysIdsByConfig] Skipping Sync Filter "' +
-                    filters[index].name + '" (' + filters[index].sys_id + '): ' +
-                    evaluated.errors.join(' '));
-                continue;
-            }
-
-            syncUtils.unionInto(allSysIds, evaluated.sysIds);
-        }
-
-        result.sysIds = syncUtils.setToArray(allSysIds);
-        gs.info('[getEligibleWorkloadSysIdsByConfig] Total eligible workloads: ' + result.sysIds.length);
-
-        return result;
-    },
-
-    /**
-     * Generate CSV content for workloads matching active inclusion sync filters
-     * for a PCE Configuration. Queries workloads in batches to avoid IN clause limits.
-     * @param {String} configSysId sys_id of the PCE Configuration
-     * @param {Array} sysIds Array of workload sys_ids to include
-     * @returns {String} CSV string with headers and workload data
-     */
-    generateWorkloadCsv: function(sysIds) {
-        var CSV_BATCH_SIZE = 500;
-        var headers = ['sys_id', 'hostname', 'source_table', 'known_to_pce', 'conflicts', 'pce_workload_href', 'servicenow_cmdb_identifier', 'labels'];
-        var lines = [headers.join(',')];
-
-        var chunks = this._chunkArray(sysIds, CSV_BATCH_SIZE);
-        for (var c = 0; c < chunks.length; c++) {
-            var chunkSysIds = chunks[c];
-            var chunkJoined = chunkSysIds.join(',');
-
-            var labelsMap = {};
-            try {
-                var labelGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload_field_value');
-                labelGr.addQuery('illumio_pce_workload', 'IN', chunkJoined);
-                labelGr.query();
-                while (labelGr.next()) {
-                    var wlSysId = labelGr.getValue('illumio_pce_workload');
-                    var dimKey = labelGr.illumio_label_dimension.key + '';
-                    var labelVal = labelGr.getValue('pce_value') || labelGr.getValue('cmdb_value') || '';
-                    if (dimKey && labelVal) {
-                        if (!labelsMap[wlSysId]) {
-                            labelsMap[wlSysId] = [];
-                        }
-                        labelsMap[wlSysId].push(dimKey + ':' + labelVal);
-                    }
-                }
-            } catch (labelEx) {
-                gs.error('[generateWorkloadCsv] Error fetching labels for batch ' + c + ': ' + labelEx);
-            }
-
-            var gr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
-            gr.addQuery('sys_id', 'IN', chunkJoined);
-            gr.query();
-
-            while (gr.next()) {
-                var row = [];
-                var workloadSysId = gr.getUniqueValue();
-                for (var h = 0; h < headers.length; h++) {
-                    var val = '';
-                    if (headers[h] === 'labels') {
-                        val = labelsMap[workloadSysId] ? labelsMap[workloadSysId].join('; ') : '';
-                    } else {
-                        val = gr.getValue(headers[h]) || '';
-                    }
-                    if (val.indexOf(',') !== -1 || val.indexOf('"') !== -1) {
-                        val = '"' + val.replace(/"/g, '""') + '"';
-                    }
-                    row.push(val);
-                }
-                lines.push(row.join(','));
-            }
-        }
-
-        return lines.join('\n');
-    },
-
-    /**
-     * Get workloads matching one Sync Filter.
-     *
-     * A filter is now two encoded queries authored in condition builders -- one over the label
-     * table, one over the CMDB source table -- ANDed together. Sync Filter Groups and filter
-     * items are gone; see JIRA/sync-optimization/points.MD R6-R8 for why.
-     *
-     * @param {String} syncFilterSysId sys_id of the Sync Filter record
-     * @param {Boolean} skipActiveCheck Optional - if true, skips the active check (for preview)
-     * @param {Boolean} sysIdsOnly Optional - if true, returns sysIds array instead of full workload objects
-     * @returns {Object} { success, workloads, message } or { success, sysIds, message } when sysIdsOnly=true
-     */
-    getWorkloadsBySyncFilter: function(syncFilterSysId, skipActiveCheck, sysIdsOnly) {
-        var result = {
-            success: false,
-            workloads: [],
-            message: ''
-        };
-
-        try {
-            var syncUtils = new IllumioSyncUtils();
-            var repo = new IllumioSyncRepoUtils(syncUtils);
-
-            var filter = repo.getSyncFilter(syncFilterSysId);
-            if (!filter) {
-                result.message = 'Sync Filter not found';
-                return result;
-            }
-
-            // Preview needs to run against a filter that is not switched on yet.
-            if (!skipActiveCheck && !filter.active) {
-                result.message = 'Sync Filter is not active';
-                return result;
-            }
-
-            if (gs.nil(filter.pce_configuration)) {
-                result.message = 'No PCE Configuration associated with Sync Filter';
-                return result;
-            }
-
-            var evaluated = this.evaluateSyncFilter(filter, syncUtils, repo);
-
-            // Reported rather than swallowed: this is the path the preview UI actions use, and
-            // the author needs to see the same message the save-time rule would have shown.
-            if (evaluated.errors.length > 0) {
-                result.message = evaluated.errors.join(' ');
-                return result;
-            }
-
-            var finalSysIds = evaluated.sysIds;
-
-            if (sysIdsOnly) {
-                result.sysIds = finalSysIds;
-                result.success = true;
-                result.message = 'Found ' + finalSysIds.length + ' matching workloads';
-            } else {
-                if (finalSysIds.length > 0) {
-                    result.workloads = this._fetchWorkloadRecords(finalSysIds);
-                }
-                result.success = true;
-                result.message = 'Found ' + result.workloads.length + ' matching workloads';
-            }
-
-        } catch (ex) {
-            gs.error('[getWorkloadsBySyncFilter] Exception: ' + ex);
-            result.message = 'Exception occurred: ' + ex;
-        }
-
-        return result;
-    },
-
-    /**
-     * Evaluate one Sync Filter to the workload sys_ids it matches.
-     *
-     * The two conditions are independent and ANDed. Which side is materialised is not a
-     * decision: the label side resolves to workload sys_ids and so is bounded by the workload
-     * count, while the CMDB side is bounded only by the size of a CMDB table. The CMDB side is
-     * therefore always the streamed one, and the label side is the guard it is filtered against.
-     *
-     * @param {Object} filter Filter object from IllumioSyncRepoUtils
-     * @param {Object} [syncUtils] IllumioSyncUtils instance, constructed when omitted
-     * @param {Object} [repo] IllumioSyncRepoUtils instance, constructed when omitted
-     * @returns {Object} { sysIds: Array, errors: Array } - errors non-empty means match nothing
-     */
-    evaluateSyncFilter: function(filter, syncUtils, repo) {
-        syncUtils = syncUtils || new IllumioSyncUtils();
-        repo = repo || new IllumioSyncRepoUtils(syncUtils);
-
-        var evaluated = {
-            sysIds: [],
-            errors: []
-        };
-
-        var hasLabelCondition = !syncUtils.isConditionEmpty(filter.label_condition);
-        var hasCmdbCondition = !syncUtils.isConditionEmpty(filter.cmdb_condition);
-
-        // Both empty means SKIP, not match-everything. An empty filter is far more likely to be
-        // half-finished than a deliberate "sync every workload".
-        if (!hasLabelCondition && !hasCmdbCondition) {
-            gs.info('[evaluateSyncFilter] "' + filter.name + '" has no conditions, matching nothing');
-            return evaluated;
-        }
-
-        if (hasCmdbCondition && gs.nil(filter.source_table)) {
-            evaluated.errors.push('The CMDB Condition has no table to run against. ' +
-                'Set a Class Mapping on the Sync Filter.');
-            return evaluated;
-        }
-
-        var labelSet = hasLabelCondition ?
-            this._matchLabelCondition(filter, syncUtils, repo, evaluated.errors) : null;
-
-        if (evaluated.errors.length > 0) {
-            return evaluated;
-        }
-
-        var matched = hasCmdbCondition ?
-            this._matchCmdbCondition(filter, syncUtils, repo, labelSet) :
-            syncUtils.setToArray(labelSet);
-
-        // Load-bearing. `var` is function-scoped, so without the explicit release the label set
-        // stays reachable until this function returns and the peak is three collections in
-        // memory instead of two.
-        labelSet = null;
-
-        // Unconditional, even with no extent configured: this is the only place `duplicate` is
-        // checked now. The label aggregate deliberately leaves it out, because `duplicate` lives
-        // on the workload table and checking it there would be a join on every row of every term.
-        evaluated.sysIds = repo.filterWorkloads(matched, filter.extent);
-
-        gs.info('[evaluateSyncFilter] "' + filter.name + '" matched ' + evaluated.sysIds.length +
-            ' workloads (' + matched.length + ' before duplicate and extent filtering)');
-
-        return evaluated;
-    },
-
-    /**
-     * Workloads matching a filter's label condition.
-     *
-     * Each ^NQ group of the condition is one DNF term, evaluated in a single GlideAggregate and
-     * ORed with the rest. One query per group however many dimensions the group ANDs, so the
-     * query count scales with how the filter was authored and not with how much data there is.
-     *
-     * @param {Object} filter Filter object from IllumioSyncRepoUtils
-     * @param {Object} syncUtils IllumioSyncUtils instance
-     * @param {Object} repo IllumioSyncRepoUtils instance
-     * @param {Array} errors Collects parse errors, in place
-     * @returns {Object|null} Set of workload sys_ids, null when the condition would not parse
-     */
-    _matchLabelCondition: function(filter, syncUtils, repo, errors) {
-        var parsed = syncUtils.parseLabelCondition(filter.label_condition);
-
-        // Fail closed. A mis-parsed condition that silently syncs the wrong workloads is worse
-        // than one that syncs none, and the save-time business rule reports these same strings
-        // from this same call, so validation and evaluation cannot drift apart.
-        if (parsed.errors.length > 0) {
-            for (var errorIndex = 0; errorIndex < parsed.errors.length; errorIndex++) {
-                errors.push(parsed.errors[errorIndex]);
-            }
-            return null;
-        }
-
-        var labelSet = {};
-
-        for (var termIndex = 0; termIndex < parsed.terms.length; termIndex++) {
-            syncUtils.unionInto(labelSet, repo.aggregateLabelTermWorkloads(
-                filter.pce_configuration, filter.class_mapping, parsed.terms[termIndex]));
-        }
-
-        return labelSet;
-    },
-
-    /**
-     * Workloads matching a filter's CMDB condition, optionally guarded by the label result.
-     *
-     * The condition goes to the source table verbatim -- it is flat, one row per CI with real
-     * columns, so the condition builder's own AND/OR structure is already correct there. Only
-     * the label table needs parsing, because it is EAV.
-     *
-     * The matching CI list is never materialised. It is drained a batch at a time, each batch
-     * resolved to workloads, and only the ones the label side also matched are kept.
-     *
-     * @param {Object} filter Filter object from IllumioSyncRepoUtils
-     * @param {Object} syncUtils IllumioSyncUtils instance
-     * @param {Object} repo IllumioSyncRepoUtils instance
-     * @param {Object} labelSet Set from _matchLabelCondition, null to keep everything
-     * @returns {Array} Workload sys_ids
-     */
-    _matchCmdbCondition: function(filter, syncUtils, repo, labelSet) {
-        var matched = [];
-        var pceConfigSysId = filter.pce_configuration;
-        var sourceTable = filter.source_table;
-
-        var total = repo.eachCmdbCiSysId(sourceTable, filter.cmdb_condition, syncUtils.CI_CHUNK_SIZE,
-            function(ciSysIds) {
-                syncUtils.intersectInto(matched, repo.findWorkloadSysIdsBySourceRecords(
-                    pceConfigSysId, ciSysIds, sourceTable), labelSet);
-            });
-
-        gs.info('[_matchCmdbCondition] "' + filter.name + '" drained ' + total + ' CIs from ' +
-            sourceTable + ', ' + matched.length + ' workloads survived');
-
-        return matched;
-    },
-
-    /**
-     * Get active Sync Filter Groups for a Sync Filter
-     * @param {String} syncFilterSysId sys_id of the Sync Filter
-     * @returns {Array} Array of group objects with sys_id and name
-     */
-    _getSyncFilterGroups: function(syncFilterSysId) {
-        var groups = [];
-        var gr = new GlideRecord('x_illu2_illumio_illumio_sync_filter_group');
-        gr.addQuery('sync_filter', syncFilterSysId);
-        gr.addQuery('active', true);
-        gr.query();
-
-        while (gr.next()) {
-            groups.push({
-                sys_id: gr.getUniqueValue(),
-                name: gr.getValue('name') || 'Unnamed Group'
-            });
-        }
-        return groups;
-    },
-
-    /**
-     * Convert array to set (object with keys)
-     * @param {Array} arr Array of values
-     * @returns {Object} Set as object
-     */
-    _arrayToSet: function(arr) {
-        var set = {};
-        for (var i = 0; i < arr.length; i++) {
-            set[arr[i]] = true;
-        }
-        return set;
-    },
-
-    /**
-     * Intersect two sets
-     * @param {Object} setA First set
-     * @param {Object} setB Second set
-     * @returns {Object} Intersection
-     */
-    _intersectSets: function(setA, setB) {
-        var result = {};
-        for (var key in setA) {
-            if (setB[key]) {
-                result[key] = true;
-            }
-        }
-        return result;
-    },
-
-    _filterWorkloadsByExtent: function(sysIds, extentList) {
-        var filtered = [];
-        var chunks = this._chunkArray(sysIds, 500);
-
-        for (var c = 0; c < chunks.length; c++) {
-            var gr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
-            gr.addQuery('sys_id', 'IN', chunks[c].join(','));
-
-            // Each extent value is "knownToPce" (e.g. "managed") or "knownToPce-enforcementMode" (e.g. "managed-full")
-            var extentCondition = null;
-            for (var i = 0; i < extentList.length; i++) {
-                var extentParts = extentList[i].split('-');
-                var knownToPce = extentParts[0];
-                var enforcementMode = extentParts.length > 1 ? extentParts.slice(1).join('-') : null;
-
-                if (i === 0) {
-                    extentCondition = gr.addQuery('known_to_pce', knownToPce);
-                    if (enforcementMode) {
-                        extentCondition.addCondition('enforcement_mode', enforcementMode);
-                    }
-                } else {
-                    var orCondition = extentCondition.addOrCondition('known_to_pce', knownToPce);
-                    if (enforcementMode) {
-                        orCondition.addCondition('enforcement_mode', enforcementMode);
-                    }
-                }
-            }
-
-            gr.query();
-
-            while (gr.next()) {
-                filtered.push(gr.getUniqueValue());
-            }
-        }
-        return filtered;
-    },
+    // =====================================================================================
+    // R13 -- DEAD CODE. Commented out 2026-09-24, not deleted, so it can be restored in one
+    // edit if the new filter evaluation turns out to mis-scope something on a real instance.
+    //
+    // This is the pre-R8 Sync Filter Group model: groups, label filter items, workload field
+    // filter items, and the set/comparator/query helpers that served them. Replaced by
+    // `label_condition` and `cmdb_condition` on the Sync Filter record itself, parsed and
+    // evaluated by IllumioSyncFilterUtils against IllumioSyncRepoUtils.
+    //
+    // Verified before commenting: every method here is referenced ONLY by its own definition
+    // and by others in this block. Nothing outside IllumioUtils calls any of them. That is
+    // why they go as a set -- commenting out a subset would break whatever was left.
+    //
+    // The tables they read -- sync_filter_group, label_filter_item,
+    // workload_field_filter_item -- are C1, C2 and C3 in cleanup.MD, deferred for
+    // instance-side deletion until a full sync cycle has been observed. This block is deleted
+    // for good in the same pass that drops them.
+    //
+    // Split in two by `_chunkArray`, which is live: IllumioDeletionHandler and
+    // buildDeletionPayloadFromSysIds both use it. It was never part of this model.
+    // =====================================================================================
+//     /**
+//      * Get active Sync Filter Groups for a Sync Filter
+//      * @param {String} syncFilterSysId sys_id of the Sync Filter
+//      * @returns {Array} Array of group objects with sys_id and name
+//      */
+//     _getSyncFilterGroups: function(syncFilterSysId) {
+//         var groups = [];
+//         var gr = new GlideRecord(TABLE_SYNC_FILTER_GROUP);
+//         gr.addQuery('sync_filter', syncFilterSysId);
+//         gr.addQuery('active', true);
+//         gr.query();
+//
+//         while (gr.next()) {
+//             groups.push({
+//                 sys_id: gr.getUniqueValue(),
+//                 name: gr.getValue('name') || 'Unnamed Group'
+//             });
+//         }
+//         return groups;
+//     },
+//
+//     /**
+//      * Convert array to set (object with keys)
+//      * @param {Array} arr Array of values
+//      * @returns {Object} Set as object
+//      */
+//     _arrayToSet: function(arr) {
+//         var set = {};
+//         for (var i = 0; i < arr.length; i++) {
+//             set[arr[i]] = true;
+//         }
+//         return set;
+//     },
+//
+//     /**
+//      * Intersect two sets
+//      * @param {Object} setA First set
+//      * @param {Object} setB Second set
+//      * @returns {Object} Intersection
+//      */
+//     _intersectSets: function(setA, setB) {
+//         var result = {};
+//         for (var key in setA) {
+//             if (setB[key]) {
+//                 result[key] = true;
+//             }
+//         }
+//         return result;
+//     },
+//
+//     _filterWorkloadsByExtent: function(sysIds, extentList) {
+//         var filtered = [];
+//         var chunks = this._chunkArray(sysIds, BATCH_SIZE_MEDIUM);
+//
+//         for (var c = 0; c < chunks.length; c++) {
+//             var gr = new GlideRecord(TABLE_PCE_WORKLOAD);
+//             gr.addQuery('sys_id', 'IN', chunks[c].join(','));
+//
+//             // Each extent value is "knownToPce" (e.g. "managed") or "knownToPce-enforcementMode" (e.g. "managed-full")
+//             var extentCondition = null;
+//             for (var i = 0; i < extentList.length; i++) {
+//                 var extentParts = extentList[i].split('-');
+//                 var knownToPce = extentParts[0];
+//                 var enforcementMode = extentParts.length > 1 ? extentParts.slice(1).join('-') : null;
+//
+//                 if (i === 0) {
+//                     extentCondition = gr.addQuery('known_to_pce', knownToPce);
+//                     if (enforcementMode) {
+//                         extentCondition.addCondition('enforcement_mode', enforcementMode);
+//                     }
+//                 } else {
+//                     var orCondition = extentCondition.addOrCondition('known_to_pce', knownToPce);
+//                     if (enforcementMode) {
+//                         orCondition.addCondition('enforcement_mode', enforcementMode);
+//                     }
+//                 }
+//             }
+//
+//             gr.query();
+//
+//             while (gr.next()) {
+//                 filtered.push(gr.getUniqueValue());
+//             }
+//         }
+//         return filtered;
+//     },
 
     /**
      * Split an array into chunks of a given size
@@ -1962,443 +1708,517 @@ IllumioUtils.prototype = {
         return chunks;
     },
 
+    // =====================================================================================
+    // R13 -- DEAD CODE, continued. See the banner above `_getSyncFilterGroups` for why.
+    // =====================================================================================
+//     /**
+//      * Get active Label Filter Items for a Sync Filter Group
+//      * @param {String} groupSysId sys_id of the Sync Filter Group
+//      * @returns {Array} Array of label filter item objects
+//      */
+//     _getLabelFilterItemsByGroup: function(groupSysId) {
+//         var items = [];
+//         var gr = new GlideRecord(TABLE_LABEL_FILTER_ITEM);
+//         gr.addQuery('sync_filter_group', groupSysId);
+//         gr.addQuery('active', true);
+//         gr.query();
+//
+//         while (gr.next()) {
+//             items.push({
+//                 label_dimension: gr.getValue('label_dimension'),
+//                 label_dimension_key: gr.label_dimension.key + '',
+//                 label_value: gr.getValue('label_value')
+//             });
+//         }
+//         return items;
+//     },
+//
+//     /**
+//      * Get active Workload Field Filter Items for a Sync Filter Group, grouped by source table
+//      * @param {String} groupSysId sys_id of the Sync Filter Group
+//      * @returns {Object} Object keyed by source table name, values are arrays of filter items
+//      */
+//     _getWorkloadFieldFilterItemsByGroup: function(groupSysId) {
+//         var itemsByTable = {};
+//         var gr = new GlideRecord(TABLE_WORKLOAD_FIELD_FILTER_ITEM);
+//         gr.addQuery('sync_filter_group', groupSysId);
+//         gr.addQuery('active', true);
+//         gr.query();
+//
+//         while (gr.next()) {
+//             // Get the actual table name from the Config Class Mapping
+//             var classMappingId = gr.getValue('source_table');
+//             var classMappingGr = new GlideRecord(TABLE_CONFIG_CLASS_MAPPING);
+//             if (classMappingGr.get(classMappingId)) {
+//                 var tableName = classMappingGr.getValue('source_table');
+//
+//                 if (!itemsByTable[tableName]) {
+//                     itemsByTable[tableName] = [];
+//                 }
+//
+//                 // Get the field name from sys_dictionary reference
+//                 var fieldName = '';
+//                 var sourceFieldRef = gr.getValue('source_field');
+//                 if (!gs.nil(sourceFieldRef)) {
+//                     var dictGr = new GlideRecord('sys_dictionary');
+//                     if (dictGr.get(sourceFieldRef)) {
+//                         fieldName = dictGr.getValue('element');
+//                     }
+//                 }
+//
+//                 itemsByTable[tableName].push({
+//                     field: fieldName,
+//                     value: gr.getValue('source_value')
+//                 });
+//             }
+//         }
+//         return itemsByTable;
+//     },
+//
+//     /**
+//      * Evaluate Label Filter Items with AND logic using GlideAggregate
+//      * Uses single query with COUNT to find workloads matching ALL conditions
+//      * @param {String} pceConfigId sys_id of PCE Configuration
+//      * @param {Array} labelFilterItems Array of label filter item objects
+//      * @returns {Array} Array of matching workload sys_ids
+//      */
+//     _evaluateLabelFiltersWithAnd: function(pceConfigId, labelFilterItems) {
+//         var matchedSysIds = [];
+//         var numConditions = labelFilterItems.length;
+//
+//         if (numConditions === 0) {
+//             return matchedSysIds;
+//         }
+//
+//         // Build OR query for all conditions using ^NQ
+//         // Each OR clause must include base conditions (pce_config, duplicate)
+//         // because ^NQ starts a completely new query in ServiceNow
+//         var baseConditions = 'illumio_pce_workload.illumio_pce_configuration=' + pceConfigId +
+//             '^illumio_pce_workload.duplicate=false';
+//
+//         var queryParts = [];
+//         for (var i = 0; i < labelFilterItems.length; i++) {
+//             var item = labelFilterItems[i];
+//             var part = baseConditions + '^illumio_label_dimension=' + item.label_dimension + '^cmdb_value=' + item.label_value;
+//             queryParts.push(part);
+//         }
+//         var fullQuery = queryParts.join('^NQ');
+//
+//         gs.info('[_evaluateLabelFiltersWithAnd] Query: ' + fullQuery);
+//
+//         // Use GlideAggregate to find workloads matching ALL conditions
+//         var ga = new GlideAggregate(TABLE_PCE_WORKLOAD_FIELD_VALUE);
+//         ga.addEncodedQuery(fullQuery);
+//         ga.groupBy('illumio_pce_workload');
+//         ga.addAggregate('COUNT', 'illumio_label_dimension');
+//         ga.query();
+//
+//         while (ga.next()) {
+//             var count = parseInt(ga.getAggregate('COUNT', 'illumio_label_dimension'), 10);
+//             if (count >= numConditions) {
+//                 matchedSysIds.push(ga.getValue('illumio_pce_workload'));
+//             }
+//         }
+//
+//         return matchedSysIds;
+//     },
+//
+//     /**
+//      * Evaluate Workload Field Filter Items with AND logic
+//      * @param {String} pceConfigId sys_id of PCE Configuration
+//      * @param {Object} itemsByTable Filter items grouped by source table
+//      * @returns {Array} Array of matching workload sys_ids
+//      */
+//     _evaluateWorkloadFieldFiltersWithAnd: function(pceConfigId, itemsByTable) {
+//         var resultSet = null;
+//
+//         // Process each source table
+//         for (var tableName in itemsByTable) {
+//             var items = itemsByTable[tableName];
+//
+//             // Build encoded query with AND logic across items for this table
+//             var queryParts = [];
+//             for (var i = 0; i < items.length; i++) {
+//                 var item = items[i];
+//                 if (!gs.nil(item.field)) {
+//                     queryParts.push(item.field + '=' + item.value);
+//                 }
+//             }
+//
+//             if (queryParts.length === 0) {
+//                 continue;
+//             }
+//
+//             // AND logic within the same table
+//             var encodedQuery = queryParts.join('^');
+//             gs.info('[_evaluateWorkloadFieldFiltersWithAnd] Table: ' + tableName + ', Query: ' + encodedQuery);
+//
+//             // Find all CIs matching the filter
+//             var matchingCISysIds = [];
+//             var ciGr = new GlideRecord(tableName);
+//             ciGr.addEncodedQuery(encodedQuery);
+//             ciGr.query();
+//
+//             while (ciGr.next()) {
+//                 matchingCISysIds.push(ciGr.getUniqueValue());
+//             }
+//
+//             gs.info('[_evaluateWorkloadFieldFiltersWithAnd] Matching CIs: ' + matchingCISysIds.length);
+//
+//             if (matchingCISysIds.length === 0) {
+//                 // No CIs match for this table, AND will result in empty set
+//                 return [];
+//             }
+//
+//             // Find workloads linked to matching CIs (batched to avoid IN clause limits)
+//             var tableWorkloads = [];
+//             var ciChunks = this._chunkArray(matchingCISysIds, BATCH_SIZE_MEDIUM);
+//             for (var c = 0; c < ciChunks.length; c++) {
+//                 var wlGr = new GlideRecord(TABLE_PCE_WORKLOAD);
+//                 wlGr.addQuery('illumio_pce_configuration', pceConfigId);
+//                 wlGr.addQuery('servicenow_cmdb_identifier', 'IN', ciChunks[c].join(','));
+//                 wlGr.addQuery('source_table', tableName);
+//                 wlGr.addQuery('duplicate', false);
+//                 wlGr.query();
+//
+//                 while (wlGr.next()) {
+//                     tableWorkloads.push(wlGr.getUniqueValue());
+//                 }
+//             }
+//
+//             // AND: intersect with previous results
+//             if (resultSet === null) {
+//                 resultSet = this._arrayToSet(tableWorkloads);
+//             } else {
+//                 resultSet = this._intersectSets(resultSet, this._arrayToSet(tableWorkloads));
+//             }
+//
+//             // Early termination if result is empty
+//             if (Object.keys(resultSet).length === 0) {
+//                 return [];
+//             }
+//         }
+//
+//         return resultSet === null ? [] : Object.keys(resultSet);
+//     },
+//
+//     /**
+//      * @deprecated Use _getLabelFilterItemsByGroup instead
+//      * Get active Label Filter Items for a Sync Filter
+//      * @param {String} syncFilterSysId sys_id of the Sync Filter
+//      * @returns {Array} Array of label filter item objects
+//      */
+//     _getLabelFilterItems: function(syncFilterSysId) {
+//         var items = [];
+//         var gr = new GlideRecord(TABLE_LABEL_FILTER_ITEM);
+//         gr.addQuery('illumio_sync_filter', syncFilterSysId);
+//         gr.addQuery('active', true);
+//         gr.query();
+//
+//         while (gr.next()) {
+//             items.push({
+//                 label_dimension: gr.getValue('label_dimension'),
+//                 label_dimension_key: gr.label_dimension.key + '',
+//                 comparator: gr.getValue('comparator'),
+//                 label_value: gr.getValue('label_value'),
+//                 match_with: gr.getValue('match_with')
+//             });
+//         }
+//         return items;
+//     },
+//
+//     /**
+//      * @deprecated Use _getWorkloadFieldFilterItemsByGroup instead
+//      * Get active Workload Field Filter Items grouped by source table
+//      * @param {String} syncFilterSysId sys_id of the Sync Filter
+//      * @returns {Object} Object keyed by source table name, values are arrays of filter items
+//      */
+//     _getWorkloadFieldFilterItems: function(syncFilterSysId) {
+//         var itemsByTable = {};
+//         var gr = new GlideRecord(TABLE_WORKLOAD_FIELD_FILTER_ITEM);
+//         gr.addQuery('illumio_sync_filter', syncFilterSysId);
+//         gr.addQuery('active', true);
+//         gr.query();
+//
+//         while (gr.next()) {
+//             // Get the actual table name from the Config Class Mapping
+//             var classMappingId = gr.getValue('source_table');
+//             var classMappingGr = new GlideRecord(TABLE_CONFIG_CLASS_MAPPING);
+//             if (classMappingGr.get(classMappingId)) {
+//                 var tableName = classMappingGr.getValue('source_table');
+//
+//                 if (!itemsByTable[tableName]) {
+//                     itemsByTable[tableName] = [];
+//                 }
+//
+//                 // Get the field name from sys_dictionary reference
+//                 var fieldName = '';
+//                 var sourceFieldRef = gr.getValue('source_field');
+//                 if (!gs.nil(sourceFieldRef)) {
+//                     var dictGr = new GlideRecord('sys_dictionary');
+//                     if (dictGr.get(sourceFieldRef)) {
+//                         fieldName = dictGr.getValue('element');
+//                     }
+//                 }
+//
+//                 itemsByTable[tableName].push({
+//                     field: fieldName,
+//                     comparator: gr.getValue('comparator'),
+//                     value: gr.getValue('source_value')
+//                 });
+//             }
+//         }
+//         return itemsByTable;
+//     },
+//
+//     /**
+//      * Evaluate Label Filter Items and return matching workload sys_ids
+//      * @param {String} pceConfigId sys_id of PCE Configuration
+//      * @param {Array} labelFilterItems Array of label filter item objects
+//      * @returns {Array} Array of matching workload sys_ids
+//      */
+//     _evaluateLabelFilters: function(pceConfigId, labelFilterItems) {
+//         var matchedSysIds = [];
+//
+//         // Process each label filter item (OR logic - any match qualifies)
+//         for (var i = 0; i < labelFilterItems.length; i++) {
+//             var item = labelFilterItems[i];
+//
+//             var gr = new GlideRecord(TABLE_PCE_WORKLOAD_FIELD_VALUE);
+//             gr.addQuery('illumio_pce_workload.illumio_pce_configuration', pceConfigId);
+//             gr.addQuery('illumio_pce_workload.duplicate', false);
+//             gr.addQuery('illumio_label_dimension', item.label_dimension);
+//
+//             // Determine which field to match against (cmdb_value or pce_value)
+//             // Choice values are 'cmdb' and 'pce', map to actual field names
+//             var matchField = (item.match_with === 'pce') ? 'pce_value' : 'cmdb_value';
+//
+//             // Apply comparator
+//             this._applyComparator(gr, matchField, item.comparator, item.label_value);
+//
+//             gr.query();
+//             while (gr.next()) {
+//                 var wlSysId = gr.getValue('illumio_pce_workload');
+//                 if (matchedSysIds.indexOf(wlSysId) === -1) {
+//                     matchedSysIds.push(wlSysId);
+//                 }
+//             }
+//         }
+//
+//         return matchedSysIds;
+//     },
+//
+//     /**
+//      * Evaluate Workload Field Filter Items using batch CI query approach
+//      * @param {String} pceConfigId sys_id of PCE Configuration
+//      * @param {Object} itemsByTable Filter items grouped by source table
+//      * @returns {Array} Array of matching workload sys_ids
+//      */
+//     _evaluateWorkloadFieldFilters: function(pceConfigId, itemsByTable) {
+//         var matchedSysIds = [];
+//
+//         // Process each source table
+//         for (var tableName in itemsByTable) {
+//             var items = itemsByTable[tableName];
+//
+//             // Build encoded query with OR logic across items for this table
+//             var queryParts = [];
+//             for (var i = 0; i < items.length; i++) {
+//                 var item = items[i];
+//                 var queryPart = this._buildEncodedQueryPart(item.field, item.comparator, item.value);
+//                 if (queryPart) {
+//                     queryParts.push(queryPart);
+//                 }
+//             }
+//
+//             if (queryParts.length === 0) {
+//                 continue;
+//             }
+//
+//             var encodedQuery = queryParts.join('^OR');
+//             gs.info('[_evaluateWorkloadFieldFilters] Table: ' + tableName + ', Query: ' + encodedQuery);
+//
+//             // Batch query: find all CIs matching the filter
+//             var matchingCISysIds = [];
+//             var ciGr = new GlideRecord(tableName);
+//             ciGr.addEncodedQuery(encodedQuery);
+//             ciGr.query();
+//
+//             while (ciGr.next()) {
+//                 matchingCISysIds.push(ciGr.getUniqueValue());
+//             }
+//
+//             gs.info('[_evaluateWorkloadFieldFilters] Matching CIs: ' + matchingCISysIds.length);
+//
+//             if (matchingCISysIds.length === 0) {
+//                 continue;
+//             }
+//
+//             // Find workloads linked to matching CIs
+//             var wlGr = new GlideRecord(TABLE_PCE_WORKLOAD);
+//             wlGr.addQuery('illumio_pce_configuration', pceConfigId);
+//             wlGr.addQuery('servicenow_cmdb_identifier', 'IN', matchingCISysIds.join(','));
+//             wlGr.addQuery('source_table', tableName);
+//             wlGr.addQuery('duplicate', false);
+//             wlGr.query();
+//
+//             while (wlGr.next()) {
+//                 var sysId = wlGr.getUniqueValue();
+//                 if (matchedSysIds.indexOf(sysId) === -1) {
+//                     matchedSysIds.push(sysId);
+//                 }
+//             }
+//         }
+//
+//         return matchedSysIds;
+//     },
+//
+//     /**
+//      * Apply comparator to a GlideRecord query
+//      * @param {GlideRecord} gr GlideRecord to add query to
+//      * @param {String} field Field name to query
+//      * @param {String} comparator Comparator type (=, !=, CONTAINS, STARTSWITH, ENDSWITH)
+//      * @param {String} value Value to compare against
+//      */
+//     _applyComparator: function(gr, field, comparator, value) {
+//         switch (comparator) {
+//             case '=':
+//                 gr.addQuery(field, value);
+//                 break;
+//             case '!=':
+//                 gr.addQuery(field, '!=', value);
+//                 break;
+//             case 'CONTAINS':
+//                 gr.addQuery(field, 'CONTAINS', value);
+//                 break;
+//             case 'STARTSWITH':
+//                 gr.addQuery(field, 'STARTSWITH', value);
+//                 break;
+//             case 'ENDSWITH':
+//                 gr.addQuery(field, 'ENDSWITH', value);
+//                 break;
+//             default:
+//                 gr.addQuery(field, value);
+//         }
+//     },
+//
+//     /**
+//      * Build encoded query part for a single filter item
+//      * @param {String} field Field name
+//      * @param {String} comparator Comparator type
+//      * @param {String} value Value to compare
+//      * @returns {String} Encoded query part
+//      */
+//     _buildEncodedQueryPart: function(field, comparator, value) {
+//         if (gs.nil(field)) {
+//             return '';
+//         }
+//
+//         switch (comparator) {
+//             case '=':
+//                 return field + '=' + value;
+//             case '!=':
+//                 return field + '!=' + value;
+//             case 'CONTAINS':
+//                 return field + 'LIKE' + value;
+//             case 'STARTSWITH':
+//                 return field + 'STARTSWITH' + value;
+//             case 'ENDSWITH':
+//                 return field + 'ENDSWITH' + value;
+//             default:
+//                 return field + '=' + value;
+//         }
+//     },
+
+    DELETION_PREVIEW_PREFIX: 'DELETION-PREVIEW-',
+    DELETION_PREVIEW_MAX_AGE_MINUTES: 30,
+
     /**
-     * Get active Label Filter Items for a Sync Filter Group
-     * @param {String} groupSysId sys_id of the Sync Filter Group
-     * @returns {Array} Array of label filter item objects
+     * What deletion preview, if any, this configuration currently holds.
+     *
+     * Two questions and no others: is there a DELETION-PREVIEW-* attachment on this PCE
+     * Configuration, and how old is it. The prefix is part of the QUERY rather than a test applied
+     * to every attachment on the record, so nothing else on the record is read or reasoned about.
+     * Under the one-attachment-per-record rule (IllumioPreviewUtils._deleteExistingPreview clears
+     * the record before every run) there is nothing else to reason about anyway -- counting the
+     * other files only ever produced a refusal message that guessed at why.
+     *
+     * Ordered newest-first so the first row decides. That ordering is the fix for the original
+     * defect: the gate used to return on the first prefix match in whatever order the query came
+     * back, so a stale file sitting beside a fresh one refused a preview the user had just
+     * generated and was looking at.
+     *
+     * A single-filter deletion preview attaches to the Sync Filter, not here, and deliberately
+     * does not satisfy this gate -- see IllumioPreviewUtils.prefixForType.
+     *
+     * @param {String} configSysId sys_id of the PCE Configuration
+     * @returns {Object} { fresh, found, fileName, ageMinutes }
      */
-    _getLabelFilterItemsByGroup: function(groupSysId) {
-        var items = [];
-        var gr = new GlideRecord('x_illu2_illumio_illumio_label_filter_item');
-        gr.addQuery('sync_filter_group', groupSysId);
-        gr.addQuery('active', true);
+    deletionPreviewStatus: function(configSysId) {
+        var status = {
+            fresh: false,
+            found: false,
+            fileName: '',
+            ageMinutes: -1
+        };
+
+        var gr = new GlideRecord('sys_attachment');
+        gr.addQuery('table_name', TABLE_PCE_CONF);
+        gr.addQuery('table_sys_id', configSysId);
+        gr.addQuery('file_name', 'STARTSWITH', this.DELETION_PREVIEW_PREFIX);
+        gr.orderByDesc('sys_created_on');
+        gr.setLimit(1);
         gr.query();
 
-        while (gr.next()) {
-            items.push({
-                label_dimension: gr.getValue('label_dimension'),
-                label_dimension_key: gr.label_dimension.key + '',
-                label_value: gr.getValue('label_value')
-            });
+        if (!gr.next()) {
+            return status;
         }
-        return items;
+
+        var createdOn = new GlideDateTime(gr.getValue('sys_created_on'));
+        status.found = true;
+        status.fileName = gr.getValue('file_name') || '';
+        status.ageMinutes =
+            (new GlideDateTime().getNumericValue() - createdOn.getNumericValue()) / 60000;
+        status.fresh = status.ageMinutes <= this.DELETION_PREVIEW_MAX_AGE_MINUTES;
+
+        return status;
     },
 
     /**
-     * Get active Workload Field Filter Items for a Sync Filter Group, grouped by source table
-     * @param {String} groupSysId sys_id of the Sync Filter Group
-     * @returns {Object} Object keyed by source table name, values are arrays of filter items
+     * Why the deletion preview gate is refusing, in terms the user can act on.
+     *
+     * @param {Object} status Return value of deletionPreviewStatus
+     * @returns {String}
      */
-    _getWorkloadFieldFilterItemsByGroup: function(groupSysId) {
-        var itemsByTable = {};
-        var gr = new GlideRecord('x_illu2_illumio_illumio_workload_field_filter_item');
-        gr.addQuery('sync_filter_group', groupSysId);
-        gr.addQuery('active', true);
-        gr.query();
-
-        while (gr.next()) {
-            // Get the actual table name from the Config Class Mapping
-            var classMappingId = gr.getValue('source_table');
-            var classMappingGr = new GlideRecord('x_illu2_illumio_illumio_config_class_mapping');
-            if (classMappingGr.get(classMappingId)) {
-                var tableName = classMappingGr.getValue('source_table');
-
-                if (!itemsByTable[tableName]) {
-                    itemsByTable[tableName] = [];
-                }
-
-                // Get the field name from sys_dictionary reference
-                var fieldName = '';
-                var sourceFieldRef = gr.getValue('source_field');
-                if (!gs.nil(sourceFieldRef)) {
-                    var dictGr = new GlideRecord('sys_dictionary');
-                    if (dictGr.get(sourceFieldRef)) {
-                        fieldName = dictGr.getValue('element');
-                    }
-                }
-
-                itemsByTable[tableName].push({
-                    field: fieldName,
-                    value: gr.getValue('source_value')
-                });
-            }
+    describeDeletionPreviewRefusal: function(status) {
+        if (status.found) {
+            return 'The deletion preview on this PCE Configuration is ' +
+                Math.floor(status.ageMinutes) + ' minutes old (file "' + status.fileName +
+                '"). Deletion requires one no older than ' +
+                this.DELETION_PREVIEW_MAX_AGE_MINUTES + ' minutes. Generate a new one.';
         }
-        return itemsByTable;
+
+        return 'No deletion preview found on this PCE Configuration. Run Preview Workload ' +
+            'Deletion here and wait for the CSV to be attached -- the ' +
+            this.DELETION_PREVIEW_MAX_AGE_MINUTES + '-minute clock starts when the MID Server ' +
+            'uploads it, not when the button is pressed. A preview generated from a single Sync ' +
+            'Filter attaches to that filter and does not satisfy this gate.';
     },
 
     /**
-     * Evaluate Label Filter Items with AND logic using GlideAggregate
-     * Uses single query with COUNT to find workloads matching ALL conditions
-     * @param {String} pceConfigId sys_id of PCE Configuration
-     * @param {Array} labelFilterItems Array of label filter item objects
-     * @returns {Array} Array of matching workload sys_ids
+     * Whether a deletion preview attachment exists for this configuration and is recent enough.
+     *
+     * The safety gate in front of a non-reversible action: the user must have looked at what
+     * would be deleted within the last 30 minutes. It is a pre-flight check, so it belongs to
+     * whoever is about to start the job -- not to the job itself. prepareDeletionPayload used to
+     * own it, which meant the check could only run after phase 1 and phase 2 had already done
+     * their work.
+     *
+     * @param {String} configSysId sys_id of the PCE Configuration
+     * @returns {Boolean} true when a DELETION-PREVIEW- attachment under 30 minutes old exists
      */
-    _evaluateLabelFiltersWithAnd: function(pceConfigId, labelFilterItems) {
-        var matchedSysIds = [];
-        var numConditions = labelFilterItems.length;
-
-        if (numConditions === 0) {
-            return matchedSysIds;
-        }
-
-        // Build OR query for all conditions using ^NQ
-        // Each OR clause must include base conditions (pce_config, duplicate)
-        // because ^NQ starts a completely new query in ServiceNow
-        var baseConditions = 'illumio_pce_workload.illumio_pce_configuration=' + pceConfigId +
-            '^illumio_pce_workload.duplicate=false';
-
-        var queryParts = [];
-        for (var i = 0; i < labelFilterItems.length; i++) {
-            var item = labelFilterItems[i];
-            var part = baseConditions + '^illumio_label_dimension=' + item.label_dimension + '^cmdb_value=' + item.label_value;
-            queryParts.push(part);
-        }
-        var fullQuery = queryParts.join('^NQ');
-
-        gs.info('[_evaluateLabelFiltersWithAnd] Query: ' + fullQuery);
-
-        // Use GlideAggregate to find workloads matching ALL conditions
-        var ga = new GlideAggregate('x_illu2_illumio_illumio_pce_workload_field_value');
-        ga.addEncodedQuery(fullQuery);
-        ga.groupBy('illumio_pce_workload');
-        ga.addAggregate('COUNT', 'illumio_label_dimension');
-        ga.query();
-
-        while (ga.next()) {
-            var count = parseInt(ga.getAggregate('COUNT', 'illumio_label_dimension'), 10);
-            if (count >= numConditions) {
-                matchedSysIds.push(ga.getValue('illumio_pce_workload'));
-            }
-        }
-
-        return matchedSysIds;
-    },
-
-    /**
-     * Evaluate Workload Field Filter Items with AND logic
-     * @param {String} pceConfigId sys_id of PCE Configuration
-     * @param {Object} itemsByTable Filter items grouped by source table
-     * @returns {Array} Array of matching workload sys_ids
-     */
-    _evaluateWorkloadFieldFiltersWithAnd: function(pceConfigId, itemsByTable) {
-        var resultSet = null;
-
-        // Process each source table
-        for (var tableName in itemsByTable) {
-            var items = itemsByTable[tableName];
-
-            // Build encoded query with AND logic across items for this table
-            var queryParts = [];
-            for (var i = 0; i < items.length; i++) {
-                var item = items[i];
-                if (!gs.nil(item.field)) {
-                    queryParts.push(item.field + '=' + item.value);
-                }
-            }
-
-            if (queryParts.length === 0) {
-                continue;
-            }
-
-            // AND logic within the same table
-            var encodedQuery = queryParts.join('^');
-            gs.info('[_evaluateWorkloadFieldFiltersWithAnd] Table: ' + tableName + ', Query: ' + encodedQuery);
-
-            // Find all CIs matching the filter
-            var matchingCISysIds = [];
-            var ciGr = new GlideRecord(tableName);
-            ciGr.addEncodedQuery(encodedQuery);
-            ciGr.query();
-
-            while (ciGr.next()) {
-                matchingCISysIds.push(ciGr.getUniqueValue());
-            }
-
-            gs.info('[_evaluateWorkloadFieldFiltersWithAnd] Matching CIs: ' + matchingCISysIds.length);
-
-            if (matchingCISysIds.length === 0) {
-                // No CIs match for this table, AND will result in empty set
-                return [];
-            }
-
-            // Find workloads linked to matching CIs (batched to avoid IN clause limits)
-            var tableWorkloads = [];
-            var ciChunks = this._chunkArray(matchingCISysIds, 500);
-            for (var c = 0; c < ciChunks.length; c++) {
-                var wlGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
-                wlGr.addQuery('illumio_pce_configuration', pceConfigId);
-                wlGr.addQuery('servicenow_cmdb_identifier', 'IN', ciChunks[c].join(','));
-                wlGr.addQuery('source_table', tableName);
-                wlGr.addQuery('duplicate', false);
-                wlGr.query();
-
-                while (wlGr.next()) {
-                    tableWorkloads.push(wlGr.getUniqueValue());
-                }
-            }
-
-            // AND: intersect with previous results
-            if (resultSet === null) {
-                resultSet = this._arrayToSet(tableWorkloads);
-            } else {
-                resultSet = this._intersectSets(resultSet, this._arrayToSet(tableWorkloads));
-            }
-
-            // Early termination if result is empty
-            if (Object.keys(resultSet).length === 0) {
-                return [];
-            }
-        }
-
-        return resultSet === null ? [] : Object.keys(resultSet);
-    },
-
-    /**
-     * @deprecated Use _getLabelFilterItemsByGroup instead
-     * Get active Label Filter Items for a Sync Filter
-     * @param {String} syncFilterSysId sys_id of the Sync Filter
-     * @returns {Array} Array of label filter item objects
-     */
-    _getLabelFilterItems: function(syncFilterSysId) {
-        var items = [];
-        var gr = new GlideRecord('x_illu2_illumio_illumio_label_filter_item');
-        gr.addQuery('illumio_sync_filter', syncFilterSysId);
-        gr.addQuery('active', true);
-        gr.query();
-
-        while (gr.next()) {
-            items.push({
-                label_dimension: gr.getValue('label_dimension'),
-                label_dimension_key: gr.label_dimension.key + '',
-                comparator: gr.getValue('comparator'),
-                label_value: gr.getValue('label_value'),
-                match_with: gr.getValue('match_with')
-            });
-        }
-        return items;
-    },
-
-    /**
-     * @deprecated Use _getWorkloadFieldFilterItemsByGroup instead
-     * Get active Workload Field Filter Items grouped by source table
-     * @param {String} syncFilterSysId sys_id of the Sync Filter
-     * @returns {Object} Object keyed by source table name, values are arrays of filter items
-     */
-    _getWorkloadFieldFilterItems: function(syncFilterSysId) {
-        var itemsByTable = {};
-        var gr = new GlideRecord('x_illu2_illumio_illumio_workload_field_filter_item');
-        gr.addQuery('illumio_sync_filter', syncFilterSysId);
-        gr.addQuery('active', true);
-        gr.query();
-
-        while (gr.next()) {
-            // Get the actual table name from the Config Class Mapping
-            var classMappingId = gr.getValue('source_table');
-            var classMappingGr = new GlideRecord('x_illu2_illumio_illumio_config_class_mapping');
-            if (classMappingGr.get(classMappingId)) {
-                var tableName = classMappingGr.getValue('source_table');
-
-                if (!itemsByTable[tableName]) {
-                    itemsByTable[tableName] = [];
-                }
-
-                // Get the field name from sys_dictionary reference
-                var fieldName = '';
-                var sourceFieldRef = gr.getValue('source_field');
-                if (!gs.nil(sourceFieldRef)) {
-                    var dictGr = new GlideRecord('sys_dictionary');
-                    if (dictGr.get(sourceFieldRef)) {
-                        fieldName = dictGr.getValue('element');
-                    }
-                }
-
-                itemsByTable[tableName].push({
-                    field: fieldName,
-                    comparator: gr.getValue('comparator'),
-                    value: gr.getValue('source_value')
-                });
-            }
-        }
-        return itemsByTable;
-    },
-
-    /**
-     * Evaluate Label Filter Items and return matching workload sys_ids
-     * @param {String} pceConfigId sys_id of PCE Configuration
-     * @param {Array} labelFilterItems Array of label filter item objects
-     * @returns {Array} Array of matching workload sys_ids
-     */
-    _evaluateLabelFilters: function(pceConfigId, labelFilterItems) {
-        var matchedSysIds = [];
-
-        // Process each label filter item (OR logic - any match qualifies)
-        for (var i = 0; i < labelFilterItems.length; i++) {
-            var item = labelFilterItems[i];
-
-            var gr = new GlideRecord('x_illu2_illumio_illumio_pce_workload_field_value');
-            gr.addQuery('illumio_pce_workload.illumio_pce_configuration', pceConfigId);
-            gr.addQuery('illumio_pce_workload.duplicate', false);
-            gr.addQuery('illumio_label_dimension', item.label_dimension);
-
-            // Determine which field to match against (cmdb_value or pce_value)
-            // Choice values are 'cmdb' and 'pce', map to actual field names
-            var matchField = (item.match_with === 'pce') ? 'pce_value' : 'cmdb_value';
-
-            // Apply comparator
-            this._applyComparator(gr, matchField, item.comparator, item.label_value);
-
-            gr.query();
-            while (gr.next()) {
-                var wlSysId = gr.getValue('illumio_pce_workload');
-                if (matchedSysIds.indexOf(wlSysId) === -1) {
-                    matchedSysIds.push(wlSysId);
-                }
-            }
-        }
-
-        return matchedSysIds;
-    },
-
-    /**
-     * Evaluate Workload Field Filter Items using batch CI query approach
-     * @param {String} pceConfigId sys_id of PCE Configuration
-     * @param {Object} itemsByTable Filter items grouped by source table
-     * @returns {Array} Array of matching workload sys_ids
-     */
-    _evaluateWorkloadFieldFilters: function(pceConfigId, itemsByTable) {
-        var matchedSysIds = [];
-
-        // Process each source table
-        for (var tableName in itemsByTable) {
-            var items = itemsByTable[tableName];
-
-            // Build encoded query with OR logic across items for this table
-            var queryParts = [];
-            for (var i = 0; i < items.length; i++) {
-                var item = items[i];
-                var queryPart = this._buildEncodedQueryPart(item.field, item.comparator, item.value);
-                if (queryPart) {
-                    queryParts.push(queryPart);
-                }
-            }
-
-            if (queryParts.length === 0) {
-                continue;
-            }
-
-            var encodedQuery = queryParts.join('^OR');
-            gs.info('[_evaluateWorkloadFieldFilters] Table: ' + tableName + ', Query: ' + encodedQuery);
-
-            // Batch query: find all CIs matching the filter
-            var matchingCISysIds = [];
-            var ciGr = new GlideRecord(tableName);
-            ciGr.addEncodedQuery(encodedQuery);
-            ciGr.query();
-
-            while (ciGr.next()) {
-                matchingCISysIds.push(ciGr.getUniqueValue());
-            }
-
-            gs.info('[_evaluateWorkloadFieldFilters] Matching CIs: ' + matchingCISysIds.length);
-
-            if (matchingCISysIds.length === 0) {
-                continue;
-            }
-
-            // Find workloads linked to matching CIs
-            var wlGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
-            wlGr.addQuery('illumio_pce_configuration', pceConfigId);
-            wlGr.addQuery('servicenow_cmdb_identifier', 'IN', matchingCISysIds.join(','));
-            wlGr.addQuery('source_table', tableName);
-            wlGr.addQuery('duplicate', false);
-            wlGr.query();
-
-            while (wlGr.next()) {
-                var sysId = wlGr.getUniqueValue();
-                if (matchedSysIds.indexOf(sysId) === -1) {
-                    matchedSysIds.push(sysId);
-                }
-            }
-        }
-
-        return matchedSysIds;
-    },
-
-    /**
-     * Apply comparator to a GlideRecord query
-     * @param {GlideRecord} gr GlideRecord to add query to
-     * @param {String} field Field name to query
-     * @param {String} comparator Comparator type (=, !=, CONTAINS, STARTSWITH, ENDSWITH)
-     * @param {String} value Value to compare against
-     */
-    _applyComparator: function(gr, field, comparator, value) {
-        switch (comparator) {
-            case '=':
-                gr.addQuery(field, value);
-                break;
-            case '!=':
-                gr.addQuery(field, '!=', value);
-                break;
-            case 'CONTAINS':
-                gr.addQuery(field, 'CONTAINS', value);
-                break;
-            case 'STARTSWITH':
-                gr.addQuery(field, 'STARTSWITH', value);
-                break;
-            case 'ENDSWITH':
-                gr.addQuery(field, 'ENDSWITH', value);
-                break;
-            default:
-                gr.addQuery(field, value);
-        }
-    },
-
-    /**
-     * Build encoded query part for a single filter item
-     * @param {String} field Field name
-     * @param {String} comparator Comparator type
-     * @param {String} value Value to compare
-     * @returns {String} Encoded query part
-     */
-    _buildEncodedQueryPart: function(field, comparator, value) {
-        if (gs.nil(field)) {
-            return '';
-        }
-
-        switch (comparator) {
-            case '=':
-                return field + '=' + value;
-            case '!=':
-                return field + '!=' + value;
-            case 'CONTAINS':
-                return field + 'LIKE' + value;
-            case 'STARTSWITH':
-                return field + 'STARTSWITH' + value;
-            case 'ENDSWITH':
-                return field + 'ENDSWITH' + value;
-            default:
-                return field + '=' + value;
-        }
-    },
-
-    /**
-     * Fetch full workload records by sys_ids
-     * @param {Array} sysIds Array of workload sys_ids
-     * @returns {Array} Array of workload objects with all properties
-     */
-    _fetchWorkloadRecords: function(sysIds) {
-        var workloads = [];
-        var chunks = this._chunkArray(sysIds, 500);
-        for (var c = 0; c < chunks.length; c++) {
-            var gr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
-            gr.addQuery('sys_id', 'IN', chunks[c].join(','));
-            gr.query();
-
-            while (gr.next()) {
-                workloads.push(this._workloadToObject(gr));
-            }
-        }
-        return workloads;
+    hasFreshDeletionPreview: function(configSysId) {
+        return this.deletionPreviewStatus(configSysId).fresh;
     },
 
     /**
@@ -2406,22 +2226,30 @@ IllumioUtils.prototype = {
      * deletion payload table.
      *
      * R14 + P0-1, done as one change because separately neither delivers anything: moving onto
-     * runWorkloadChunks without moving the payload off the ECC message leaves the whole result
+     * prepareWorkloadsForPCE without moving the payload off the ECC message leaves the whole result
      * set in memory and in the message anyway, and the message is the ceiling that matters.
      *
-     * Shared with the sync path: chunking, the chunk drain, threshold accounting. Deletion-only:
-     * the 30-minute preview gate below, the eligibility rules in _buildDeletionShell, and the row
-     * shape. Labels are skipped wholesale -- deletion reads three columns and never looks at one.
+     * Shared with the sync path: phase 1, chunking, the chunk drain, threshold accounting.
+     * Deletion-only: the eligibility rules in _buildDeletionShell and the row shape. Labels are
+     * skipped wholesale -- deletion reads three columns and never looks at one.
+     *
+     * Runs inside the deletion job (IllumioStartWorkloadDeletion), never in a user transaction,
+     * so jobSysId is always available to log progress against.
      *
      * @param {String} configSysId sys_id of the PCE Configuration
-     * @returns {Object} { success, message, payloadSysIds, deletionCount, unpairCount,
+     * @param {String} jobSysId sys_id of the deletion scheduled job, for progress logging
+     * @returns {Object} { success, message, payloadRowCount, deletionCount, unpairCount,
      *   skippedCount, thresholdExceeded, cancelJob }
+     *
+     * payloadRowCount is a count, not the sys_ids. Since R33 the rows carry the job reference and
+     * both consumers -- the MID Server and the withdrawal paths -- query on it, so the only thing
+     * a list was still answering was "is there anything to dispatch".
      */
-    prepareDeletionPayload: function(configSysId) {
+    prepareDeletionPayload: function(configSysId, jobSysId) {
         var result = {
             success: false,
             message: '',
-            payloadSysIds: [],
+            payloadRowCount: 0,
             deletionCount: 0,
             unpairCount: 0,
             skippedCount: 0,
@@ -2430,32 +2258,25 @@ IllumioUtils.prototype = {
         };
 
         try {
-            // Validate that a fresh deletion preview exists (≤30 minutes old)
-            var sa = new GlideSysAttachment();
-            var tableName = 'x_illu2_illumio_illumio_pce_conf';
-            var previewFound = false;
-            var attachments = sa.getAttachments(tableName, configSysId);
-            while (attachments.next()) {
-                var fileName = attachments.getValue('file_name') || '';
-                if (fileName.indexOf('DELETION-PREVIEW-') === 0) {
-                    var createdOn = new GlideDateTime(attachments.getValue('sys_created_on'));
-                    var now = new GlideDateTime();
-                    var ageMs = now.getNumericValue() - createdOn.getNumericValue();
-                    var ageMinutes = ageMs / 60000;
-                    if (ageMinutes <= 30) {
-                        previewFound = true;
-                    }
-                    break;
-                }
-            }
+            // The preview gate ran in the UI Action before this job was created -- see
+            // hasFreshDeletionPreview. Re-checking here would fail a job the user has already
+            // been told started, purely because the scheduler queued it for a few minutes.
 
-            if (!previewFound) {
-                result.message = 'No recent deletion preview found. Please generate a deletion preview (no older than 30 minutes) before starting deletion.';
-                return result;
-            }
+            // Get eligible workloads from deletion sync filters. Identical to the sync path's
+            // phase 1 apart from the filter type.
+            //
+            // The progress sink is what R22 was for: phase 1 now runs inside the job, so it has
+            // a record to log to, and a deletion that spends minutes matching says what it is
+            // matching instead of going quiet.
+            var progress = this.jobProgressLogger(jobSysId);
 
-            // Get eligible workloads from deletion sync filters
-            var syncFilterResult = this.getEligibleWorkloadSysIdsByConfig(configSysId, 'deletion');
+            // Per-row commentary. One line per PAYLOAD_ROW_SIZE workloads is 100 lines on a 100k
+            // deletion, so it goes to syslog and the job record keeps only the "Payload Batches:
+            // N" denominator and the Summary. See jobTraceLogger.
+            var trace = this.jobTraceLogger(jobSysId);
+
+            var syncFilterResult = new IllumioSyncFilterUtils()
+                .getEligibleWorkloadSysIdsByConfig(configSysId, 'deletion', progress);
 
             if (!syncFilterResult.hasFilter) {
                 result.message = 'No active deletion sync filters configured for this PCE Configuration.';
@@ -2467,26 +2288,65 @@ IllumioUtils.prototype = {
                 return result;
             }
 
+            // No count here any more. Phase 1 ends on "Eligible Workloads: N" and this said the
+            // same number again under a different name. current_operation still moves, because
+            // that is a field rather than a log line.
+            if (!gs.nil(jobSysId)) {
+                this.updateJobRecord(jobSysId, {
+                    current_operation: 'Building deletion payload'
+                });
+            }
+
             var self = this;
             var syncUtils = new IllumioSyncUtils();
             var repo = new IllumioSyncRepoUtils(syncUtils);
 
-            // One row per bundle rather than one row per workload: the same trade-off
-            // IllumioAutoSyncWithPCE.addObjectToPayload makes, and the same property that sizes
-            // it. Reusing that property keeps the two payload tables bounded by one number.
-            var maxPerRow = parseInt(gs.getProperty(
-                'x_illu2_illumio.max_workloads_in_each_payload_for_autosync', 10000), 10) || 10000;
+            // Before the first row is written, not after the run: rows from a dead run are
+            // unreachable -- every consumer queries by job -- so nothing else will ever remove
+            // them. The same sweep the preview export has always done, on its own table.
+            repo.deleteStalePayloadRows(
+                syncUtils.DELETION_PAYLOAD_TABLE, jobSysId, progress);
 
+            // One row per PAYLOAD_ROW_SIZE workloads, NOT one per phase-2 window. The two used to
+            // be the same thing, which made every row the window size -- 500 -- and every PCE
+            // bulk call half of what the endpoint accepts. A window is how much of the workload
+            // table is in memory at once; a row is how much the MID Server sends in one call.
+            // See PAYLOAD_ROW_SIZE in IllumioSyncUtils.
+            //
+            // Because a row now spans two windows, onWindowEnd no longer empties the bundle and
+            // the caller has to flush the tail itself. That flush is below, on the success path.
             var bundle = { retiredWorkloads: {}, vensToUnpair: [], isDeletion: true };
             var bundleCount = 0;
+
+            // Per-STEP timing, the way the discovery logs do it: rowStartedAt is reset by every
+            // flush, so each "Payload Prepared" line times its own row -- the scan that filled it
+            // plus the insert -- rather than the whole run so far. phase2StartedAt is the one
+            // cumulative clock, and it appears once, on the Summary.
+            var phase2StartedAt = new Date().getTime();
+            var rowStartedAt = phase2StartedAt;
+
+            // Predicted from the eligible count, so the "x of N" below has its denominator before
+            // the first row is written. It is a ceiling rather than a promise: workloads dropped
+            // by `duplicate=false`, by the shell builder or by the threshold never reach a bundle,
+            // so a run can legitimately finish at 7 of 8.
+            var expectedRows = Math.ceil(
+                syncFilterResult.sysIds.length / syncUtils.PAYLOAD_ROW_SIZE);
+
+            progress('Payload Batches: ' + expectedRows);
 
             var flush = function() {
                 if (bundleCount === 0) {
                     return;
                 }
 
+                // The job reference is stamped on the row because it is the ONLY thing connecting
+                // the row to this run -- the ECC message does not carry the sys_ids any more, so
+                // a row written without it is invisible to the MID Server.
+                var extraFields = {};
+                extraFields[syncUtils.PAYLOAD_JOB_FIELD] = jobSysId;
+
                 var rowSysId = repo.insertPayloadRow(
-                    syncUtils.DELETION_PAYLOAD_TABLE, JSON.stringify(bundle));
+                    syncUtils.DELETION_PAYLOAD_TABLE, JSON.stringify(bundle), extraFields);
 
                 // Thrown, not logged-and-continued: a lost row is a set of workloads that will
                 // never reach the MID Server, and carrying on would report a success count that
@@ -2495,12 +2355,26 @@ IllumioUtils.prototype = {
                     throw 'Error while inserting record in deletion payload table';
                 }
 
-                result.payloadSysIds.push(rowSysId);
+                result.payloadRowCount++;
+
+                // The insert used to be silent, so a deletion that spent minutes writing rows
+                // showed nothing between the end of phase 1 and the handoff to the MID Server.
+                // The job record keeps "Payload Batches: N" and the Summary; this per-row line is
+                // the detail behind them and goes to syslog.
+                trace('Payload Prepared: ' + result.payloadRowCount + '/' + expectedRows +
+                    syncUtils.since(rowStartedAt));
+
                 bundle = { retiredWorkloads: {}, vensToUnpair: [], isDeletion: true };
                 bundleCount = 0;
+                rowStartedAt = new Date().getTime();
             };
 
-            var outcome = this.runWorkloadChunks({
+            // syncUtils and repo passed in rather than left to default: without them this builds
+            // a second pair alongside the ones two lines up, and any per-run cache they hold
+            // (getDimensionKeyBySysId) would be built twice. Harmless on this path today because
+            // skipLabelData means the label map is never asked for, but relying on that is how a
+            // cache quietly stops being one.
+            var outcome = new IllumioSyncBuildUtils(syncUtils, repo).prepareWorkloadsForPCE({
                 pceConfigSysId: configSysId,
                 sysIds: syncFilterResult.sysIds,
                 // Duplicate workload records are excluded here rather than deduplicated by
@@ -2513,7 +2387,16 @@ IllumioUtils.prototype = {
                 skipLabelData: true,
                 applyThreshold: true,
                 operation: 'delete',
+                // Kept from when this ran inline in the user's transaction. It now runs in a
+                // Script Action, so ACLs evaluate as system and this reads the same rows
+                // GlideRecord would. Left in place deliberately rather than flipped as a side
+                // effect of moving the work off the browser; who may start a deletion is
+                // enforced by the UI Action, the same way it is for sync.
                 secure: true,
+                // Phase 2's only job-record line is its reconciliation, and only when workloads
+                // were dropped between the two phases. The per-row "Payload Prepared" lines come
+                // from flush() below, which is the side that knows how many rows there will be.
+                onProgress: progress,
                 buildShell: function(workloadGr) {
                     return self._buildDeletionShell(workloadGr, result);
                 },
@@ -2522,13 +2405,23 @@ IllumioUtils.prototype = {
                         bundle.vensToUnpair.push(workloadObject.ven_href);
                         result.unpairCount++;
                     } else {
-                        bundle.retiredWorkloads[workloadObject.pce_workload_href] =
-                            workloadObject.sys_id;
+                        // The value is a placeholder, not data. This is a SET of PCE hrefs
+                        // written as an object because ES5 has no Set; the MID Server iterates
+                        // the keys (IllumioUpdateWorkloads, `for (var hrefKey in
+                        // retiredWorkloads)`) and has never read a value. It used to hold the
+                        // ServiceNow sys_id, which nothing consumed and which was roughly half
+                        // the serialized payload -- 34 bytes of quoted sys_id per workload, so
+                        // ~34 KB on every 1000-workload row.
+                        bundle.retiredWorkloads[workloadObject.pce_workload_href] = 1;
                         result.deletionCount++;
                     }
 
                     bundleCount++;
-                    if (bundleCount >= maxPerRow) {
+
+                    // Flushed on size rather than on the window boundary, which is what lets a
+                    // row reach PAYLOAD_ROW_SIZE at all -- a window only ever holds
+                    // WORKLOAD_CHUNK_SIZE of them.
+                    if (bundleCount >= syncUtils.PAYLOAD_ROW_SIZE) {
                         flush();
                     }
                 }
@@ -2536,18 +2429,23 @@ IllumioUtils.prototype = {
 
             if (outcome.cancelJob) {
                 // The rows already written describe deletions that must not happen.
-                var withdrawn = repo.deletePayloadRows(
-                    syncUtils.DELETION_PAYLOAD_TABLE, result.payloadSysIds);
-                gs.info('[prepareDeletionPayload] Threshold limit exceeded, withdrew ' +
+                var withdrawn = repo.deletePayloadRowsForJob(
+                    syncUtils.DELETION_PAYLOAD_TABLE, jobSysId);
+                this.logger.info('[prepareDeletionPayload] Threshold limit exceeded, withdrew ' +
                     withdrawn + ' payload record(s)');
 
-                result.payloadSysIds = [];
+                result.payloadRowCount = 0;
                 result.thresholdExceeded = true;
                 result.cancelJob = true;
                 result.message = 'Deletion threshold limit exceeded. Job will be cancelled.';
                 return result;
             }
 
+            // The tail. A payload row spans windows now, so the walk almost always ends with a
+            // partial bundle in hand -- without this the last 1..999 workloads would be counted
+            // in the summary and never sent. Deliberately after the cancelJob return above: on
+            // that path the bundle describes deletions that must not happen, and writing it out
+            // just to delete it again is work done to be undone.
             flush();
 
             result.skippedCount += outcome.skippedLimit;
@@ -2561,26 +2459,27 @@ IllumioUtils.prototype = {
             }
 
             result.success = true;
-            gs.info('[prepareDeletionPayload] ' + result.message);
+            progress('Summary: ' + result.message + syncUtils.since(phase2StartedAt));
+            this.logger.info('[prepareDeletionPayload] ' + result.message);
         } catch (ex) {
-            gs.error('[prepareDeletionPayload] Exception: ' + ex);
+            this.logger.error('[prepareDeletionPayload] Exception: ' + ex);
             result.message = 'Exception occurred: ' + ex;
 
             // Rows are written as the scan proceeds, so an exception part-way through leaves
             // real rows behind for a job that will never be dispatched. The caller only
             // withdraws on the paths where this returned success, so clean up here.
-            // payloadSysIds is non-empty only once repo/syncUtils have been assigned.
-            if (result.payloadSysIds.length > 0) {
+            // payloadRowCount is non-zero only once repo/syncUtils have been assigned.
+            if (result.payloadRowCount > 0) {
                 try {
-                    var abandoned = repo.deletePayloadRows(
-                        syncUtils.DELETION_PAYLOAD_TABLE, result.payloadSysIds);
-                    gs.info('[prepareDeletionPayload] Withdrew ' + abandoned +
+                    var abandoned = repo.deletePayloadRowsForJob(
+                        syncUtils.DELETION_PAYLOAD_TABLE, jobSysId);
+                    this.logger.info('[prepareDeletionPayload] Withdrew ' + abandoned +
                         ' payload record(s) after exception');
                 } catch (cleanupEx) {
-                    gs.error('[prepareDeletionPayload] Failed to withdraw payload records: ' +
+                    this.logger.error('[prepareDeletionPayload] Failed to withdraw payload records: ' +
                         cleanupEx);
                 }
-                result.payloadSysIds = [];
+                result.payloadRowCount = 0;
             }
         }
 
@@ -2651,9 +2550,9 @@ IllumioUtils.prototype = {
                 return result;
             }
 
-            var chunks = this._chunkArray(sysIds, 500);
+            var chunks = this._chunkArray(sysIds, BATCH_SIZE_MEDIUM);
             for (var c = 0; c < chunks.length; c++) {
-                var gr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_workload');
+                var gr = new GlideRecordSecure(TABLE_PCE_WORKLOAD);
                 gr.addQuery('sys_id', 'IN', chunks[c].join(','));
                 gr.query();
 
@@ -2681,7 +2580,10 @@ IllumioUtils.prototype = {
                         }
                     } else {
                         if (!result.retiredWorkloads.hasOwnProperty(pceHref)) {
-                            result.retiredWorkloads[pceHref] = gr.getUniqueValue();
+                            // A placeholder, for the reason given in prepareDeletionPayload's
+                            // appendRow: this is a set of hrefs, and the sys_id that used to sit
+                            // here was read by nothing.
+                            result.retiredWorkloads[pceHref] = 1;
                             result.deletionCount++;
                         }
                     }
@@ -2691,31 +2593,103 @@ IllumioUtils.prototype = {
             result.success = true;
             result.message = result.deletionCount + ' workload(s) for deletion, ' + result.unpairCount + ' workload(s) for unpair' +
                 (result.skippedCount > 0 ? ', ' + result.skippedCount + ' skipped' : '');
-            gs.info('[buildDeletionPayloadFromSysIds] ' + result.message);
+            this.logger.info('[buildDeletionPayloadFromSysIds] ' + result.message);
         } catch (ex) {
-            gs.error('[buildDeletionPayloadFromSysIds] Exception: ' + ex);
+            this.logger.error('[buildDeletionPayloadFromSysIds] Exception: ' + ex);
             result.message = 'Exception occurred: ' + ex;
         }
 
         return result;
     },
 
-    _workloadToObject: function(gr) {
-        return {
-            sys_id: gr.getUniqueValue(),
-            hostname: gr.getValue('hostname'),
-            source_table: gr.getValue('source_table'),
-            known_to_pce: gr.getValue('known_to_pce'),
-            conflicts: gr.getValue('conflicts'),
-            duplicate: gr.getValue('duplicate'),
-            pce_workload_href: gr.getValue('pce_workload_href'),
-            servicenow_cmdb_identifier: gr.getValue('servicenow_cmdb_identifier'),
-            public_ip_address: gr.getValue('public_ip_address'),
-            ven_href: gr.getValue('ven_href'),
-            ven_status: gr.getValue('ven_status'),
-            enforcement_mode: gr.getValue('enforcement_mode'),
-            illumio_pce_configuration: gr.getValue('illumio_pce_configuration')
+    /**
+     * Write a manual deletion's payload to the deletion payload table, in MID-sized rows.
+     *
+     * The manual path (Delete Workload / Delete Selected Workloads, via IllumioDeletionHandler)
+     * used to inline the whole payload into the ECC message and the MID Server read it back from
+     * `glide.jms.workloads_to_delete`. R33 moved the filter-driven deletion off the message and
+     * onto this table; the MID's delete branch now reads payload rows and nothing else, so the
+     * manual path has to write them too or the MID finds nothing to do.
+     *
+     * Rows are cut at PAYLOAD_ROW_SIZE the same way prepareDeletionPayload cuts them, so both
+     * paths produce rows of the same size and the MID's "Batch n/X" means the same thing on each.
+     * VENs and workloads are packed independently -- they are counted against separate PCE calls
+     * on the MID -- which is why the row cut is checked after each push rather than once.
+     *
+     * @param {String} jobSysId sys_id of the scheduled job the rows belong to
+     * @param {Object} retiredWorkloads { pceHref: 1 } from buildDeletionPayloadFromSysIds
+     * @param {Array} vensToUnpair VEN hrefs from buildDeletionPayloadFromSysIds
+     * @returns {Number} Rows written, or -1 if any insert failed
+     */
+    writeDeletionPayloadRows: function(jobSysId, retiredWorkloads, vensToUnpair) {
+        var syncUtils = new IllumioSyncUtils();
+        var repo = new IllumioSyncRepoUtils(syncUtils);
+        // Captured: flush() below is a plain function expression, so `this` is not this object
+        // inside it. W3.
+        var logger = this.logger.setContext(jobSysId);
+
+        // Same sweep the other two paths do, for the same reason: rows from a run that died are
+        // unreachable, because every consumer queries by job.
+        repo.deleteStalePayloadRows(syncUtils.DELETION_PAYLOAD_TABLE, jobSysId);
+
+        var extraFields = {};
+        extraFields[syncUtils.PAYLOAD_JOB_FIELD] = jobSysId;
+
+        var bundle = { retiredWorkloads: {}, vensToUnpair: [], isDeletion: true };
+        var bundleCount = 0;
+        var rowCount = 0;
+        var failed = false;
+
+        var flush = function() {
+            if (bundleCount === 0 || failed) {
+                return;
+            }
+
+            var rowSysId = repo.insertPayloadRow(
+                syncUtils.DELETION_PAYLOAD_TABLE, JSON.stringify(bundle), extraFields);
+
+            if (gs.nil(rowSysId)) {
+                logger.error('[writeDeletionPayloadRows] Could not insert a deletion payload row for ' +
+                    'job ' + jobSysId + '. Nothing will be sent to the PCE.');
+                failed = true;
+                return;
+            }
+
+            rowCount++;
+            bundle = { retiredWorkloads: {}, vensToUnpair: [], isDeletion: true };
+            bundleCount = 0;
         };
+
+        var vens = vensToUnpair || [];
+        for (var v = 0; v < vens.length && !failed; v++) {
+            bundle.vensToUnpair.push(vens[v]);
+            bundleCount++;
+            if (bundleCount >= syncUtils.PAYLOAD_ROW_SIZE) {
+                flush();
+            }
+        }
+
+        for (var href in retiredWorkloads) {
+            if (!retiredWorkloads.hasOwnProperty(href) || failed) {
+                continue;
+            }
+            bundle.retiredWorkloads[href] = 1;
+            bundleCount++;
+            if (bundleCount >= syncUtils.PAYLOAD_ROW_SIZE) {
+                flush();
+            }
+        }
+
+        flush();
+
+        if (failed) {
+            // Withdraw rather than send part of a deletion. A half-written payload deletes a
+            // subset the user never chose, and the counts reported back would describe the whole.
+            repo.deletePayloadRowsForJob(syncUtils.DELETION_PAYLOAD_TABLE, jobSysId);
+            return -1;
+        }
+
+        return rowCount;
     },
 
     type: "IllumioUtils",
@@ -2724,14 +2698,14 @@ IllumioUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-11-04 13:11:02</sys_created_on>
         <sys_id>b630a09ddb9020d01206fd641d9619df</sys_id>
-        <sys_mod_count>467</sys_mod_count>
+        <sys_mod_count>481</sys_mod_count>
         <sys_name>IllumioUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_b630a09ddb9020d01206fd641d9619df</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:58:02</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>b630a09ddb9020d01206fd641d9619df</id>

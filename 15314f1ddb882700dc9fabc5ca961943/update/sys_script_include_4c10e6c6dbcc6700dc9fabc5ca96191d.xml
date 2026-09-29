@@ -22,6 +22,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @param {Object} discoveryUtils IllumioDiscoveryUtils, or a stand-in
      */
     initialize: function(repo, discoveryUtils) {
+        this.logger = new IllumioLogger(null, 'IllumioDiscoverAndMapCMDBServers');
         this.repo = repo || new IllumioDiscoveryRepository();
         this.discoveryUtils = discoveryUtils || new IllumioDiscoveryUtils();
         this.hostnameMap = {
@@ -58,7 +59,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             return false;
         }
 
-        gs.info("Discovery job {0} cancelled: stopping {1}", [this.illumioJobId, stage]);
+        this.logger.info("Discovery job {0} cancelled: stopping {1}", [this.illumioJobId, stage]);
         this.repo.cancelJob(this.illumioJobId, this.discoveryUtils.cancellationMessage(stage));
         return true;
     },
@@ -104,7 +105,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         var filterMode = source.filter_mode || 'exclusion_legacy';
         var filterCondition = source.exclude_condition;
 
-        gs.info("Started mapping CMDB Servers with PCE from table {0} (filter mode: {1})", [table, filterMode]);
+        this.logger.info("Started mapping CMDB Servers with PCE from table {0} (filter mode: {1})", [table, filterMode]);
 
         var ctx = {
             pceConfig: pceConfig,
@@ -168,13 +169,18 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         ctx.totalRecords = this.repo.countFilteredCMDBRecords(table, filterMode, filterCondition, maxRecords);
         var totalBatches = Math.ceil(ctx.totalRecords / this.discoveryUtils.DISCOVERY_WINDOW_SIZE);
 
-        this.repo.log(this.illumioJobId, this.discoveryUtils.formatFilteredLog(ctx.totalRecords, Date.now() - filterStartTime, table));
+        this.repo.log(this.illumioJobId, this.discoveryUtils.formatFilteredLog(ctx.totalRecords, filterStartTime, table));
         this.repo.log(this.illumioJobId, this.discoveryUtils.formatProcessingLog(ctx.totalRecords, table, totalBatches));
 
         if (totalBatches > 0) {
             // Fetching and comparing the first window takes as long as any other batch,
-            // so announce it up front rather than leaving the log silent until it completes
-            this.repo.log(this.illumioJobId, "Starting processing of Batch 1");
+            // so announce it up front rather than leaving the log silent until it completes.
+            //
+            // Syslog now that the per-window lines are there too. On the job record this
+            // announced a batch whose completion never appears -- the reader is left waiting for
+            // a "Batch 1 done" that was deliberately moved out. In the correlated trail it sits
+            // directly above the window lines it introduces.
+            this.logger.setContext(this.illumioJobId).info("Starting processing of Batch 1");
         }
 
         ctx.windowStartTime = Date.now();
@@ -208,7 +214,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             // writes to a cancelled job -- so the stage is handed up to process(), which
             // closes the job out through the one write that bypasses that guard.
             this.cancelledAt = this.discoveryUtils.cancelledStage(table, ctx.processedTotal, ctx.totalRecords);
-            gs.info("Stopped mapping {0}: job cancelled after {1} of {2} records", [table, ctx.processedTotal, ctx.totalRecords]);
+            this.logger.info("Stopped mapping {0}: job cancelled after {1} of {2} records", [table, ctx.processedTotal, ctx.totalRecords]);
             return;
         }
 
@@ -246,7 +252,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
 
         // A hostname of only whitespace trims to "" and is correctly skipped here
         if (gs.nil(hostname)) {
-            gs.info("[process] No hostname exist for {0} table having record with sys_id: {1}", [ctx.table, sourceTableGr.sys_id]);
+            this.logger.info("[process] No hostname exist for {0} table having record with sys_id: {1}", [ctx.table, sourceTableGr.sys_id]);
             return;
         }
 
@@ -300,14 +306,26 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
 
         // Before the batch line, so the reason reads ahead of the totals it explains.
         // Empty unless this window actually refused a creation.
+        //
+        // Syslog, not the job record. This was kept on the record on the grounds that it is
+        // conditional -- and that holds for "Creation disabled" and "Condition not satisfied",
+        // which are sporadic. It does NOT hold for "Limit reached": once the unknown-creation
+        // limit is hit it stays hit, so every remaining window emits one, and a 100k run is a
+        // hundred windows all saying the same thing with a different number. The run total is on
+        // the phase-end summary, which is the figure worth reading anyway.
         var skipLog = this.discoveryUtils.formatUnknownSkipLog(counts);
         if (skipLog) {
-            this.repo.log(this.illumioJobId, skipLog);
+            this.logger.setContext(this.illumioJobId).info(skipLog);
         }
 
-        this.repo.log(this.illumioJobId, this.discoveryUtils.formatBatchLog(
+        // W2: per-window, so syslog rather than the job record. A large CMDB is hundreds of
+        // windows and this was one job-record write for each; the phase-end line carries the
+        // totals. The skip line above stays on the record because it is conditional -- it only
+        // appears when a window actually refused a creation, which is something to see on the
+        // form rather than go looking for.
+        this.logger.setContext(this.illumioJobId).info(this.discoveryUtils.formatBatchLog(
             windowNumber, ctx.processedTotal, ctx.totalRecords, ctx.table,
-            Date.now() - ctx.windowStartTime, counts));
+            ctx.windowStartTime, counts));
 
         ctx.windowStartTime = Date.now();
     },
@@ -375,7 +393,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
                 "cmdb_value": this.getValueFromCMDB(sourceTableGr, pceConfig.source[table].label_dimensions[field]),
                 "label_dimension_sys_id": pceConfig.source[table].label_dimensions[field]["label_dimension_sys_id"]
             };
-            // Same list IllumioGetPCEConfiguration.getMappedFields(cfg)[table] returned to the
+            // Same list IllumioGetPCEConfiguration.getLabelDimensionsBySourceTable(cfg)[table] returned to the
             // business rules, but read from the config already in memory. Captured here, before
             // _updatePCELabelValues can add PCE-only dimensions to labelDimesion.
             tempWorkload["mappedLabelKeys"].push(field);
@@ -411,7 +429,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         // Local, not an instance field: nothing outside this method ever read it.
         var skipAutoSync = this.repo.isPostSyncJob(illumioJobId);
         if (skipAutoSync) {
-            gs.info('[IllumioDiscoverAndMapCMDBServers] Post-sync discovery detected. Auto sync will be skipped.');
+            this.logger.info('[IllumioDiscoverAndMapCMDBServers] Post-sync discovery detected. Auto sync will be skipped.');
         }
 
         // Declared outside the try because the catch reads it. It is still undefined
@@ -423,14 +441,14 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
 
             // check if configuration is available
             if (gs.nil(pceConfig)) {
-                gs.error("Failed to fetch PCE configuration");
+                this.logger.error("Failed to fetch PCE configuration");
                 this.repo.failJob(this.illumioJobId, "Failed to fetch PCE configuration ");
                 return;
             }
 
             // check if field mappings are configured
             if (gs.nil(pceConfig.source)) {
-                gs.error("No PCE field mapping configured for PCE Configuration named {0}", pceConfig["name"]);
+                this.logger.error("No PCE field mapping configured for PCE Configuration named {0}", pceConfig["name"]);
                 this.repo.failJob(this.illumioJobId, "No PCE field mapping configured ");
                 return;
             }
@@ -444,11 +462,20 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
                 return;
             }
 
-            gs.info("Deleting existing custom table data for PCE Configuration {0}", pceConfig["name"]);
+            this.logger.info("Deleting existing custom table data for PCE Configuration {0}", pceConfig["name"]);
 
-            this.repo.deleteStaleDiscoveryData(this.pceConfigId, this.illumioJobId);
+            // A stale-data step that could not clear its table ends the run here. Everything
+            // after this point -- the CMDB scan, the comparison, auto sync, and the deletion
+            // candidates that come out of it -- is computed against these tables, so surviving
+            // rows from the previous run do not degrade the result, they falsify it. The step
+            // has already written its own explanation to the job record and to syslog.
+            if (!this.repo.deleteStaleDiscoveryData(this.pceConfigId, this.illumioJobId)) {
+                this.repo.failJob(this.illumioJobId,
+                    "PHASE - FAILED: stale data from the previous run could not be deleted.");
+                return;
+            }
 
-            gs.info("Existing custom table data deleted for PCE Configuration {0}", pceConfig["name"]);
+            this.logger.info("Existing custom table data deleted for PCE Configuration {0}", pceConfig["name"]);
 
             if (this._stopIfCancelled("while clearing stale discovery data")) {
                 return;
@@ -480,7 +507,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
                 });
 
                 // Start Synchronizing with PCE
-                gs.info("Synchronizing with PCE");
+                this.logger.info("Synchronizing with PCE");
                 this.repo.runAutoSync(this.illumioJobId);
             } else {
                 this.repo.completeJob(this.illumioJobId,
@@ -489,7 +516,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
 
             var endTime = Date.now();
             var timeTaken = endTime - startTime;
-            gs.info("Time taken to finish mapping {0} milliseconds for PCE Configuration {1}", [timeTaken, pceConfig["name"]]);
+            this.logger.info("Time taken to finish mapping {0} milliseconds for PCE Configuration {1}", [timeTaken, pceConfig["name"]]);
         } catch (e) {
             // pceConfig is still undefined when getPceConfiguration itself threw, and reading
             // ["name"] off it raised a TypeError from INSIDE this catch -- before failJob ran,
@@ -497,7 +524,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             // removes, so the guard must stay ahead of the gs.error call.
             var configName = pceConfig ? pceConfig["name"] : "(unknown)";
 
-            gs.error("Exception occurred while mapping data for PCE Configuration {0} Error{1}", [configName, e]);
+            this.logger.error("Exception occurred while mapping data for PCE Configuration {0} Error{1}", [configName, e]);
             this.repo.failJob(this.illumioJobId, "Exception occurred while mapping data " + e);
         }
     },
@@ -520,12 +547,12 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
     _isValidHostName: function(hostname) {
         try {
             if (!this.discoveryUtils.isValidHostName(hostname)) {
-                gs.error("Hostname {0} does not match the expected hostname format; adding it anyway.", hostname);
+                this.logger.error("Hostname {0} does not match the expected hostname format; adding it anyway.", hostname);
             }
         } catch (e) {
             // Only reachable when hostname is not a string -- _collectRecord has already
             // excluded nil -- so this is a genuine data-shape failure worth failing the job on
-            gs.error("Skipped adding hostname {0} to the x_illu2_illumio_illumio_pce_workload table due to exception. Error{1}", [hostname, e]);
+            this.logger.error("Skipped adding hostname {0} to the x_illu2_illumio_illumio_pce_workload table due to exception. Error{1}", [hostname, e]);
             this.repo.failJob(this.illumioJobId, "Skipped adding hostname " + hostname +
                 " to the x_illu2_illumio_illumio_pce_workload table due to exception. " + e);
             return;
@@ -582,7 +609,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             var workloadLabels = JSON.parse(workloadMapping.labels);
             this._updatePCELabelValues(sourceTableGr, workloadLabels);
         } catch (err) {
-            gs.error("Error while parsing labels from workloadMapping record {0}. Error{1}", [workloadMapping.labels, err]);
+            this.logger.error("Error while parsing labels from workloadMapping record {0}. Error{1}", [workloadMapping.labels, err]);
             this.repo.failJob(this.illumioJobId,
                 "Error while parsing labels from workloadMapping record" + workloadMapping.labels + ". " + err);
         }
@@ -822,7 +849,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
                 this._createUnknownWorkload(hostname, sourceTableGr);
             }
         } catch (e) {
-            gs.error("[addToCustomTable] Exception while adding hostname {0} to workloads list. Error{1}", [hostname, e]);
+            this.logger.error("[addToCustomTable] Exception while adding hostname {0} to workloads list. Error{1}", [hostname, e]);
             this.repo.failJob(this.illumioJobId,
                 "Exception while adding hostname " + hostname + " to workloads list. Exception: " + e);
             return;
@@ -953,14 +980,14 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:26:01</sys_created_on>
         <sys_id>4c10e6c6dbcc6700dc9fabc5ca96191d</sys_id>
-        <sys_mod_count>435</sys_mod_count>
+        <sys_mod_count>440</sys_mod_count>
         <sys_name>IllumioDiscoverAndMapCMDBServers</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4c10e6c6dbcc6700dc9fabc5ca96191d</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+        <sys_updated_on>2026-09-29 12:56:35</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>4c10e6c6dbcc6700dc9fabc5ca96191d</id>

@@ -30,16 +30,21 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[(function executeRule(current, previous /*null when async*/ ) {
+        <script><![CDATA[gs.include("IllumioConstants");
+// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Initial fetch of label dimensions');
+
+(function executeRule(current, previous /*null when async*/ ) {
     // Fetch the label dimensions from Illumio PCE for this configuration
     try {
         var IllumioUtils = new x_illu2_illumio.IllumioUtils();
 		// reverting to GlideRecord to read and parse MID server properties
-        var pceConfig = new GlideRecord("x_illu2_illumio_illumio_pce_conf");
+        var pceConfig = new GlideRecord(TABLE_PCE_CONF);
         if (pceConfig.get(current.getValue("illumio_pce_configuration"))) {
             var responseDict = IllumioUtils.getLabelDimensions(pceConfig);
             if (!responseDict["status"]) {
-                gs.error("Failed fetching of Label Dimensions from Illumio PCE for PCE configuration" + pceConfig.getValue("name") + ".");
+                illumioLogger.error("Failed fetching of Label Dimensions from Illumio PCE for PCE configuration" + pceConfig.getValue("name") + ".");
             } else {
                 response = responseDict["response"];
                 response_status = responseDict["statusCode"];
@@ -51,12 +56,12 @@
                         IllumioUtils.createOrUpdateLabelDimensionRecord(response[i], pceConfig);
                     }
                 } else {
-                    gs.error("Error while fetching the label dimensions for the PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
+                    illumioLogger.error("Error while fetching the label dimensions for the PCE configuration " + pceConfig.getValue("name") + ". Status code - " + response_status + ". Response - " + JSON.stringify(response));
                 }
             }
         }
     } catch (exc) {
-        gs.error("Error while fetching the label dimension for PCE configuration - " + pceConfig.getValue("name") + ". Error - " + exc);
+        illumioLogger.error("Error while fetching the label dimension for PCE configuration - " + pceConfig.getValue("name") + ". Error - " + exc);
     }
 
 })(current, previous);]]></script>
@@ -66,7 +71,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>4845d98c97600a10b7daf896f053afb9</sys_id>
-        <sys_mod_count>11</sys_mod_count>
+        <sys_mod_count>13</sys_mod_count>
         <sys_name>Initial fetch of label dimensions</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -74,7 +79,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_4845d98c97600a10b7daf896f053afb9</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-20 15:45:31</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:44</sys_updated_on>
         <template/>
         <when>async_always</when>
     </sys_script>

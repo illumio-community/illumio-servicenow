@@ -30,7 +30,8 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[(function executeRule(current, previous) {
+        <script><![CDATA[gs.include("IllumioConstants");
+(function executeRule(current, previous) {
       if (gs.nil(current.getValue('sync_filter_group'))) {
           gs.addErrorMessage('Sync Filter Group is required. Please select a group for this filter item.');
           current.setAbortAction(true);
@@ -45,7 +46,7 @@
       }
       
       // Check for duplicate: same group + same dimension
-      var gr = new GlideRecord('x_illu2_illumio_illumio_label_filter_item');
+      var gr = new GlideRecord(TABLE_LABEL_FILTER_ITEM);
       gr.addQuery('sync_filter_group', current.getValue('sync_filter_group'));
       gr.addQuery('label_dimension', current.getValue('label_dimension'));
       gr.addQuery('sys_id', '!=', current.getUniqueValue());
@@ -71,7 +72,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>fbbf38c6c338071050bffa0ed40131b7</sys_id>
-        <sys_mod_count>5</sys_mod_count>
+        <sys_mod_count>6</sys_mod_count>
         <sys_name>Ensure Unique Label Dimension Per Group</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -79,7 +80,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_fbbf38c6c338071050bffa0ed40131b7</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-20 15:45:31</sys_updated_on>
+        <sys_updated_on>2026-09-24 05:43:14</sys_updated_on>
         <template/>
         <when>before</when>
     </sys_script>

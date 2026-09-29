@@ -32,13 +32,18 @@
         <name>Illumio Data Collection</name>
         <onclick/>
         <order>200</order>
-        <script><![CDATA[var configClassGr = new GlideRecordSecure('x_illu2_illumio_illumio_config_class_mapping');
+        <script><![CDATA[gs.include("IllumioConstants");
+// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Illumio Data Collection');
+
+var configClassGr = new GlideRecordSecure(TABLE_CONFIG_CLASS_MAPPING);
 configClassGr.addActiveQuery();
 configClassGr.addQuery('illumio_pce_configuration', current.getUniqueValue());
 configClassGr.query();
 if (configClassGr.hasNext()) {
     while (configClassGr.next()) {
-        var fieldMappingGr = new GlideRecordSecure('x_illu2_illumio_illumio_class_field_mapping');
+        var fieldMappingGr = new GlideRecordSecure(TABLE_CLASS_FIELD_MAPPING);
         fieldMappingGr.addQuery('type', 'host_name');
 		fieldMappingGr.addQuery('illumio_config_class_mapping',configClassGr.getUniqueValue());
         fieldMappingGr.addActiveQuery();
@@ -46,7 +51,7 @@ if (configClassGr.hasNext()) {
         fieldMappingGr.query();
         if (!fieldMappingGr.hasNext()) {
             gs.addErrorMessage('Can not start the discovery as there is no PCE field mapping for Host Name configured.');
-            gs.error('Can not start the discovery as there is no PCE field mapping for Host Name configured.');
+            illumioLogger.error('Can not start the discovery as there is no PCE field mapping for Host Name configured.');
             current.setAbortAction(true);
 			break;
         } else {
@@ -54,7 +59,7 @@ if (configClassGr.hasNext()) {
             var midGr = current.mid_server;
             var utils = new IllumioUtils();
             if (utils.canStartJob(current, midGr)) {
-                var runningJobsCount = new GlideAggregate("x_illu2_illumio_illumio_scheduled_jobs");
+                var runningJobsCount = new GlideAggregate(TABLE_SCHEDULED_JOBS);
                 runningJobsCount.addQuery('illumio_pce_configuration', current.getUniqueValue());
                 runningJobsCount.addQuery('job_status', 'running');
                 runningJobsCount.addAggregate('COUNT');
@@ -62,7 +67,7 @@ if (configClassGr.hasNext()) {
                 if (runningJobsCount.next()) {
                     if (runningJobsCount.getAggregate('COUNT') > 0) {
                         gs.addErrorMessage('Can not start discovery as there is already one job in running status for this Illumio PCE Configuration.');
-                        gs.info('Can not start discovery as there is already one job in running status for this Illumio PCE Configuration.');
+                        illumioLogger.info('Can not start discovery as there is already one job in running status for this Illumio PCE Configuration.');
 						break;
                     } else {
                         gs.addInfoMessage("The Discovery process may take a few minutes to complete.");
@@ -77,7 +82,7 @@ if (configClassGr.hasNext()) {
     }
 } else {
     gs.addErrorMessage('Can not start the discovery as there is no active Config Class mapping configured.');
-    gs.error('Can not start the discovery as there is no active Config Class mapping configured.');
+    illumioLogger.error('Can not start the discovery as there is no active Config Class mapping configured.');
     current.setAbortAction(true);
 }]]></script>
         <show_form_icon_only>false</show_form_icon_only>
@@ -92,7 +97,7 @@ if (configClassGr.hasNext()) {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>9771a60adbcc6700dc9fabc5ca961962</sys_id>
-        <sys_mod_count>37</sys_mod_count>
+        <sys_mod_count>39</sys_mod_count>
         <sys_name>Illumio Data Collection</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -100,7 +105,7 @@ if (configClassGr.hasNext()) {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_9771a60adbcc6700dc9fabc5ca961962</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-06-01 15:33:12</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:45</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_conf</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

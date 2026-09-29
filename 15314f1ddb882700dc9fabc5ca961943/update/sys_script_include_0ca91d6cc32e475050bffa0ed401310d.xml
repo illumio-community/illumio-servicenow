@@ -9,8 +9,12 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioDeletionHandler</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioDeletionHandler = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioDeletionHandler = Class.create();
 IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProcessor, {
+
+    // On the prototype, not in initialize -- see the note in IllumioUpdatePCE.
+    logger: new IllumioLogger(null, 'IllumioDeletionHandler'),
 
     deleteSelectedWorkloads: function() {
         var checkedSysIds = String(this.getParameter('sysparm_checked_sysids') || '');
@@ -38,7 +42,7 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
 
             var configSet = {};
             for (var i = 0; i < sysIds.length; i++) {
-                var wlGr = new GlideRecord('x_illu2_illumio_illumio_pce_workload');
+                var wlGr = new GlideRecord(TABLE_PCE_WORKLOAD);
                 if (wlGr.get(sysIds[i])) {
                     var cfg = wlGr.getValue('illumio_pce_configuration');
                     if (!gs.nil(cfg)) {
@@ -57,7 +61,7 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
             }
             var configSysId = configKeys[0];
 
-            var runningJobs = new GlideAggregate('x_illu2_illumio_illumio_scheduled_jobs');
+            var runningJobs = new GlideAggregate(TABLE_SCHEDULED_JOBS);
             runningJobs.addQuery('job_status', 'running');
             runningJobs.addQuery('illumio_pce_configuration', configSysId);
             runningJobs.addAggregate('COUNT');
@@ -67,7 +71,7 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 return JSON.stringify(result);
             }
 
-            var scheduledJobGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
+            var scheduledJobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
             scheduledJobGr.initialize();
             scheduledJobGr.job_owner = gs.getUser().getID();
             scheduledJobGr.job_type = 'deletion';
@@ -76,8 +80,8 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
             scheduledJobGr.current_operation = 'Deleting selected workloads';
             scheduledJobGr.illumio_pce_configuration = configSysId;
 
-            var logTimestamp = new Date(new GlideDateTime().getNumericValue()).toISOString();
-            var logs = '[' + logTimestamp + '] Manual deletion started: ' + payload.deletionCount + ' workload(s) for deletion, ' + payload.unpairCount + ' workload(s) for unpair';
+            // W2: no per-line timestamp -- syslog_app_scope timestamps the same milestone.
+            var logs = 'Manual deletion started: ' + payload.deletionCount + ' workload(s) for deletion, ' + payload.unpairCount + ' workload(s) for unpair';
             if (payload.skippedCount > 0) {
                 logs += ', ' + payload.skippedCount + ' skipped';
             }
@@ -89,6 +93,25 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 return JSON.stringify(result);
             }
 
+            // The payload goes to the deletion payload table, not into the ECC message. R33 moved
+            // the MID Server's delete branch onto that table and it reads nothing else, so a
+            // message carrying the workloads inline now arrives at a MID that will not look at
+            // it. Writing rows here is what puts this path back on the same transport as the
+            // filter-driven deletion -- same row shape, same PAYLOAD_ROW_SIZE cut, same
+            // "Batch n/X" lines in the job log.
+            var payloadRows = new IllumioUtils().writeDeletionPayloadRows(
+                jobSysId, payload.retiredWorkloads, payload.vensToUnpair);
+
+            if (payloadRows < 1) {
+                scheduledJobGr.get(jobSysId);
+                scheduledJobGr.job_status = 'failed';
+                scheduledJobGr.job_completed = new GlideDateTime();
+                scheduledJobGr.logs += '\nCould not write the deletion payload. Nothing was sent to the MID server.';
+                scheduledJobGr.update();
+                result.message = 'Could not write the deletion payload. Nothing was deleted.';
+                return JSON.stringify(result);
+            }
+
             var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
 
             var parameters = {
@@ -96,8 +119,9 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 operation: 'delete',
                 partialSucc: 'false',
                 skipped: payload.skippedCount + '',
-                workloads_to_delete: JSON.stringify(payload.retiredWorkloads),
-                vens_to_unpair: JSON.stringify(payload.vensToUnpair),
+                // What the instance says it wrote. The MID finds the rows itself, by job; this is
+                // carried only so a mismatch between written and found can be logged.
+                payloadRows: payloadRows + '',
                 pce_url: pceConfig.pceUrl,
                 pce_secret: pceConfig.pceSecret,
                 pce_username: pceConfig.pceUsername,
@@ -105,7 +129,8 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 pce_authorization: gs.base64Encode(pceConfig.pceUsername + ':' + pceConfig.pceSecret),
                 configSysId: configSysId,
                 time_zone: gs.getSession().getTimeZoneName(),
-                batch_size: gs.getProperty('x_illu2_illumio.bulk_operation_batch_size', 1000),
+                // Was x_illu2_illumio.bulk_operation_batch_size, retired. See IllumioConstants.
+                batch_size: BATCH_SIZE_STANDARD,
                 enable_pce_mid_proxy: pceConfig.enable_pce_mid_proxy,
                 retry_params: JSON.stringify(pceConfig.retry_params)
             };
@@ -117,15 +142,22 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 result.success = true;
                 result.message = 'Deletion process started. ' + payload.deletionCount + ' workload(s) for deletion, ' + payload.unpairCount + ' for unpair. Track progress in Scheduled Jobs.';
             } else {
+                // Withdraw the rows. Nothing will ever consume them -- the MID is reached only
+                // through the message that just failed to go out -- and the next run's stale
+                // sweep would otherwise be the first thing to notice them.
+                var syncUtils = new IllumioSyncUtils();
+                new IllumioSyncRepoUtils(syncUtils)
+                    .deletePayloadRowsForJob(syncUtils.DELETION_PAYLOAD_TABLE, jobSysId);
+
                 scheduledJobGr.get(jobSysId);
                 scheduledJobGr.job_status = 'failed';
                 scheduledJobGr.job_completed = new GlideDateTime();
-                scheduledJobGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] Failed to dispatch deletion to MID server';
+                scheduledJobGr.logs += '\nFailed to dispatch deletion to MID server';
                 scheduledJobGr.update();
                 result.message = 'Failed to dispatch deletion to MID server.';
             }
         } catch (ex) {
-            gs.error('[IllumioDeletionHandler.deleteSelectedWorkloads] Exception: ' + ex);
+            this.logger.error('[IllumioDeletionHandler.deleteSelectedWorkloads] Exception: ' + ex);
             result.message = 'Error deleting workloads: ' + ex;
         }
 
@@ -143,10 +175,10 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
 
             var sysIds = checkedSysIds.split(',').filter(Boolean);
             var utils = new IllumioUtils();
-            var chunks = utils._chunkArray(sysIds, 500);
+            var chunks = utils._chunkArray(sysIds, BATCH_SIZE_MEDIUM);
 
             for (var c = 0; c < chunks.length; c++) {
-                var gr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_workload');
+                var gr = new GlideRecordSecure(TABLE_PCE_WORKLOAD);
                 gr.addQuery('sys_id', 'IN', chunks[c].join(','));
                 gr.query();
 
@@ -162,7 +194,7 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 }
             }
         } catch (ex) {
-            gs.error('[IllumioDeletionHandler.validateWorkloadsForDeletion] Exception: ' + ex);
+            this.logger.error('[IllumioDeletionHandler.validateWorkloadsForDeletion] Exception: ' + ex);
         }
 
         return JSON.stringify(result);
@@ -175,14 +207,14 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-08-03 15:39:42</sys_created_on>
         <sys_id>0ca91d6cc32e475050bffa0ed401310d</sys_id>
-        <sys_mod_count>5</sys_mod_count>
+        <sys_mod_count>8</sys_mod_count>
         <sys_name>IllumioDeletionHandler</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0ca91d6cc32e475050bffa0ed401310d</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-08-24 06:52:17</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>0ca91d6cc32e475050bffa0ed401310d</id>

@@ -3,40 +3,9 @@
         <action_name>show_matching_workloads</action_name>
         <active>true</active>
         <client>false</client>
-        <client_script_v2><![CDATA[function onClick(g_form, g_list) {
-    var syncFilterSysId = '';
-
-    // Determine context: form or list
-    if (typeof g_form !== 'undefined' && g_form && g_form.getUniqueValue) {
-        // Form context
-        syncFilterSysId = g_form.getUniqueValue();
-    } else if (typeof g_list !== 'undefined' && g_list) {
-        // List context - get selected row's sys_id
-        var selectedRows = g_list.getChecked();
-        if (selectedRows) {
-            syncFilterSysId = selectedRows.split(',')[0];
-        }
-    }
-
-    // Fallback: try to get from URL or global variable
-    if (!syncFilterSysId && typeof gel !== 'undefined' && gel('sys_uniqueValue')) {
-        syncFilterSysId = gel('sys_uniqueValue').value;
-    }
-
-    if (!syncFilterSysId) {
-        alert('Unable to determine Sync Filter. Please select a record.');
-        return false;
-    }
-
-    // Open the UI Page in a GlideDialogWindow
-    var dialog = new GlideDialogWindow('illumio_sync_filter_matching_workloads');
-    dialog.setTitle('Matching Workloads');
-    dialog.setPreference('sysparm_sync_filter_id', syncFilterSysId);
-    dialog.setSize(700, 600);
-    dialog.render();
-
-    return false;
-}
+        <client_script_v2><![CDATA[// DEPRECATED -- intentionally empty. The UI Action record is kept in a deactivated state
+// because the ServiceNow certifiers require the entry to exist. Do not add code here and do
+// not include this file in app-wide scans. Live replacement: the Export Matching Workloads pair.
 ]]></client_script_v2>
         <comments/>
         <condition/>
@@ -64,42 +33,9 @@
         <name>Show Matching Workloads</name>
         <onclick>onClick()</onclick>
         <order>100</order>
-        <script><![CDATA[(function executeShowMatchingWorkloads(current, action, gs) {
-    var syncFilterSysId = current.getUniqueValue();
-    var tableName = current.getTableName();
-    var redirectUrl = tableName + '.do?sys_id=' + syncFilterSysId;
-
-    if (gs.nil(syncFilterSysId)) {
-        gs.addErrorMessage("Unable to determine Sync Filter.");
-        action.setRedirectURL(redirectUrl);
-        return;
-    }
-
-    var utils = new IllumioUtils();
-    var result = utils.getWorkloadsBySyncFilter(syncFilterSysId, true, true); // skipActiveCheck, sysIdsOnly
-
-    if (!result.success) {
-        gs.addErrorMessage("Error: " + result.message);
-        action.setRedirectURL(redirectUrl);
-        return;
-    }
-
-    var sysIds = result.sysIds;
-
-    if (!sysIds || sysIds.length === 0) {
-        gs.addInfoMessage("No workloads match the current filter criteria.");
-        action.setRedirectURL(redirectUrl);
-        return;
-    }
-
-    var REDIRECT_LIMIT = 1000;
-    if (sysIds.length <= REDIRECT_LIMIT) {
-        action.setRedirectURL("x_illu2_illumio_illumio_pce_workload_list.do?sysparm_query=sys_idIN" + sysIds.join(","));
-    } else {
-        gs.addInfoMessage(sysIds.length + " workloads match this sync filter. Use 'Export Matching Workloads' to download the full list.");
-        action.setRedirectURL(redirectUrl);
-    }
-})(current, action, gs);
+        <script><![CDATA[// DEPRECATED -- intentionally empty. The UI Action record is kept in a deactivated state
+// because the ServiceNow certifiers require the entry to exist. Do not add code here and do
+// not include this file in app-wide scans. Live replacement: the Export Matching Workloads pair.
 ]]></script>
         <show_form_icon_only>false</show_form_icon_only>
         <show_insert>false</show_insert>
@@ -113,7 +49,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>ed5b2ff5c3208f5050bffa0ed401319b</sys_id>
-        <sys_mod_count>21</sys_mod_count>
+        <sys_mod_count>24</sys_mod_count>
         <sys_name>Show Matching Workloads</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -121,7 +57,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_ed5b2ff5c3208f5050bffa0ed401319b</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:14:03</sys_updated_on>
+        <sys_updated_on>2026-09-24 07:50:47</sys_updated_on>
         <table>x_illu2_illumio_illumio_sync_filter</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

@@ -27,6 +27,16 @@ IllumioSyncUtils.prototype = {
 
     // ---- tables ----
 
+    // LITERALS HERE ON PURPOSE. The centralized copy lives in IllumioConstants as the TABLE_*
+    // globals, and everywhere else on the instance should read it from there. This file does not,
+    // for the reason in the header above: it calls no gs and touches no database so that the
+    // condition parser runs unchanged in a plain Node harness, and IllumioConstants does call gs.
+    // Reading a global from it would make this file un-runnable outside an instance, which is the
+    // one property it exists to have.
+    //
+    // A prototype literal is also evaluated at Script Include LOAD time, so a global referenced
+    // here would resolve before IllumioConstants had necessarily been loaded -- silently
+    // undefined, and a query against no table. Keep these as strings; keep them in step by hand.
     WORKLOAD_TABLE: "x_illu2_illumio_illumio_pce_workload",
     WORKLOAD_FIELD_VALUE_TABLE: "x_illu2_illumio_illumio_pce_workload_field_value",
     SYNC_FILTER_TABLE: "x_illu2_illumio_illumio_sync_filter",
@@ -34,9 +44,28 @@ IllumioSyncUtils.prototype = {
     AUTOSYNC_PAYLOAD_TABLE: "x_illu2_illumio_illumio_autosync_payload",
     DELETION_PAYLOAD_TABLE: "x_illu2_illumio_illumio_deletion_payload",
 
+    // Preview export chunks on their way to the MID Server. Unlike the two above it carries file
+    // content rather than an operation bundle -- the MID appends it to a file and never parses it.
+    PREVIEW_PAYLOAD_TABLE: "x_illu2_illumio_illumio_preview_payload",
+
+    // The reference back to the Scheduled Job, on all three payload tables above.
+    //
+    // A constant rather than a literal because it is now the ONLY link between a run and its
+    // payload rows: the MID Server finds its work by querying this column, where it used to be
+    // handed a comma-separated list of sys_ids in the ECC message (R33). Server insert, server
+    // withdrawal and the MID query all have to agree on the name, and they live in three
+    // different files -- the MID copy is PAYLOAD_JOB_FIELD in IllumioMIDConstants and must be
+    // kept in step by hand, because a MID script include cannot see this one.
+    PAYLOAD_JOB_FIELD: "job_id",
+
+    // Read only to turn a dimension sys_id back into its key when describing a condition.
+    // Nothing in the evaluation path touches it -- the queries run on sys_id throughout.
+    LABEL_DIMENSION_TABLE: "x_illu2_illumio_illumio_label_dimension",
+
     // ---- columns on WORKLOAD_FIELD_VALUE_TABLE ----
 
     DIMENSION_FIELD: "illumio_label_dimension",
+    VALUE_FIELD: "cmdb_value",
     WORKLOAD_FIELD: "illumio_pce_workload",
 
     // Added for the re-architecture so a term is an index seek rather than a join. The old
@@ -64,6 +93,28 @@ IllumioSyncUtils.prototype = {
     CI_CHUNK_SIZE: 500,
     WORKLOAD_CHUNK_SIZE: 500,
 
+    // Workloads per PAYLOAD ROW -- the size of one PCE bulk call.
+    //
+    // DELIBERATELY NOT WORKLOAD_CHUNK_SIZE, which these two used to share. They measure different
+    // things and the shared number could only ever satisfy one of them:
+    //
+    //   WORKLOAD_CHUNK_SIZE  how many sys_ids go into one `sys_id IN (...)` clause. 500 is the
+    //                        width ServiceNow plans sensibly; raising it lengthens the query
+    //                        string and the window's peak memory in phase 2.
+    //   PAYLOAD_ROW_SIZE     how many workloads the MID Server sends to the PCE in one call. The
+    //                        PCE's bulk endpoints cap at 1,000, and the MID re-chunks each row by
+    //                        the batch_size in the ECC message, which defaults to
+    //                        BATCH_SIZE_STANDARD (1,000).
+    //
+    // At 500 every PCE call was half-size and the MID's batch_size had no reachable range -- one
+    // 500-row payload chunked by 1,000 is always exactly one slice, so the property could only
+    // ever make the call smaller. That is H5 in sync-callchain.MD. Matching the two means one
+    // payload row is one PCE call at the PCE's own ceiling.
+    //
+    // A sink that accumulates to this size therefore spans TWO windows and must be flushed by the
+    // caller when the walk ends -- onWindowEnd alone no longer empties it.
+    PAYLOAD_ROW_SIZE: 1000,
+
     // Distinct (dimension key, label value) pairs resolved to PCE label hrefs in one query.
     // The PCE labels mapping table holds ~100k rows in production, so it is never loaded for a
     // whole run -- only for the workload chunk currently being built. A chunk of 500 workloads
@@ -71,15 +122,56 @@ IllumioSyncUtils.prototype = {
     // OR clause to a size the database will plan sensibly.
     LABEL_PAIR_BATCH_SIZE: 250,
 
+    // Target size of one preview payload row, in UTF-8 bytes. Rows are cut on a byte budget
+    // rather than a row count because CSV width varies several-fold with how many labels a
+    // workload carries -- "10,000 rows" is anywhere from 1 MB to 8 MB, and the point of chunking
+    // is to bound memory on both sides. The payload column is MEDIUMTEXT (16,777,215), so this
+    // leaves ~16x headroom; a row is only ever cut ABOVE the budget by the length of one CSV
+    // line, never by more.
+    PREVIEW_CHUNK_BYTES: 1048576,
+
     initialize: function() {},
+
+    /**
+     * Elapsed milliseconds as the seconds string the job logs use.
+     *
+     * Deliberately identical to IllumioDiscoveryUtils.formatDuration, which set the format the
+     * whole application logs in: a per-STEP duration, two decimal places, written by the call
+     * site as a trailing " (N.NNs)". Not re-used from there because that copy is part of the
+     * discovery log contract in JIRA/discovery-optimization/optimization-plan.md and is called
+     * from discovery's inner loops; the two must not drift, and a change to one belongs in both.
+     *
+     * Kept here rather than in IllumioUtils so it stays inside the gs-free, DB-free half of the
+     * sync code and can be asserted in the plain Node harness with everything else in this file.
+     *
+     * @param {Number} ms Elapsed milliseconds
+     * @returns {String} Seconds to two decimal places
+     */
+    formatDuration: function(ms) {
+        return (ms / 1000).toFixed(2);
+    },
+
+    /**
+     * " (12.34s)" -- the trailing duration every timed log line in the application ends with.
+     *
+     * Takes the START time rather than a duration so the call site reads as "since here", which
+     * is the only thing it ever means, and cannot accidentally pass a timestamp where elapsed
+     * milliseconds were wanted.
+     *
+     * @param {Number} startedAt Epoch milliseconds the step began
+     * @returns {String} Clause to append to a log line
+     */
+    since: function(startedAt) {
+        return ' (' + this.formatDuration(new Date().getTime() - startedAt) + 's)';
+    },
 
     // ---- condition parsing ----
 
     /**
      * Is a condition string absent or blank?
-     * A Sync Filter with both conditions empty is SKIPPED, not treated as match-everything --
-     * see IllumioUtils.getWorkloadsBySyncFilter. An empty filter is far more likely to be a
-     * half-finished one than a deliberate "sync everything".
+     * A Sync Filter with both conditions AND no extent is SKIPPED, not treated as
+     * match-everything -- see IllumioSyncFilterUtils.evaluateSyncFilter, shape A. An empty filter
+     * is far more likely to be a half-finished one than a deliberate "sync everything".
      * @param {String} encodedQuery Encoded query, possibly nil
      * @returns {Boolean} true when there is nothing to evaluate
      */
@@ -169,6 +261,34 @@ IllumioSyncUtils.prototype = {
     },
 
     /**
+     * Split one condition into its field, operator and value.
+     *
+     * The field is whatever conditionField finds; the operator is the token immediately after it,
+     * which is either a symbol (=, !=, <=) or an upper-case word (LIKE, IN, STARTSWITH, ISEMPTY);
+     * the value is the rest. `ISEMPTY` and friends carry no value, which is why an empty value is
+     * a separate check from an unsupported operator rather than a consequence of one.
+     *
+     * @param {String} condition One ^-separated condition, with or without an OR prefix
+     * @returns {Object} { field, operator, value } - any of them "" when not present
+     */
+    splitCondition: function(condition) {
+        var text = this.stripOrPrefix(condition);
+        var field = this.conditionField(text);
+        var remainder = text.substring(field.length);
+
+        // Longest-first: != and >= must be tested before = and >, or they parse as the short one
+        // with a leading junk character.
+        var match = remainder.match(/^(!=|>=|<=|=|>|<|[A-Z]+)/);
+        var operator = match ? match[0] : "";
+
+        return {
+            field: field,
+            operator: operator,
+            value: remainder.substring(operator.length)
+        };
+    },
+
+    /**
      * Does this condition pin a label dimension?
      * A dot-walk such as illumio_label_dimension.key counts: it pins the dimension just as the
      * reference itself does.
@@ -221,6 +341,44 @@ IllumioSyncUtils.prototype = {
             }
             if (this.isEndMarker(token)) {
                 break;
+            }
+
+            // Shape rules, applied to every condition in the term before anything is attached to
+            // a sub-predicate. Both used to pass straight through to the evaluator: the operator
+            // because the sub-predicate is appended to the query as raw encoded text, and the
+            // blank value because an encoded query is happy to carry one.
+            var parts = this.splitCondition(token);
+
+            // A label condition asks whether a workload carries a specific value for a specific
+            // dimension. Anything but equality makes the COUNT >= k mechanism mean something
+            // else: LIKE or STARTSWITH can match several rows of the same dimension, and the
+            // negations match every row that is not the one named.
+            if (parts.operator !== "=") {
+                result.errors.push("'" + token + "' uses " +
+                    (parts.operator === "" ? "no recognisable operator" : "the operator '" +
+                        parts.operator + "'") + ". Label conditions support 'is' only.");
+                continue;
+            }
+
+            // Blank right-hand side. It saves, and it matches every row whose column is empty --
+            // which for cmdb_value is every workload the discovery could not resolve a value for.
+            if (parts.value === "") {
+                result.errors.push("'" + token + "' has no value. " +
+                    "Complete the condition or remove it.");
+                continue;
+            }
+
+            // A sub-predicate is a Label Dimension and its CMDB Value, and nothing else. Every
+            // other column of the table used to pass through untouched: the sub-predicate is
+            // appended to the term query as raw encoded text, so a stray
+            // `illumio_pce_workload=<sys_id>` or `class_mapping=<sys_id>` silently narrowed the
+            // term to one workload or one mapping with nothing said about it anywhere.
+            if (!this.isDimensionCondition(token) && parts.field !== this.VALUE_FIELD) {
+                result.errors.push("'" + token + "' is a condition on '" +
+                    (parts.field || "an unrecognised field") + "'. A label condition is a Label " +
+                    "Dimension and its CMDB Value: " + this.DIMENSION_FIELD + "=<dimension>" +
+                    this.CONDITION_SEPARATOR + this.VALUE_FIELD + "=<value>.");
+                continue;
             }
 
             if (this.isDimensionCondition(token)) {
@@ -322,10 +480,185 @@ IllumioSyncUtils.prototype = {
 
             if (parsed.subPredicates.length > 0) {
                 result.terms.push(parsed.subPredicates);
+                continue;
+            }
+
+            // An OR group that produced nothing and complained about nothing -- a group holding
+            // only an ORDERBY, for instance. It used to be dropped here in silence, which turned
+            // "A OR <nothing>" into "A" and quietly narrowed the filter.
+            if (parsed.errors.length === 0) {
+                result.errors.push("OR group " + (index + 1) + " has no usable conditions. " +
+                    "Complete it or remove it.");
             }
         }
 
         return result;
+    },
+
+    // ---- description ----
+
+    /**
+     * Render a Label Condition back as a compact readable expression.
+     *
+     * The condition builder shows every group under the header "All of these conditions must be
+     * met", which is stock chrome for the outer AND and says nothing about the ^OR rows nested
+     * inside it or about the OR between groups. An author reading the form therefore cannot see
+     * the structure the evaluator will actually run. This renders that structure:
+     *
+     *   (env=(Development or Production or QA) and role=Load Balancer and compute=8) or (os=Linux)
+     *
+     * Built from parseLabelCondition's output rather than from the raw text, so what is described
+     * is by construction what is evaluated -- a description derived independently could disagree
+     * with the query, which is worse than showing nothing.
+     *
+     * Parentheses only appear when there is more than one term; a single term reads better without
+     * them and a single term is the common case.
+     *
+     * @param {String} condition Raw encoded query from the Label Condition field
+     * @param {Object} dimensionNames Optional sys_id -> name map, resolved here when omitted
+     * @returns {Object} { text: String, errors: Array } -- text is "" when errors is non-empty
+     */
+    describeLabelCondition: function(condition, dimensionNames) {
+        var result = {
+            text: "",
+            errors: []
+        };
+
+        if (this.isConditionEmpty(condition)) {
+            return result;
+        }
+
+        var parsed = this.parseLabelCondition(condition);
+
+        // Fail closed, exactly as the evaluator and the save-time rule do. Describing a condition
+        // that will not run would tell the author it is fine.
+        if (parsed.errors.length > 0) {
+            result.errors = parsed.errors;
+            return result;
+        }
+
+        var names = dimensionNames || this.resolveDimensionNames(parsed.terms);
+        var termTexts = [];
+
+        for (var termIndex = 0; termIndex < parsed.terms.length; termIndex++) {
+            var term = parsed.terms[termIndex];
+            var subTexts = [];
+
+            for (var subIndex = 0; subIndex < term.length; subIndex++) {
+                subTexts.push(this.describeSubPredicate(term[subIndex], names));
+            }
+
+            termTexts.push(subTexts.join(" and "));
+        }
+
+        if (termTexts.length === 1) {
+            result.text = termTexts[0];
+            return result;
+        }
+
+        for (var index = 0; index < termTexts.length; index++) {
+            termTexts[index] = "(" + termTexts[index] + ")";
+        }
+
+        result.text = termTexts.join(" or ");
+        return result;
+    },
+
+    /**
+     * One sub-predicate as `key=value`, or `key=(a or b or c)` when its values are ORed.
+     *
+     * @param {String} subPredicate One sub-predicate from parseLabelCondition
+     * @param {Object} dimensionNames sys_id -> name map
+     * @returns {String} Readable fragment
+     */
+    describeSubPredicate: function(subPredicate, dimensionNames) {
+        var tokens = ("" + subPredicate).split(this.CONDITION_SEPARATOR);
+        var dimension = "";
+        var values = [];
+
+        for (var index = 0; index < tokens.length; index++) {
+            var parts = this.splitCondition(tokens[index]);
+
+            if (!this.isDimensionCondition(tokens[index])) {
+                values.push(parts.value);
+                continue;
+            }
+
+            // A dot-walked dimension (illumio_label_dimension.key=env) already carries the
+            // readable form in the query, so there is nothing to resolve.
+            dimension = parts.field === this.DIMENSION_FIELD ?
+                (dimensionNames[parts.value] || parts.value) : parts.value;
+        }
+
+        if (values.length === 1) {
+            return dimension + "=" + values[0];
+        }
+
+        return dimension + "=(" + values.join(" or ") + ")";
+    },
+
+    /**
+     * Map every dimension sys_id in a parsed condition to its key, in one query.
+     *
+     * The key ("env", "role") is what the author recognises and what the PCE calls it; the display
+     * value is the fallback for a dimension whose key is empty.
+     *
+     * @param {Array} terms parseLabelCondition's terms
+     * @returns {Object} sys_id -> name
+     */
+    resolveDimensionNames: function(terms) {
+        var names = {};
+        var sysIds = [];
+        var termIndex, subIndex, index;
+
+        for (termIndex = 0; termIndex < terms.length; termIndex++) {
+            for (subIndex = 0; subIndex < terms[termIndex].length; subIndex++) {
+                var tokens = ("" + terms[termIndex][subIndex]).split(this.CONDITION_SEPARATOR);
+
+                for (index = 0; index < tokens.length; index++) {
+                    if (!this.isDimensionCondition(tokens[index])) {
+                        continue;
+                    }
+
+                    var parts = this.splitCondition(tokens[index]);
+                    if (parts.field !== this.DIMENSION_FIELD) {
+                        continue;
+                    }
+
+                    if (!names.hasOwnProperty(parts.value)) {
+                        names[parts.value] = "";
+                        sysIds.push(parts.value);
+                    }
+                }
+            }
+        }
+
+        if (sysIds.length === 0) {
+            return names;
+        }
+
+        // Secure, unlike the rest of the evaluation path. This one is reachable from the client
+        // through IllumioUtilsAJAX, so it runs as whoever has the Sync Filter form open rather
+        // than as a background job. A dimension the caller cannot read falls through to
+        // "<unknown dimension>" below, which is the right answer for a display-only feature.
+        // In a Script Action this still evaluates as system, so the server path is unaffected.
+        var gr = new GlideRecordSecure(this.LABEL_DIMENSION_TABLE);
+        gr.addQuery("sys_id", "IN", sysIds.join(","));
+        gr.query();
+
+        while (gr.next()) {
+            names[gr.getUniqueValue()] = gr.getValue("key") || gr.getDisplayValue();
+        }
+
+        // A sys_id the query did not return: the dimension was deleted, or the reader cannot see
+        // it. Say so rather than printing a bare sys_id that looks like a value.
+        for (var sysId in names) {
+            if (names.hasOwnProperty(sysId) && names[sysId] === "") {
+                names[sysId] = "<unknown dimension>";
+            }
+        }
+
+        return names;
     },
 
     // ---- query building ----
@@ -338,8 +671,9 @@ IllumioSyncUtils.prototype = {
      * serve, and what the old `illumio_pce_workload.illumio_pce_configuration=` could not use.
      *
      * The `duplicate=false` guard the old evaluation dot-walked for is NOT here. It is applied
-     * once per filter against the workload table instead (IllumioSyncRepoUtils.filterWorkloads),
-     * where it is a direct column, rather than joined on every row of every term.
+     * against the workload table instead, where it is a direct column, rather than joined on
+     * every row of every term -- see IllumioSyncRepoUtils.findSurvivingWorkloads for the
+     * label-only shape and findWorkloadSysIdsBySourceRecords for the CMDB one.
      *
      * @param {String} pceConfigSysId sys_id of the PCE Configuration
      * @param {String} classMappingSysId sys_id of the Config Class Mapping, nil to span all of them
@@ -384,6 +718,36 @@ IllumioSyncUtils.prototype = {
         return clauses.join(this.TERM_SEPARATOR);
     },
 
+    /**
+     * Split a Sync Filter's extent value into its entries.
+     *
+     * Each entry is "knownToPce" or "knownToPce-enforcementMode";
+     * IllumioSyncRepoUtils._addExtentConditions turns the list into ORed query conditions.
+     *
+     * Split once and passed down, not re-split per query. The extent is now folded into the CMDB
+     * side's per-batch workload query, and that query runs once per 500 CIs -- 4,000 times at 2M
+     * CIs. Splitting a string there would be 4,000 identical parses of a value that cannot change
+     * during the run.
+     *
+     * @param {String} extentValue Comma-separated extent value from the Sync Filter, may be nil
+     * @returns {Array} Extent entries, empty when nothing is configured
+     */
+    splitExtent: function(extentValue) {
+        // No gs.nil: this file touches neither the database nor gs, which is what keeps it
+        // testable in a plain Node harness. extentValue always arrives from getValue(), so it is
+        // a string or null and never a GlideElement.
+        if (extentValue === null || extentValue === undefined) {
+            return [];
+        }
+
+        var text = ("" + extentValue).trim();
+        if (text === "") {
+            return [];
+        }
+
+        return text.split(",");
+    },
+
     // ---- set algebra ----
     //
     // Sets are plain objects keyed by sys_id. Values are sys_ids -- 32 hex characters, never a
@@ -408,27 +772,36 @@ IllumioSyncUtils.prototype = {
     },
 
     /**
-     * Append the sys_ids that survive a guard set to an array, in place.
+     * Add the sys_ids that survive a guard set to a set, in place.
      *
      * This is how the CMDB side is intersected with the label side without ever materialising
-     * it: the guard set is built once and only read, while the array grows one batch at a time
-     * and can only ever gain ids the guard set already holds. Growing the GUARD instead would
-     * produce the union -- the opposite result.
+     * either: the guard set is built once and only read, while the target grows one batch at a
+     * time and can only ever gain ids the guard set already holds. Growing the GUARD instead
+     * would produce the union -- the opposite result.
      *
-     * @param {Array} target Array to append to
+     * Replaced intersectInto, which appended to an ARRAY. That array was the run's third
+     * full-size structure: the label set, the per-filter matched array, and the cross-filter
+     * result set all alive at the same moment. The target here is the cross-filter result set
+     * itself, so a filter's matches are deduplicated as they are found rather than collected and
+     * deduplicated afterwards, and the per-filter array is gone.
+     *
+     * @param {Object} targetSet Set to grow
      * @param {Array} sysIds Candidate sys_ids, one batch
      * @param {Object} guardSet Set to test against, nil to accept everything
-     * @returns {Number} How many were appended
+     * @returns {Number} How many were added that were not already present
      */
-    intersectInto: function(target, sysIds, guardSet) {
-        var appended = 0;
+    unionIntoGuarded: function(targetSet, sysIds, guardSet) {
+        var added = 0;
         for (var index = 0; index < sysIds.length; index++) {
-            if (!guardSet || guardSet[sysIds[index]]) {
-                target.push(sysIds[index]);
-                appended++;
+            if (guardSet && !guardSet[sysIds[index]]) {
+                continue;
+            }
+            if (!targetSet[sysIds[index]]) {
+                targetSet[sysIds[index]] = true;
+                added++;
             }
         }
-        return appended;
+        return added;
     },
 
     /**
@@ -442,6 +815,10 @@ IllumioSyncUtils.prototype = {
 
     /**
      * Split an array into chunks of a given size
+     *
+     * Prefer eachChunk on anything that scales with the workload count -- this builds every
+     * chunk up front. Kept for the callers whose input is bounded by something small.
+     *
      * @param {Array} arr Array to split
      * @param {Number} size Maximum chunk size
      * @returns {Array} Array of arrays
@@ -452,6 +829,185 @@ IllumioSyncUtils.prototype = {
             chunks.push(arr.slice(index, index + size));
         }
         return chunks;
+    },
+
+    /**
+     * Walk an array one window at a time, without copying the whole thing first.
+     *
+     * chunkArray materialises every chunk before the first one is used: a 2M-element array
+     * becomes 4,000 sub-arrays holding 2M references, a second structure the size of the first
+     * and alive for the whole walk, built purely to iterate the original in order. This cuts one
+     * window, hands it over, and lets it go before cutting the next -- so the extra live memory
+     * is one window rather than a full copy.
+     *
+     * The window is a real slice and not a view, because every caller passes it to `join(',')`
+     * for an IN clause. One 500-element array at a time is the floor here, not the copy.
+     *
+     * @param {Array} arr Array to walk, not modified
+     * @param {Number} size Maximum window size
+     * @param {Function} callback Called with (windowArray, windowIndex). Return false to stop.
+     * @returns {Number} Windows handed over
+     */
+    eachChunk: function(arr, size, callback) {
+        var windows = 0;
+
+        if (!arr || arr.length === 0) {
+            return windows;
+        }
+
+        for (var index = 0; index < arr.length; index += size) {
+            var slice = arr.slice(index, index + size);
+            windows++;
+
+            if (callback(slice, windows - 1) === false) {
+                return windows;
+            }
+        }
+
+        return windows;
+    },
+
+    /**
+     * Walk a set's members one window at a time, without materialising its key array.
+     *
+     * setToArray is Object.keys, which at 2M members builds a 2M-element array alongside the set
+     * it was built from -- a second full-size structure whose only purpose is to be iterated in
+     * order and thrown away. This walks the set directly and hands over one 500-element window at
+     * a time, so the extra live memory is one window.
+     *
+     * The window is a real array because every caller passes it to join(',') for an IN clause.
+     *
+     * NEGATIVE GUARD. excludeSet is how a filter avoids re-resolving what an earlier filter in
+     * the same run already matched. Filters are ORed, so a sys_id already in the result is in the
+     * result whatever this filter decides about it -- putting it through the workload query again
+     * can only produce the answer that is already recorded. Safe to grow excludeSet during the
+     * walk: each member of `set` is visited once, so an id added after it was yielded cannot be
+     * yielded again.
+     *
+     * @param {Object} set Set built by unionInto, not modified
+     * @param {Number} size Maximum window size
+     * @param {Object} excludeSet Members present here are skipped, nil to keep everything
+     * @param {Function} callback Called with (windowArray, windowIndex). Return false to stop.
+     * @returns {Number} Windows handed over
+     */
+    eachSetWindow: function(set, size, excludeSet, callback) {
+        var windows = 0;
+        var window = [];
+
+        if (!set) {
+            return windows;
+        }
+
+        for (var key in set) {
+            if (!set.hasOwnProperty(key) || (excludeSet && excludeSet[key])) {
+                continue;
+            }
+
+            window.push(key);
+
+            if (window.length >= size) {
+                windows++;
+                if (callback(window, windows - 1) === false) {
+                    return windows;
+                }
+                window = [];
+            }
+        }
+
+        if (window.length > 0) {
+            windows++;
+            callback(window, windows - 1);
+        }
+
+        return windows;
+    },
+
+    // ---- CSV rendering ----
+    //
+    // Pure and therefore testable offline, which matters more here than it looks: a quoting bug
+    // does not throw, it produces a file that opens fine and is silently wrong. The whole preview
+    // export exists to be trusted, so the three functions below are exercised against the awkward
+    // values directly rather than inferred from a generated file.
+
+    // RFC 4180 says CRLF, and the consumer is Excel. Stated once here rather than inherited from
+    // whatever OS the MID Server happens to run on -- java.io's newLine() and println() emit
+    // \r\n on Windows and \n on Linux, which would make the same code produce two different files.
+    CSV_LINE_TERMINATOR: "\r\n",
+
+    /**
+     * Render one value as a CSV field.
+     *
+     * Quotes on comma, double quote, CR and LF. The CR/LF half is the one that matters and the
+     * one the pre-rewrite code was missing: an embedded newline in an unquoted field does not
+     * corrupt that field, it splits the record in two and shifts every column of the tail half.
+     * It is data-dependent, so it stays invisible until a description or a custom attribute
+     * happens to contain a line break.
+     *
+     * @param {String} value Raw value, null and undefined render as empty
+     * @returns {String} Field, quoted and escaped if it has to be
+     */
+    csvField: function(value) {
+        var text = (value === null || value === undefined) ? "" : "" + value;
+
+        if (text.indexOf(",") === -1 && text.indexOf('"') === -1 &&
+            text.indexOf("\n") === -1 && text.indexOf("\r") === -1) {
+            return text;
+        }
+
+        return '"' + text.replace(/"/g, '""') + '"';
+    },
+
+    /**
+     * Render one CSV record, terminator included.
+     *
+     * Every record carries its own terminator rather than the caller joining them, so that
+     * chunks can be concatenated blindly -- by the payload writer here and by the MID Server
+     * appending bytes to a file -- without anyone having to know whether a boundary needs one.
+     *
+     * @param {Array} values Field values in column order
+     * @returns {String} One terminated CSV record
+     */
+    csvRow: function(values) {
+        var fields = [];
+        for (var index = 0; index < values.length; index++) {
+            fields.push(this.csvField(values[index]));
+        }
+        return fields.join(",") + this.CSV_LINE_TERMINATOR;
+    },
+
+    /**
+     * Length of a string in UTF-8 bytes.
+     *
+     * Not String.length, which counts UTF-16 code units. The two agree for ASCII and diverge on
+     * the first accented hostname or label -- exactly the data an integrity check is there to
+     * catch -- so using length would give a byte_length that disagrees with what the MID Server
+     * measures and fail every run carrying non-ASCII text.
+     *
+     * @param {String} text Text to measure
+     * @returns {Number} Bytes the text occupies when encoded as UTF-8
+     */
+    utf8Length: function(text) {
+        var content = (text === null || text === undefined) ? "" : "" + text;
+        var bytes = 0;
+
+        for (var index = 0; index < content.length; index++) {
+            var code = content.charCodeAt(index);
+
+            if (code < 0x80) {
+                bytes += 1;
+            } else if (code < 0x800) {
+                bytes += 2;
+            } else if (code >= 0xD800 && code <= 0xDBFF) {
+                // High surrogate: one astral code point, 4 bytes, and the low surrogate that
+                // follows is consumed here rather than counted as another 3 on the next pass.
+                bytes += 4;
+                index++;
+            } else {
+                bytes += 3;
+            }
+        }
+
+        return bytes;
     },
 
     // ---- label handling for the sync pipeline ----
@@ -689,13 +1245,13 @@ IllumioSyncUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-21 12:40:52</sys_created_on>
         <sys_id>71074158c3a387d050bffa0ed40131a2</sys_id>
-        <sys_mod_count>1</sys_mod_count>
+        <sys_mod_count>7</sys_mod_count>
         <sys_name>IllumioSyncUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_71074158c3a387d050bffa0ed40131a2</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
+        <sys_updated_on>2026-09-24 07:50:49</sys_updated_on>
     </sys_script_include>
 </record_update>

@@ -1,0 +1,423 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioSyncBuildUtils</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioSyncBuildUtils</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var IllumioSyncBuildUtils = Class.create();
+
+/**
+ * Phase 2 of the sync pipeline: turning a list of workload sys_ids into finished PCE payload
+ * objects, one bounded window at a time.
+ *
+ * The fifth file of the split, and the direct peer of IllumioSyncFilterUtils. That file is phase 1
+ * -- WHICH workloads a run acts on. This one is phase 2 -- WHAT each of them becomes. They are the
+ * two halves of the same pipeline and neither belongs inside the other.
+ *
+ * WHY NOT IllumioSyncUtils: that file is pure helpers by its own rule -- no database, no `gs`, so
+ * the condition parser stays testable in a plain Node harness. This reads workloads, label values
+ * and label hrefs, and writes progress. It would break that rule on its first line.
+ *
+ * WHY NOT IllumioSyncRepoUtils: that file is data access, one query per method. This is not a
+ * query; it is the thing that decides which queries to run, in what window, and what to do with
+ * the answers. Putting it there would also invert the dependency -- the repository would have to
+ * call back into IllumioUtils for the shell builder and the threshold message.
+ *
+ * WHY NOT IllumioUtils, where it used to live: it is coordination, which is what IllumioUtils is
+ * for -- but IllumioUtils had become coordination *of everything*, and at 2,800 lines the one
+ * function that every sync and every deletion passes through was buried in the middle of PCE
+ * configuration, job records, attachments and discovery. Same reasoning that moved the Sync Filter
+ * evaluator out; this is the other half of that job.
+ *
+ * ONE SUBJECT: given workload sys_ids, produce the object each one must become for the PCE, apply
+ * the eligibility and threshold gates, and hand the survivors to a caller-supplied sink. Sync and
+ * deletion both enter here, which is what keeps them honest about each other: the only things that
+ * differ between them are the chunk predicate, what a row becomes, and where the payload lands.
+ *
+ * MEMORY IS THE POINT OF THIS FILE. Nothing bigger than one window of objects is ever live. Every
+ * per-window map is released explicitly before the next window is read, because `var` is
+ * function-scoped and they would otherwise stay reachable for the whole run. The PCE labels
+ * mapping table holds ~100k rows in production and must never be cached for longer than a window.
+ *
+ * @see IllumioSyncFilterUtils phase 1 -- which workloads
+ * @see IllumioSyncUtils       pure helpers
+ * @see IllumioSyncRepoUtils   data access
+ * @see JIRA/sync-optimization/sync-callchain.MD
+ */
+IllumioSyncBuildUtils.prototype = {
+
+    /**
+     * @param {Object} [syncUtils] IllumioSyncUtils instance, constructed when omitted
+     * @param {Object} [repo] IllumioSyncRepoUtils instance, constructed when omitted
+     */
+    initialize: function(syncUtils, repo) {
+        this.logger = new IllumioLogger(null, 'IllumioSyncBuildUtils');
+        this.syncUtils = syncUtils || new IllumioSyncUtils();
+        this.repo = repo || new IllumioSyncRepoUtils(this.syncUtils);
+
+        // IllumioUtils is NOT constructed here. It constructs things that construct this back, and
+        // the codebase relies on that cycle staying lazy rather than running at initialize time --
+        // same rule as IllumioDiscoveryRepository.runAutoSync. Fetched per call instead.
+    },
+
+    // One progress line to the job record at most this often. Not one per window: at
+    // WORKLOAD_CHUNK_SIZE a large run is hundreds of windows, and a job log with a line for each
+    // is as unreadable as no lines at all. syslog still gets every one.
+    PROGRESS_INTERVAL_MS: 15000,
+
+    /**
+     * Build the PCE payload object for every workload in a list of sys_ids, in bounded windows.
+     *
+     * Phase 1 decided WHICH workloads (IllumioSyncFilterUtils.getEligibleWorkloadSysIdsByConfig,
+     * or the whole eligible population when no Sync Filter exists) and must have finished before
+     * this starts, so that a workload matched by two filters is built exactly once.
+     *
+     * Every per-workload query the pre-rewrite path ran is now per window:
+     *
+     *   critical labels    skipRecordsForSync, 1 query per workload per critical dimension
+     *   label values       prepareWorkloadObject, 1 query per workload
+     *   label hrefs        getUseCreateLabelsList, 1 query per workload per dimension
+     *
+     * all three answered from maps built once per window and released with it.
+     *
+     * Parameterised rather than hardcoded because the deletion path reuses it: the chunk
+     * predicate, what a row becomes, and where the payload lands are the only three things that
+     * differ between syncing and deleting.
+     *
+     * @param {Object} params
+     *   {String}   pceConfigSysId  sys_id of the PCE Configuration
+     *   {Array}    sysIds          Workload sys_ids from phase 1
+     *   {String}   chunkQuery      Extra conditions applied to every window, e.g.
+     *                              "duplicate=false^conflicts=true". Cheap here and it is what
+     *                              lets phase 1 skip the eligibility pass entirely.
+     *   {Boolean}  skipCriticalLabels  Drop workloads whose critical labels disagree with the PCE
+     *   {Boolean}  applyThreshold  Enforce the configured workload/label creation limits
+     *   {Object}   [wlLimitObject] Limit object, fetched when omitted
+     *   {Function} appendRow       Called with (workloadObject) per surviving workload
+     *   {Function} [onWindowEnd]   Called once at the end of every window, with no arguments,
+     *                              after the window's maps have been released. This is the
+     *                              sink's cue to write what it has accumulated and start empty.
+     *                              Called for empty windows too, so "one flush per window" holds
+     *                              with no exceptions for the caller to reason about. NOT called
+     *                              for a window that cancelled the job -- everything written so
+     *                              far is about to be withdrawn.
+     *   {Function} [buildShell]    Builds one row object from its GlideRecord. Defaults to
+     *                              IllumioUtils.prepareWorkloadShell. Return null to drop the
+     *                              record -- that happens before threshold accounting, so an
+     *                              ineligible workload never spends budget.
+     *   {Boolean}  [skipLabelData] Skip the label pass entirely. The deletion path reads three
+     *                              columns off the record and never looks at a label, so without
+     *                              this it would pay two extra queries per window plus a
+     *                              selectLabelData call per workload to build maps it discards.
+     *   {String}   [operation]     Fixed threshold operation ("delete"). Defaults to create/update
+     *                              chosen per workload from known_to_pce.
+     *   {Boolean}  [secure]        Read the window through ACLs. The deletion path does.
+     *   {Function} [onProgress]    Called with a progress line, at most one every 15 seconds.
+     *                              Pass utils.jobProgressLogger(jobSysId) to put them on the job.
+     * @returns {Object} { processed, skippedCritical, skippedLimit, skippedByQuery,
+     *                     skippedShellError, cancelJob, limitExceeded, logMessage }
+     *
+     * The five counts are exhaustive: processed + the four skips equals sysIds.length for any
+     * run that was not cancelled. That identity is the point -- before skippedByQuery and
+     * skippedShellError existed, the totals did not add up and the shortfall had nowhere to
+     * appear.
+     */
+    prepareWorkloadsForPCE: function(params) {
+        var syncUtils = this.syncUtils;
+        var repo = this.repo;
+        var utils = new IllumioUtils();
+        // Captured, not reached through `this`: most of the logging below happens inside
+        // report(), the eachChunk callback and the per-window closure, where `this` is not this
+        // object. W3.
+        var logger = this.logger.setContext(params.jobSysId);
+
+        var outcome = {
+            processed: 0,
+            skippedCritical: 0,
+            skippedLimit: 0,
+            // Matched by phase 1, then failed params.chunkQuery. Not an error and usually not a
+            // surprise once seen -- but until it was counted it was the one way a workload could
+            // leave a run with no counter, no log line and nothing to search for.
+            skippedByQuery: 0,
+            // Threw while its shell was being built. Always an error; gs.error has the stack.
+            skippedShellError: 0,
+            cancelJob: false,
+            limitExceeded: false,
+            logMessage: ''
+        };
+
+        // Phase 2 wrote nothing between "phase 1 finished" and "the MID started creating", which
+        // on a 10k run is six minutes of a job that looks wedged.
+        var onProgress = typeof params.onProgress === 'function' ? params.onProgress : null;
+        var progressIntervalMs = this.PROGRESS_INTERVAL_MS;
+        var lastProgressAt = 0;
+
+        function report(message, force) {
+            logger.info('[prepareWorkloadsForPCE] ' + message);
+
+            if (!onProgress) {
+                return;
+            }
+
+            var now = new Date().getTime();
+            if (!force && (now - lastProgressAt) < progressIntervalMs) {
+                return;
+            }
+            lastProgressAt = now;
+
+            try {
+                onProgress(message);
+            } catch (ex) {
+                // Commentary must never take the work down with it -- same rule as
+                // IllumioSyncFilterUtils._progress.
+                logger.warn('[prepareWorkloadsForPCE] Progress callback threw: ' + ex);
+            }
+        }
+
+        // The sink accumulates across the rows of one window and is told when that window is
+        // over. Before this existed, every sink had to carry its own counter and its own size
+        // limit to decide when it had "enough" -- a second copy of a number the sink's own lists
+        // already held, and the only way the two could drift apart.
+        var onWindowEnd = typeof params.onWindowEnd === 'function' ? params.onWindowEnd : null;
+
+        function endWindow() {
+            if (onWindowEnd) {
+                onWindowEnd();
+            }
+        }
+
+        if (!params.sysIds || params.sysIds.length === 0) {
+            return outcome;
+        }
+
+        var configSysId = params.pceConfigSysId;
+        // Only the default shell builder needs the field mappings; a caller supplying its own
+        // builder would be paying for a configuration read it never consults.
+        var mappedFields = params.buildShell ?
+            null : new IllumioGetPCEConfiguration().getLabelDimensionsBySourceTable(configSysId);
+        var criticalLabels = params.skipCriticalLabels ? utils.getCriticalLabelsForPceConfig(configSysId) : {};
+        // Resolved only when the thresholds are going to be consulted. A run with
+        // applyThreshold off has no business reading limits, and certainly no business being
+        // cancelled because they could not be read.
+        var wlLimitObject = params.wlLimitObject || null;
+        if (!wlLimitObject && params.applyThreshold) {
+            try {
+                wlLimitObject = new IllumioThresholdLimit().getThresholdLimit(configSysId);
+            } catch (limitEx) {
+                // Unresolvable limits are not "no limits". Carrying on would push an unbounded
+                // number of changes to the PCE under a threshold nobody could read, so the run
+                // stops here and the job is cancelled -- same path as an exceeded threshold.
+                outcome.cancelJob = true;
+                outcome.logMessage = 'Threshold limits could not be resolved. ' +
+                    'Sync stopped before any workload was sent to the PCE. ' + limitEx;
+                report(outcome.logMessage, true);
+                return outcome;
+            }
+        }
+
+        var operationByKind = {
+            "managed": "update",
+            "unmanaged": "update",
+            "unknown": "create"
+        };
+
+        // Syslog only. The workload count is phase 1's closing "Eligible Workloads" line and the
+        // chunk size is an implementation detail of the walk; what the operator wants on the job
+        // record at this point is how many payload rows are coming, which only the caller knows
+        // -- it is the one that decides how many workloads go in a row.
+        logger.info('[prepareWorkloadsForPCE] Preparing ' + params.sysIds.length +
+            ' workload(s) for the PCE, in chunks of ' + syncUtils.WORKLOAD_CHUNK_SIZE + '.');
+
+        // eachChunk, not chunkArray: params.sysIds is phase 1's whole result and every window
+        // built up front is a second structure the same size, alive for the entire run. One
+        // window at a time instead -- `break` becomes `return false`.
+        syncUtils.eachChunk(params.sysIds, syncUtils.WORKLOAD_CHUNK_SIZE, function(chunkSysIds) {
+            // Pass one: the record-derived half of each object, which needs the GlideRecord.
+            var shells = [];
+            var shellSysIds = [];
+
+            // The return value is the count that MATCHED params.chunkQuery. Phase 1 does not
+            // filter on `conflicts` or `duplicate` -- deliberately, see scaling note 13 -- so a
+            // sys_id it matched can fail this query, never reach the callback, and vanish with
+            // no counter moved and no line written. Taking the difference here is the only
+            // place that gap is observable at all.
+            var visited = repo.eachWorkloadInBatch(chunkSysIds, params.chunkQuery,
+                function(workloadGr) {
+                try {
+                    var shell = params.buildShell ?
+                        params.buildShell(workloadGr) :
+                        utils.prepareWorkloadShell(workloadGr, mappedFields);
+
+                    // A builder returns null for a record it wants dropped, and does its own
+                    // tallying. Dropping here rather than inside appendRow is what keeps the
+                    // eligibility test ahead of threshold accounting.
+                    if (!shell) {
+                        return;
+                    }
+
+                    shells.push(shell);
+                    shellSysIds.push(workloadGr.getUniqueValue());
+                } catch (shellEx) {
+                    outcome.skippedShellError++;
+                    logger.error('[prepareWorkloadsForPCE] Skipped workload ' +
+                        workloadGr.getUniqueValue() + ': ' + shellEx);
+                }
+            }, params.secure);
+
+            outcome.skippedByQuery += chunkSysIds.length - visited;
+
+            if (shells.length === 0) {
+                // `return`, not `return false`: this window contributed nothing, but the walk
+                // must go on. Only `false` stops eachChunk.
+                endWindow();
+                return;
+            }
+
+            // Pass two: the label half, in bulk for the whole window. Skipped wholesale by callers
+            // that do not act on labels -- see skipLabelData.
+            var labelValuesByWorkload = {};
+            var labelDataByWorkload = {};
+            var hrefByPair = {};
+
+            if (!params.skipLabelData) {
+                labelValuesByWorkload = repo.getLabelValuesByWorkload(shellSysIds);
+                for (var shellIndex = 0; shellIndex < shells.length; shellIndex++) {
+                    labelDataByWorkload[shells[shellIndex].sys_id] = syncUtils.selectLabelData(
+                        labelValuesByWorkload[shells[shellIndex].sys_id] || {},
+                        shells[shellIndex].updateFields);
+                }
+                hrefByPair = repo.getLabelHrefsByPair(configSysId,
+                    syncUtils.collectLabelPairs(labelDataByWorkload));
+            }
+
+            for (var index = 0; index < shells.length; index++) {
+                var workloadObject = shells[index];
+                var labelValues = labelValuesByWorkload[workloadObject.sys_id] || {};
+
+                if (params.skipCriticalLabels &&
+                    syncUtils.hasCriticalLabelConflict(labelValues, criticalLabels)) {
+                    outcome.skippedCritical++;
+                    logger.info('Skipped workload as label is critical (sys_id: {0})', workloadObject.sys_id);
+                    continue;
+                }
+
+                var createLabelCount = 0;
+
+                if (!params.skipLabelData) {
+                    workloadObject.label_data = labelDataByWorkload[workloadObject.sys_id];
+                    var split = syncUtils.splitLabelsForSync(workloadObject.label_data, hrefByPair);
+                    workloadObject.labels = split.labels;
+                    workloadObject.createlabels = split.createlabels;
+                    createLabelCount = split.createlabels.length;
+                }
+
+                if (params.applyThreshold) {
+                    var operation = params.operation ||
+                        operationByKind[workloadObject.known_to_pce];
+
+                    if (!syncUtils.hasOperationBudget(wlLimitObject, operation)) {
+                        outcome.limitExceeded = true;
+                        wlLimitObject["wlLimit"][operation + "LimitExceeded"] = true;
+                        if (wlLimitObject.cancelJobOnLimitExceed) {
+                            outcome.cancelJob = true;
+                            break;
+                        }
+                        outcome.skippedLimit++;
+                        continue;
+                    }
+
+                    if (!syncUtils.hasLabelCreationBudget(wlLimitObject, createLabelCount)) {
+                        outcome.limitExceeded = true;
+                        wlLimitObject["wlLimit"]["labelCreateLimitExceeded"] = true;
+                        if (wlLimitObject.cancelJobOnLimitExceed) {
+                            outcome.cancelJob = true;
+                            break;
+                        }
+                        outcome.skippedLimit++;
+                        continue;
+                    }
+
+                    syncUtils.consumeBudget(wlLimitObject, operation, createLabelCount);
+                }
+
+                outcome.processed++;
+                params.appendRow(workloadObject);
+            }
+
+            // Released before the next window is read rather than left to fall out of scope at
+            // the end of the function: `var` is function-scoped, so a window's maps would
+            // otherwise stay reachable for the whole run.
+            shells = null;
+            shellSysIds = null;
+            labelValuesByWorkload = null;
+            labelDataByWorkload = null;
+            hrefByPair = null;
+
+            if (outcome.cancelJob) {
+                // No endWindow(): the rows already written are about to be withdrawn, and
+                // writing one more first would only mean withdrawing one more.
+                return false;
+            }
+
+            endWindow();
+
+            // Syslog only. The job record's progress through phase 2 is now the caller's
+            // "Payload Prepared: x/N" line, which is emitted per row written rather than per
+            // window walked; two throttled counters ticking at different rates against different
+            // denominators read as a contradiction rather than as more detail.
+            logger.info('[prepareWorkloadsForPCE] ' + outcome.processed + ' of ' +
+                params.sysIds.length + ' workload(s) prepared so far.');
+        });
+
+        if (outcome.limitExceeded) {
+            outcome.logMessage = utils.logLimitExceedMessage(wlLimitObject, configSysId);
+        }
+
+        // Reconciles phase 1's sysIds.length with what phase 2 actually handed to the MID. Forced
+        // onto the job record ONLY when the two differ: a shortfall is the one thing here that
+        // the caller's own Summary line cannot explain, and it used to be visible nowhere at all.
+        // With nothing skipped every number in it is zero and the count is one the operator has
+        // already read twice.
+        var dropped = outcome.skippedCritical + outcome.skippedLimit +
+            outcome.skippedByQuery + outcome.skippedShellError;
+
+        var reconciliation = outcome.processed + ' workload(s) prepared, ' +
+            outcome.skippedCritical + ' skipped for critical labels, ' +
+            outcome.skippedLimit + ' skipped for threshold limits, ' +
+            outcome.skippedByQuery + ' skipped by the chunk query (' + params.chunkQuery + '), ' +
+            outcome.skippedShellError + ' skipped on a shell error.';
+
+        // Not report(..., false): an unforced report still fires once the throttle window has
+        // passed, and with every other line in here now on syslog nothing resets that window, so
+        // "unforced" at the end of a run means "always".
+        if (dropped > 0) {
+            report(reconciliation, true);
+        } else {
+            logger.info('[prepareWorkloadsForPCE] ' + reconciliation);
+        }
+
+        return outcome;
+    },
+
+    type: 'IllumioSyncBuildUtils'
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-23 16:41:10</sys_created_on>
+        <sys_id>15319801c3a34fd050bffa0ed4013133</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>IllumioSyncBuildUtils</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_15319801c3a34fd050bffa0ed4013133</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
+    </sys_script_include>
+</record_update>

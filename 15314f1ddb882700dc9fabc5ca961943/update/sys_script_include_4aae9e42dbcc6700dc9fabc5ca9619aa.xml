@@ -16,7 +16,15 @@ IllumioAddToECCQueue.prototype = {
         this.midServer = midserver; // mid server name
         this.parameters = parameters; // extra parameters to be passed
         this.utils = new IllumioUtils();
-        this.illumioJobSysId = this.parameters["illumio_scheduled_job_id"];
+        // Two names for the same thing, both in use: authentication, discovery, async polling and
+        // preview send `illumio_scheduled_job_id`; sync and deletion send `jobSysId`. Reading only
+        // the first left this undefined for sync and deletion -- which meant the isJobCancelled
+        // guard below was a no-op on exactly the two highest-volume paths, and the log lines from
+        // this class had no job to correlate to. Both names are read rather than renamed because
+        // the MID reads them by name on the other side.
+        this.illumioJobSysId = this.parameters["illumio_scheduled_job_id"] ||
+            this.parameters["jobSysId"];
+        this.logger = new IllumioLogger(this.illumioJobSysId, 'IllumioAddToECCQueue');
     },
 
     /**
@@ -61,11 +69,31 @@ IllumioAddToECCQueue.prototype = {
                 return false;
             }
 
+            // W6: the handoff boundary. Everything past this line runs on the MID, where nothing
+            // this application logs reaches the instance except through the W5 push. Saying what
+            // was queued, to which MID, for which job is what lets a missing "Probe entered."
+            // line on the other side mean something -- without this, both halves look silent and
+            // there is no way to tell which one never ran.
+            this.logger.info('HANDOFF: queueing probe ' + this.probe + ' for MID Server ' +
+                this.midServer + '.');
+
             // add it to the ECC queue
-            ecc.insert();
+            var eccSysId = ecc.insert();
+
+            // The return used to be ignored and this method reported success unconditionally. An
+            // insert that is refused rather than thrown -- an ACL, a bad agent value -- then left
+            // the caller believing the MID had work it was never given, and the job sat in
+            // `running` until the 30-minute wall-clock cap force-cancelled it. Reporting the
+            // failure lets the caller fail the job now, with a reason.
+            if (gs.nil(eccSysId)) {
+                this.logger.error('HANDOFF FAILED: the ECC queue insert for probe ' + this.probe +
+                    ' returned no sys_id. Nothing was sent to MID Server ' + this.midServer + '.');
+                return false;
+            }
+
             return true;
         } catch (exception) {
-            gs.error('Exception occurred while adding to ECC queue. Exception: ' + exception);
+            this.logger.error('Exception occurred while adding to ECC queue. Exception: ' + exception);
             return false;
         }
     },
@@ -76,13 +104,13 @@ IllumioAddToECCQueue.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:17:45</sys_created_on>
         <sys_id>4aae9e42dbcc6700dc9fabc5ca9619aa</sys_id>
-        <sys_mod_count>14</sys_mod_count>
+        <sys_mod_count>15</sys_mod_count>
         <sys_name>IllumioAddToECCQueue</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4aae9e42dbcc6700dc9fabc5ca9619aa</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-16 09:04:01</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
     </sys_script_include>
 </record_update>

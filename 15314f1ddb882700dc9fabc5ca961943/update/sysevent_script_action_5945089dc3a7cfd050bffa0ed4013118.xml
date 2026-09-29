@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sysevent_script_action">
+    <sysevent_script_action action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <condition_script/>
+        <description/>
+        <event_name>x_illu2_illumio.start_filter_mode_previe</event_name>
+        <name>StartFilterModePreview</name>
+        <order>100</order>
+        <script><![CDATA[// Script Action on x_illu2_illumio.start_filter_mode_previe.
+//
+// parm1 = scheduled job sys_id, parm2 = { type, table, sysId } for the Config Class Mapping.
+// Separate from StartPreview because the work is a different entry point, not a different
+// argument -- see IllumioPreviewUtils.processFilterModePreview for why the two do not share
+// a pipeline.
+var preview = new IllumioPreviewUtils();
+preview.processFilterModePreview(event.parm1, event.parm2);
+]]></script>
+        <synchronous>false</synchronous>
+        <sys_class_name>sysevent_script_action</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-24 10:27:29</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>5945089dc3a7cfd050bffa0ed4013118</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>StartFilterModePreview</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sysevent_script_action_5945089dc3a7cfd050bffa0ed4013118</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-24 10:46:33</sys_updated_on>
+    </sysevent_script_action>
+</record_update>

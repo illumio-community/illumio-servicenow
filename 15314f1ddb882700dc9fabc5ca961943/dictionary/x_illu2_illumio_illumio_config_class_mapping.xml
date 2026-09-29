@@ -10,7 +10,7 @@
         <element dependent="source_table" dependent_on_field="source_table" label="Conditions for Creating Incidents" max_length="1000" name="conditions_for_creating_incidents" type="conditions" use_dependent_field="true"/>
         <element attributes="readonly_clickthrough=true" label="Illumio PCE Configuration" max_length="32" name="illumio_pce_configuration" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_pce_conf" reference_cascade_rule="delete" type="reference"/>
         <element dependent="source_table" dependent_on_field="source_table" label="Order by Column Name" max_length="80" name="order_by_column_name" type="field_name" use_dependent_field="true"/>
-        <element dependent="source_table" dependent_on_field="source_table" label="Conditions for Excluding Workloads" max_length="4000" name="conditions_for_excluding_workloads" type="conditions" use_dependent_field="true"/>
+        <element dependent="source_table" dependent_on_field="source_table" label="Conditions for Filter Mode" max_length="4000" name="conditions_for_excluding_workloads" type="conditions" use_dependent_field="true"/>
         <element dependent="source_table" dependent_on_field="source_table" label="Conditions for Unknown Workload Creation Limit" max_length="40" name="conditions_for_unknown_workload_creation_limit" type="conditions" use_dependent_field="true"/>
         <element choice="1" label="Filter Mode" max_length="40" name="filter_mode" type="choice">
             <choice>

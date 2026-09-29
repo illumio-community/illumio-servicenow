@@ -9,7 +9,9 @@ var IllumioUpdateWorkloads = Class.create();
 IllumioUpdateWorkloads.prototype = {
     VALID_IP_REGEX: /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/,
     initialize: function() {
-        this.logger = new IllumioLogUtil();
+        // Constructed before the job id is read below, so it starts contextless and is given the
+        // context as soon as there is one. See setContext in IllumioLogUtil.
+        this.logger = new IllumioLogUtil(null, 'IllumioUpdateWorkloads');
         this.SNOWusername = ms.getConfigParameter("mid.instance.username");
         this.SNOWpassword = ms.getConfigParameter("mid.instance.password");
         this.SNOWurl = String(ms.getConfigParameter("url"));
@@ -17,11 +19,15 @@ IllumioUpdateWorkloads.prototype = {
             this.SNOWurl = this.SNOWurl.substring(0, this.SNOWurl.length - 1);
         }
         this.jobSysId = probe.getParameter('glide.jms.jobSysId');
+        this.logger.setContext(this.jobSysId);
         this.partialSucc = probe.getParameter('glide.jms.partialSucc');
 
         // added for bifurcation for sync of the workload payload
         this.autoSync = probe.getParameter('glide.jms.autoSync');
-        this.payloadSysIds = probe.getParameter('glide.jms.payloadSysIds');
+        // R33: the row sys_ids are no longer in the message. _payloadRowSysIds() queries the
+        // payload table for jobSysId instead. This is what the instance says it wrote, kept only
+        // so a mismatch between "written" and "found" can be logged.
+        this.payloadRows = parseInt(probe.getParameter('glide.jms.payloadRows'), 10);
         this.configSysId = probe.getParameter('glide.jms.configSysId');
 
         this.skipped = probe.getParameter('glide.jms.skipped');
@@ -35,8 +41,12 @@ IllumioUpdateWorkloads.prototype = {
 
         this.batchSize = parseInt(probe.getParameter('glide.jms.batch_size'));
 
-        this.retiredWorkloads = probe.getParameter('glide.jms.workloads_to_delete');
-        this.vensToUnpair = probe.getParameter('glide.jms.vens_to_unpair');
+        // `workloads_to_delete` and `vens_to_unpair` used to be read here. R33 moved the delete
+        // branch onto the deletion payload table -- see _payloadRowSysIds -- and no sender puts
+        // them in the message any more. Removed rather than left assigned: a parameter that is
+        // read but never used reads like a live input, and this one survived the rewrite long
+        // enough to hide that IllumioDeletionHandler was still sending the payload inline to a
+        // branch that had stopped looking at it.
 
         this.fieldMappings = probe.getParameter('glide.jms.fieldMappings');
 
@@ -53,7 +63,6 @@ IllumioUpdateWorkloads.prototype = {
 
 
         // Table Names
-        this.SCHEDULED_JOB_TABLE = 'x_illu2_illumio_illumio_scheduled_jobs';
 
 
         this.newLabelsCreated = {};
@@ -68,7 +77,7 @@ IllumioUpdateWorkloads.prototype = {
         this.labelDetails = new Object();
         this.operation = probe.getParameter('glide.jms.operation');
 
-        this.utils = new IllumioPCEUtils(this.timeZone);
+        this.utils = new IllumioPCEUtils(this.timeZone, this.jobSysId);
         this.protocol = this.utils.getPortFromUrl(this.pceUrl);
 
         this.retryParams = DEFAULT_RETRY_PARAMS;
@@ -83,11 +92,155 @@ IllumioUpdateWorkloads.prototype = {
         this.pceUsername = decodedAuth[0];
         this.pcePassword = decodedAuth.slice(1).join(':');
 
-        this.pceHttpClient = new IllumioHTTPClient(this.pceUrl, this.pceUsername, this.pcePassword, this.protocol, this.pceMIDProxy, this.retryParams);
-        this.snHttpClient = new IllumioHTTPClient(this.SNOWurl, this.SNOWusername, this.SNOWpassword, "443", null, this.retryParams);
+        this.pceHttpClient = new IllumioHTTPClient(this.pceUrl, this.pceUsername, this.pcePassword, this.protocol, this.pceMIDProxy, this.retryParams, this.jobSysId);
+        this.snHttpClient = new IllumioHTTPClient(this.SNOWurl, this.SNOWusername, this.SNOWpassword, "443", null, this.retryParams, this.jobSysId);
     },
 
+    /**
+     * " (12.34s)" -- the trailing duration every timed log line in the application ends with.
+     *
+     * Same contract as IllumioSyncUtils.since and IllumioDiscoveryUtils.formatDuration on the
+     * instance: a per-STEP duration, two decimal places, in round brackets at the END of the
+     * line. Duplicated rather than shared because a MID script include cannot reach instance
+     * code -- see the note in IllumioMIDConstants. The three copies must not drift.
+     *
+     * @param {Number} startedAt Epoch milliseconds the step began
+     * @returns {String} Clause to append to a log line
+     */
+    _since: function(startedAt) {
+        return ' (' + ((new Date().getTime() - startedAt) / 1000).toFixed(2) + 's)';
+    },
+
+    /**
+     * The sys_ids of this job's payload rows, in the order they were written.
+     *
+     * R33. These used to arrive in the ECC message as a comma-separated parameter, which became a
+     * single XML attribute that grew with the run: one row per 500-workload window put ~4,000
+     * sys_ids, ~132 KB, into one attribute on a 2M-workload sync, and shrinking the window made it
+     * worse. The rows carry a reference to the job, so the MID can ask for them instead and the
+     * message carries one sys_id whatever the run size.
+     *
+     * The sys_ids are collected up front rather than the caller iterating this cursor directly,
+     * because the caller DELETES each row as it consumes it -- walking a cursor over a table while
+     * deleting out of it is how rows get skipped. Collecting first also costs nothing that matters:
+     * this is the list that used to be in the message, ~132 KB at the largest run size, and MID
+     * heap was never the constraint.
+     *
+     * Ordered by creation so rows are consumed in the order phase 2 produced them. Nothing depends
+     * on that -- each row is an independent window of workloads -- but an unordered walk makes the
+     * job log read as if work were happening at random.
+     *
+     * @param {String} payloadTable Payload table to read
+     * @returns {Array} Row sys_ids, empty when the job wrote none
+     */
+    _payloadRowSysIds: function(payloadTable) {
+        var sysIds = [];
+
+        if (!this.jobSysId) {
+            this.logger._error('[IllumioUpdateWorkloads] No jobSysId on the probe, so the ' +
+                payloadTable + ' rows for this run cannot be found.');
+            return sysIds;
+        }
+
+        // Over the Table API, not GlideRecord. This code runs on the MID Server host, which has
+        // no database and no GlideRecord class -- every other instance read in this file goes
+        // through snHttpClient for exactly that reason (_checkInvalidatedJob, _updateJobRecord,
+        // checkCancelledJobStatus, and the deleteMethod that retires each row below). A
+        // GlideRecord here threw ReferenceError on the first row, which the operation's own
+        // try/catch turned into a job marked `failed` with no workloads touched and every
+        // payload row still sitting in the table.
+        //
+        // `^` is percent-encoded by hand: the endpoint string is handed to the HTTP method
+        // unchanged, so an unencoded caret is a query separator the Table API will not see.
+        var query = PAYLOAD_JOB_FIELD + '=' + this.jobSysId + '%5EORDERBYsys_created_on';
+        var url = TABLE_API + payloadTable +
+            '?sysparm_fields=sys_id' +
+            '&sysparm_limit=' + PAYLOAD_ROW_QUERY_LIMIT +
+            '&sysparm_query=' + query;
+
+        var response = this.snHttpClient.get(url, '');
+
+        if (response.hasError || !response.data || !response.data.result) {
+            this.logger._error('[IllumioUpdateWorkloads] Could not read the ' + payloadTable +
+                ' rows for job ' + this.jobSysId + '. Status: ' + response.status);
+            return sysIds;
+        }
+
+        var rows = response.data.result;
+        for (var i = 0; i < rows.length; i++) {
+            sysIds.push(rows[i].sys_id + '');
+        }
+
+        // The instance told us how many it wrote. A mismatch means rows were lost between the
+        // insert and now, or PAYLOAD_JOB_FIELD does not match the column the instance stamped --
+        // both of which otherwise surface as a sync that silently does less than it reported.
+        if (!isNaN(this.payloadRows) && this.payloadRows !== sysIds.length) {
+            this.logger._error('[IllumioUpdateWorkloads] The instance wrote ' + this.payloadRows +
+                ' payload row(s) to ' + payloadTable + ' for job ' + this.jobSysId + ' but ' +
+                sysIds.length + ' were found. Check that the "' + PAYLOAD_JOB_FIELD +
+                '" column exists and matches IllumioSyncUtils.PAYLOAD_JOB_FIELD.');
+        }
+
+        return sysIds;
+    },
+
+    /**
+     * One payload row's contents, parsed, or null if it could not be read.
+     *
+     * Fetched a row at a time rather than pulling every row's `payload` in the sys_id query
+     * above. The whole point of splitting the run across rows is that only one window of
+     * workloads is in memory at once; asking for all the payloads together would put the entire
+     * run back in a single response and undo it.
+     *
+     * @param {String} payloadTable Payload table the row lives in
+     * @param {String} rowSysId     sys_id of the row
+     * @returns {Object} Parsed payload, or null
+     */
+    _readPayloadRow: function(payloadTable, rowSysId) {
+        var url = TABLE_API + payloadTable + '/' + rowSysId + '?sysparm_fields=payload';
+        var response = this.snHttpClient.get(url, '');
+
+        if (response.hasError || !response.data || !response.data.result) {
+            this.logger._error('[IllumioUpdateWorkloads] Could not read the ' + payloadTable +
+                ' row ' + rowSysId + '. Status: ' + response.status);
+            return null;
+        }
+
+        // A sys_id GET returns the record as an object, not a one-element array like a query.
+        var record = response.data.result;
+        if (!record.payload) {
+            this.logger._error('[IllumioUpdateWorkloads] The ' + payloadTable + ' row ' +
+                rowSysId + ' has an empty payload.');
+            return null;
+        }
+
+        return JSON.parse(record.payload);
+    },
+
+    /**
+     * Probe entry point.
+     *
+     * W5/W6: the body is _run(). This wrapper exists for two things the body cannot do for
+     * itself.
+     *
+     * W6 -- one boundary line the moment the probe starts, pushed to the instance rather than
+     * left in agent0.log. A transport failure (MID offline, the message never picked up, a probe
+     * name that does not resolve) runs none of our code, so nothing inside here can report it.
+     * The instance logging "queued for the MID" with no probe-entered line after it is what
+     * says the break is in the transport and not in either half.
+     *
+     * W5 -- the push budget for this run is reset here, before the milestone below, or that line
+     * would be charged against whatever the previous run in this MID JVM spent. There is nothing
+     * to do at the end: each line is pushed to the instance as it happens, so a run that throws
+     * has already delivered the errors that led up to the throw.
+     */
     run: function() {
+        this.logger.resetPushBudget();
+        this.logger._milestone('Probe entered.');
+        return this._run();
+    },
+
+    _run: function() {
         var jobContent;
         try {
             this.payload = decodeURI(this.payload);
@@ -190,15 +343,43 @@ IllumioUpdateWorkloads.prototype = {
                 var unpairedVens = 0;
                 var payload;
 
-                var totalSysIds = (this.payloadSysIds + '').split(',');
+                // Queried by job rather than read out of the ECC message. Empty on the
+                // non-autosync branch, which never enters the loop body that uses it.
+                var totalSysIds = this.autoSync == 'true' ?
+                    this._payloadRowSysIds(AUTOSYNC_PAYLOAD_TABLE) : [];
                 var counter = 0;
+
+                if (this.autoSync == 'true' && totalSysIds.length === 0) {
+                    this.logger._error('[updateCreate] No payload rows found for job ' +
+                        this.jobSysId + '. Nothing to send to the PCE.');
+                    this._updateJobRecord(this.jobSysId, {
+                        job_status: 'failed',
+                        logs: 'No payload rows could be found for this job, so nothing was sent ' +
+                            'to the PCE. The workloads were prepared but the MID Server could ' +
+                            'not read them back.',
+                        job_completed: this.snowDateFormat.format(new Date()) + ''
+                    });
+                    return;
+                }
+                // Same unit as the deletion branch below: a batch is a payload row. On the
+                // non-autosync path the whole run arrives in the ECC message as a single payload,
+                // which is one batch.
+                var totalBatches = this.autoSync == 'true' ? totalSysIds.length : 1;
+                var syncStartedAt = new Date().getTime();
+                var batchLabel, rowStartedAt, rowBefore;
+
                 do {
+                    batchLabel = 'Batch ' + (counter + 1) + '/' + totalBatches;
+                    rowStartedAt = new Date().getTime();
+                    rowBefore = createdUnknownWorkloads + updatedManagedWorkloads +
+                        updatedUnManagedWorkloads;
 
                     if (this.autoSync == 'true') {
 
-                        var grPayload = new GlideRecord(AUTOSYNC_JOB_TABLE);
-                        if (grPayload.get(totalSysIds[counter])) {
-                            payload = JSON.parse(grPayload.payload);
+                        payload = this._readPayloadRow(
+                            AUTOSYNC_PAYLOAD_TABLE, totalSysIds[counter]);
+
+                        if (payload) {
                             var deletePayloadUrl =
                                 TABLE_API +
                                 AUTOSYNC_PAYLOAD_TABLE +
@@ -210,11 +391,18 @@ IllumioUpdateWorkloads.prototype = {
                             );
                             counter++;
                         } else {
-                            this.logger._error(
-                                'Could not get the autosync payload having sys id: ' +
-                                totalSysIds[counter]
-                            );
+                            // _readPayloadRow has already said why. Left in the table on purpose:
+                            // a row that could not be read is the one row worth keeping for
+                            // whoever has to work out what happened.
+                            //
+                            // Logged as a batch rather than passed over silently: the numbering
+                            // runs to totalBatches either way, and a gap would read as a lost
+                            // line.
+                            this._updateJobRecord(this.jobSysId, {
+                                logs: batchLabel + ': skipped, payload row could not be read'
+                            });
                             counter++;
+                            continue;
                         }
 
                     } else {
@@ -223,7 +411,7 @@ IllumioUpdateWorkloads.prototype = {
                     var count = parseInt(this.count);
 
                     if (payload.createUnknown) {
-                        if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+                        if (this.utils.checkCancelledJobStatus(this.jobSysId)) {
                             this.logger._debug("[updateCreate]: Job is cancelled");
                             return;
                         }
@@ -231,11 +419,13 @@ IllumioUpdateWorkloads.prototype = {
                         totalWorkloads = totalWorkloads + payload.createUnknown.length;
                         // If there are unknown workloads to create
                         unknownWorkloads = JSON.stringify(payload.createUnknown);
-                        jobContent = {
-                            logs: 'Creating ' + payload.createUnknown.length + ' unknown workload(s)',
-                            current_operation: 'Creating unknown workloads'
-                        };
-                        this._updateJobRecord(this.jobSysId, jobContent);
+                        // Syslog. This is one of three sub-operations within a row; the job
+                        // record's unit is the row, reported once at the end of the loop body.
+                        this.logger._debug('Creating ' + payload.createUnknown.length +
+                            ' unknown workload(s)');
+                        this._updateJobRecord(this.jobSysId, {
+                            current_operation: 'Creating unknown workloads (' + batchLabel + ')'
+                        });
                         var createdResult = this.create(unknownWorkloads);
                         if (!createdResult) {
                             this.logger._debug("[updateCreate]: Job is cancelled");
@@ -245,22 +435,26 @@ IllumioUpdateWorkloads.prototype = {
                         if (createdResult.count) {
                             createdUnknownWorkloads = createdUnknownWorkloads + createdResult.count;
                         }
+                        this._logDrops('create', 'unknown workload(s)',
+                            payload.createUnknown.length, createdResult);
                     }
 
                     if (payload.updateManaged) {
 
-                        if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+                        if (this.utils.checkCancelledJobStatus(this.jobSysId)) {
                             this.logger._debug("[updateCreate]: Job is cancelled");
                             return;
                         }
 
                         totalWorkloads = totalWorkloads + payload.updateManaged.length;
                         // If there are managed workloads to update
-                        jobContent = {
-                            logs: 'Total critical label groups fetched : ' + count + '\n[' + this.illumioDateFormat.format(new Date()) + '] ' + 'Updating ' + payload.updateManaged.length + ' managed workload(s)',
-                            current_operation: 'Updating managed workloads'
-                        };
-                        this._updateJobRecord(this.jobSysId, jobContent);
+                        // Syslog. This is one of three sub-operations within a row; the job
+                        // record's unit is the row, reported once at the end of the loop body.
+                        this.logger._debug('Total critical label groups fetched: ' + count +
+                            '. Updating ' + payload.updateManaged.length + ' managed workload(s)');
+                        this._updateJobRecord(this.jobSysId, {
+                            current_operation: 'Updating managed workloads (' + batchLabel + ')'
+                        });
                         managedWorkloads = JSON.stringify(payload.updateManaged);
                         var updatedManagedResult = this.update(managedWorkloads);
                         if (!updatedManagedResult) {
@@ -271,23 +465,28 @@ IllumioUpdateWorkloads.prototype = {
                         if (updatedManagedResult.count) {
                             updatedManagedWorkloads = updatedManagedWorkloads + updatedManagedResult.count;
                         }
+                        this._logDrops('update', 'managed workload(s)',
+                            payload.updateManaged.length, updatedManagedResult);
                     }
 
 
                     if (payload.updateUnManaged) {
 
-                        if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+                        if (this.utils.checkCancelledJobStatus(this.jobSysId)) {
                             this.logger._debug("[updateCreate]: Job is cancelled");
                             return;
                         }
 
                         totalWorkloads = totalWorkloads + payload.updateUnManaged.length;
                         // If there are ummanaged workloads to update
-                        jobContent = {
-                            logs: 'Total critical label groups fetched : ' + count + '\n[' + this.illumioDateFormat.format(new Date()) + '] ' + 'Updating ' + payload.updateUnManaged.length + ' unmanaged workload(s)',
-                            current_operation: 'Updating unmanaged workloads'
-                        };
-                        this._updateJobRecord(this.jobSysId, jobContent);
+                        // Syslog. This is one of three sub-operations within a row; the job
+                        // record's unit is the row, reported once at the end of the loop body.
+                        this.logger._debug('Total critical label groups fetched: ' + count +
+                            '. Updating ' + payload.updateUnManaged.length +
+                            ' unmanaged workload(s)');
+                        this._updateJobRecord(this.jobSysId, {
+                            current_operation: 'Updating unmanaged workloads (' + batchLabel + ')'
+                        });
                         unmanagedWorkloads = JSON.stringify(payload.updateUnManaged);
                         var updatedUnManagedResult = this.update(unmanagedWorkloads);
                         if (!updatedUnManagedResult) {
@@ -297,8 +496,31 @@ IllumioUpdateWorkloads.prototype = {
                         if (updatedUnManagedResult.count) {
                             updatedUnManagedWorkloads = updatedUnManagedWorkloads + updatedUnManagedResult.count;
                         }
+                        this._logDrops('update', 'unmanaged workload(s)',
+                            payload.updateUnManaged.length, updatedUnManagedResult);
                     }
 
+                    // The row's one line, replacing the up-to-three unnumbered lines this loop
+                    // used to write per row. Attempted is the row's own total; succeeded is the
+                    // run total's movement across this iteration, which is how the three
+                    // sub-operations are collapsed into one ratio without a fourth counter.
+                    var rowAttempted = (payload.createUnknown ? payload.createUnknown.length : 0) +
+                        (payload.updateManaged ? payload.updateManaged.length : 0) +
+                        (payload.updateUnManaged ? payload.updateUnManaged.length : 0);
+                    var rowSucceeded = createdUnknownWorkloads + updatedManagedWorkloads +
+                        updatedUnManagedWorkloads - rowBefore;
+
+                    // W2: per-batch, so syslog rather than the job record. It is one line per
+                    // payload row, which on a large run is what turned the job log into a trace
+                    // nobody could read -- and the closing Summary below already carries the
+                    // totals these lines add up to. Progress stays visible on the form through
+                    // current_operation, which names the batch it is on.
+                    //
+                    // _milestone rather than _info because this has to reach the instance: moving
+                    // detail OUT of the job log is only an improvement if it lands somewhere
+                    // reachable from there. Bounded by row count, not by workload count.
+                    this.logger._milestone(batchLabel + ': ' + rowSucceeded + '/' + rowAttempted +
+                        ' synced' + this._since(rowStartedAt));
 
                 } while (counter < totalSysIds.length && this.autoSync == 'true');
 
@@ -319,24 +541,23 @@ IllumioUpdateWorkloads.prototype = {
                         job_completed: this.snowDateFormat.format(new Date()) + "",
                     };
                 } else {
-                    // If some or all workloads are created/updated on PCE and ServiceNow
-                    var status = this.partialSucc;
-                    if (status == 'true') {
-                        jobContent = {
-                            job_status: skippedWorkloads != 0 ? 'completed_with_error' : 'partial_success',
-                            logs: 'Synchronization with PCE completed' + ' \n -------------------------------------\nTotal workloads: ' + (totalWorkloads + skippedWl) + '\n Created unknown workloads: ' + createdUnknownWorkloads + '\n Updated managed workloads: ' + updatedManagedWorkloads + '\n Updated unmanaged workloads: ' + updatedUnManagedWorkloads + '\n Skipped workloads: ' + (skippedWorkloads + skippedWl) + '\n Deleted workloads: ' + deletedWorkloads + '\n Unpaired VENs: ' + unpairedVens,
-                            job_completed: this.snowDateFormat.format(new Date()) + "",
-                            current_operation: 'Synchronization with PCE completed'
-                        };
-                    } else {
-                        jobContent = {
-                            job_status: skippedWorkloads != 0 ? 'completed_with_error' : 'completed',
-                            logs: 'Synchronization with PCE completed' + ' \n -------------------------------------\nTotal workloads: ' + (totalWorkloads + skippedWl) + '\n Created unknown workloads: ' + createdUnknownWorkloads + '\n Updated managed workloads: ' + updatedManagedWorkloads + '\n Updated unmanaged workloads: ' + updatedUnManagedWorkloads + '\n Skipped workloads: ' + (skippedWorkloads + skippedWl) + '\n Deleted workloads: ' + deletedWorkloads + '\n Unpaired VENs: ' + unpairedVens,
-                            job_completed: this.snowDateFormat.format(new Date()) + "",
-                            current_operation: 'Synchronization with PCE completed'
-                        };
-                    }
-
+                    // One line, in the same shape as the instance-side "Summary:" that closes
+                    // phase 2 and as the deletion branch's closing line. The block this replaces
+                    // restated under headings, after a rule, numbers the Batch lines above have
+                    // already given -- and did it identically in both arms of this branch, which
+                    // differed only in the status they set.
+                    var totalSkipped = skippedWorkloads + skippedWl;
+                    jobContent = {
+                        job_status: skippedWorkloads != 0 ? 'completed_with_error' :
+                            (this.partialSucc == 'true' ? 'partial_success' : 'completed'),
+                        logs: 'Sync complete: ' + createdUnknownWorkloads + ' for creation, ' +
+                            (updatedManagedWorkloads + updatedUnManagedWorkloads) +
+                            ' for updation' +
+                            (totalSkipped > 0 ? ', ' + totalSkipped + ' skipped' : '') +
+                            this._since(syncStartedAt),
+                        job_completed: this.snowDateFormat.format(new Date()) + "",
+                        current_operation: 'Synchronization with PCE completed'
+                    };
                 }
                 this._updateJobRecord(this.jobSysId, jobContent);
             } catch (exception) {
@@ -362,27 +583,74 @@ IllumioUpdateWorkloads.prototype = {
                 // number of matched workloads. Rows are read and deleted one at a time, the same
                 // way the updateCreate branch above consumes autosync payload rows.
                 //
+                // R33: the row sys_ids are queried by job rather than read out of the message,
+                // for the reason on _payloadRowSysIds -- the list was the last thing in the ECC
+                // record that grew with the size of the run.
+                //
                 // Unpair and delete are disjoint sets -- a managed workload unpairs its VEN, an
                 // unmanaged one is deleted -- so doing both inside each row rather than all
                 // unpairs before all deletes reorders nothing that depends on the other.
-                var deletionRowSysIds = (this.payloadSysIds + '').split(',');
+                var deletionRowSysIds = this._payloadRowSysIds(DELETION_PAYLOAD_TABLE);
+
+                // The counterpart of the updateCreate guard above, and the reason this failure
+                // was unreadable. With no rows the loop below does nothing, every counter stays
+                // at zero, and the closing block then writes "Deletion completed / Deleted
+                // workloads: 0" onto a job it has just set to `failed` -- a log that contradicts
+                // its own status and names nothing to look at.
+                if (deletionRowSysIds.length === 0) {
+                    this.logger._error('[delete] No payload rows found for job ' + this.jobSysId +
+                        '. Nothing was sent to the PCE.');
+                    this._updateJobRecord(this.jobSysId, {
+                        job_status: 'failed',
+                        logs: 'No deletion payload rows could be found for this job, so nothing ' +
+                            'was sent to the PCE. The workloads were prepared but the MID ' +
+                            'Server could not read them back.',
+                        job_completed: this.snowDateFormat.format(new Date()) + ''
+                    });
+                    return;
+                }
+
+                // A batch is a payload row: one row is IllumioSyncUtils.PAYLOAD_ROW_SIZE
+                // workloads, sized to be one PCE bulk call. Known before the first row is read,
+                // so "Batch 3/10" carries a true denominator.
+                //
+                // This used to be numbered inside the row, against the chunks a row was cut into
+                // by batch_size. With batch_size at its default the cut is a no-op, so every row
+                // logged "batch 1 of 1" -- ten identical lines telling the operator nothing about
+                // where the run had got to.
+                var totalBatches = deletionRowSysIds.length;
+                var deletionStartedAt = new Date().getTime();
 
                 for (var pr = 0; pr < deletionRowSysIds.length; pr++) {
+                    var batchLabel = 'Batch ' + (pr + 1) + '/' + totalBatches;
                     var deletionRowSysId = deletionRowSysIds[pr];
                     if (!deletionRowSysId) {
                         continue;
                     }
 
-                    var grDeletionPayload = new GlideRecord(DELETION_PAYLOAD_TABLE);
-                    if (!grDeletionPayload.get(deletionRowSysId)) {
-                        this.logger._error(
-                            'Could not get the deletion payload having sys id: ' +
-                            deletionRowSysId
-                        );
+                    var rowStartedAt = new Date().getTime();
+                    var rowUnpairAttempted = 0,
+                        rowUnpaired = 0,
+                        rowDeleteAttempted = 0,
+                        rowDeleted = 0;
+
+                    var deletionPayload = this._readPayloadRow(
+                        DELETION_PAYLOAD_TABLE, deletionRowSysId);
+
+                    // Skipped rather than aborted. Each row is an independent set of workloads,
+                    // so one unreadable row costs those workloads and nothing else; failing the
+                    // whole job would leave the rows already sent to the PCE deleted there and
+                    // the job saying it did nothing.
+                    //
+                    // Logged as a batch rather than passed over silently: the numbering runs to
+                    // totalBatches either way, and a gap in it would read as a lost line.
+                    if (!deletionPayload) {
+                        this._updateJobRecord(this.jobSysId, {
+                            logs: batchLabel + ': skipped, payload row could not be read'
+                        });
                         continue;
                     }
 
-                    var deletionPayload = JSON.parse(grDeletionPayload.payload);
                     this.snHttpClient.deleteMethod(
                         TABLE_API + DELETION_PAYLOAD_TABLE + '/' + deletionRowSysId,
                         ''
@@ -392,6 +660,7 @@ IllumioUpdateWorkloads.prototype = {
                     if (vensToUnpair.length > 0) {
                         this.logger._debug("Unpairing " + vensToUnpair.length + " VEN(s) before deletion");
                         totalWorkloads += vensToUnpair.length;
+                        rowUnpairAttempted = vensToUnpair.length;
 
                         var unpairUrl = "/api/v2/orgs/" + this.pceOrgId + "/vens/unpair";
                         var unpairChunks = [];
@@ -401,16 +670,18 @@ IllumioUpdateWorkloads.prototype = {
                         }
 
                         for (var ub = 0; ub < unpairChunks.length; ub++) {
-                            if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+                            if (this.utils.checkCancelledJobStatus(this.jobSysId)) {
                                 this.logger._debug("[unpair]: Job is cancelled");
                                 return;
                             }
 
-                            jobContent = {
-                                logs: 'Unpairing VENs - batch ' + (ub + 1) + ' of ' + unpairChunks.length + ' (' + unpairChunks[ub].length + ' VENs)',
-                                current_operation: 'Unpairing VENs (batch ' + (ub + 1) + '/' + unpairChunks.length + ')'
-                            };
-                            this._updateJobRecord(this.jobSysId, jobContent);
+                            // Syslog, not the job record. This is the cut WITHIN a row, made by
+                            // batch_size; the job record's unit is the row, reported once below.
+                            this.logger._debug('Unpairing VENs - chunk ' + (ub + 1) + ' of ' +
+                                unpairChunks.length + ' (' + unpairChunks[ub].length + ' VENs)');
+                            this._updateJobRecord(this.jobSysId, {
+                                current_operation: 'Unpairing VENs (' + batchLabel + ')'
+                            });
 
                             var unpairBody = {
                                 "vens": unpairChunks[ub].map(function(venHref) {
@@ -430,8 +701,9 @@ IllumioUpdateWorkloads.prototype = {
                                 this._updateJobRecord(this.jobSysId, jobContent);
                                 return;
                             }
-                            this.logger._debug("Successfully unpaired batch " + (ub + 1) + ": " + unpairChunks[ub].length + " VEN(s)");
+                            this.logger._debug("Successfully unpaired chunk " + (ub + 1) + ": " + unpairChunks[ub].length + " VEN(s)");
                             unpairedVens += unpairChunks[ub].length;
+                            rowUnpaired += unpairChunks[ub].length;
                         }
                     }
 
@@ -441,6 +713,7 @@ IllumioUpdateWorkloads.prototype = {
                         allHref.push({"href": hrefKey});
                     }
                     totalWorkloads += allHref.length;
+                    rowDeleteAttempted = allHref.length;
 
                     if (allHref.length > 0) {
                         var deleteUrl = "/api/v2/orgs/" + this.pceOrgId + "/workloads/bulk_delete";
@@ -452,16 +725,19 @@ IllumioUpdateWorkloads.prototype = {
 
                         var notDeletedWorkloads = 0;
                         for (var db = 0; db < deleteChunks.length; db++) {
-                            if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+                            if (this.utils.checkCancelledJobStatus(this.jobSysId)) {
                                 this.logger._debug("[delete]: Job is cancelled");
                                 return;
                             }
 
-                            jobContent = {
-                                logs: 'Deleting workloads from PCE - batch ' + (db + 1) + ' of ' + deleteChunks.length + ' (' + deleteChunks[db].length + ' workloads)',
-                                current_operation: 'Deleting workloads (batch ' + (db + 1) + '/' + deleteChunks.length + ')'
-                            };
-                            this._updateJobRecord(this.jobSysId, jobContent);
+                            // Syslog, not the job record. This is the cut WITHIN a row, made by
+                            // batch_size; the job record's unit is the row, reported once below.
+                            this.logger._debug('Deleting workloads from PCE - chunk ' + (db + 1) +
+                                ' of ' + deleteChunks.length + ' (' + deleteChunks[db].length +
+                                ' workloads)');
+                            this._updateJobRecord(this.jobSysId, {
+                                current_operation: 'Deleting workloads (' + batchLabel + ')'
+                            });
 
                             var deleteResponse = this.pceHttpClient.put(deleteUrl, '', null, deleteChunks[db]);
                             if (deleteResponse.hasError) {
@@ -481,10 +757,23 @@ IllumioUpdateWorkloads.prototype = {
                                     this.logger._error("IllumioUpdateWorkloads: Failed to delete workload: " + deleteResponse.data[dr]["href"]);
                                 }
                             }
-                            this.logger._debug("Delete batch " + (db + 1) + " complete: " + deleteChunks[db].length + " sent");
+                            this.logger._debug("Delete chunk " + (db + 1) + " complete: " + deleteChunks[db].length + " sent");
                         }
                         deletedWorkloads += allHref.length - notDeletedWorkloads;
+                        rowDeleted = allHref.length - notDeletedWorkloads;
                     }
+
+                    // The row's one line. Deleted and unpaired are disjoint -- a managed workload
+                    // unpairs its VEN, an unmanaged one is deleted -- so the unpair clause is
+                    // omitted rather than shown as 0/0 on the runs that only delete.
+                    var batchLine = batchLabel + ': ' + rowDeleted + '/' + rowDeleteAttempted +
+                        ' deleted';
+                    if (rowUnpairAttempted > 0) {
+                        batchLine += ', ' + rowUnpaired + '/' + rowUnpairAttempted + ' unpaired';
+                    }
+                    // W2: per-batch, so syslog rather than the job record -- same reasoning as the
+                    // sync loop's row line. The Deletion complete line below carries the totals.
+                    this.logger._milestone(batchLine + this._since(rowStartedAt));
                 }
 
                 var failedWorkloads = totalWorkloads - deletedWorkloads - unpairedVens;
@@ -496,13 +785,18 @@ IllumioUpdateWorkloads.prototype = {
                     status = 'failed';
                 }
 
+                // One line, in the same shape as the instance-side "Summary:" that closes phase 2.
+                // The block this replaces restated three numbers the Batch lines above had
+                // already given, under headings, after a rule -- and its "Skipped" was the only
+                // figure in it that was not already on the record.
+                var totalSkipped = failedWorkloads + skippedDeletion;
                 jobContent = {
                     job_status: status,
-                    logs: 'Deletion completed' +
-                        '\n -------------------------------------' +
-                        '\n Deleted workloads: ' + deletedWorkloads +
-                        '\n Unpaired VENs: ' + unpairedVens +
-                        '\n Skipped: ' + (failedWorkloads + skippedDeletion),
+                    logs: 'Deletion complete: ' + deletedWorkloads +
+                        ' workload(s) for deletion, ' + unpairedVens +
+                        ' workload(s) for unpair' +
+                        (totalSkipped > 0 ? ', ' + totalSkipped + ' skipped' : '') +
+                        this._since(deletionStartedAt),
                     current_operation: 'Deletion completed',
                     job_completed: this.snowDateFormat.format(new Date()) + ""
                 };
@@ -525,11 +819,102 @@ IllumioUpdateWorkloads.prototype = {
      * @param {Array} payload list of payload to create on pce.
      * @return {JSON} Object with status and count of workload created.
      */
+    /**
+     * Record why one workload was dropped, grouped by reason.
+     *
+     * Every `continue` in create()/update(), and every bulk-response entry that came back with
+     * a status other than created/updated, used to go to ms.log and nowhere else. The job record
+     * saw only the arithmetic residual
+     * (total - created - updated - deleted - unpaired), which can say "428 skipped" without
+     * saying that any of the 428 had a stated reason. This keeps the reason.
+     *
+     * @param {Object} bag    Reason -> count
+     * @param {String} reason Short groupable phrase -- never a hostname or a sys_id, or the
+     *                        tally degenerates into one line per workload.
+     */
+    _tallyDrop: function(bag, reason) {
+        bag[reason] = (bag[reason] || 0) + 1;
+    },
+
+    /**
+     * Reduce one bulk_create/bulk_update response entry to a short, groupable reason.
+     *
+     * The PCE is not consistent here: some rejections carry `message`, some carry an `errors`
+     * array of {token, message}. Anything that varies per workload (a hostname in the text, for
+     * instance) would defeat the grouping, so the result is truncated.
+     *
+     * @param {Object} entry One element of the bulk response array
+     * @return {String}
+     */
+    _describeBulkError: function(entry) {
+        var text = '';
+        if (entry.errors && entry.errors.length > 0) {
+            var parts = [];
+            for (var e = 0; e < entry.errors.length; e++) {
+                parts.push(entry.errors[e].token || entry.errors[e].message || '');
+            }
+            text = parts.join(', ');
+        } else {
+            text = entry.message || entry.status || 'no reason given';
+        }
+        text = ('' + text).replace(/\s+/g, ' ');
+        return text.length > 120 ? text.substring(0, 120) + '...' : text;
+    },
+
+    /**
+     * Render a drop tally as job-log lines, commonest reason first.
+     * @param {Object} bag Reason -> count, as built by _tallyDrop
+     * @return {String} Empty string when nothing was dropped
+     */
+    _renderDrops: function(bag) {
+        var reasons = [],
+            reason;
+        for (reason in bag) {
+            if (bag.hasOwnProperty(reason)) {
+                reasons.push([reason, bag[reason]]);
+            }
+        }
+        if (reasons.length === 0) {
+            return '';
+        }
+        reasons.sort(function(a, b) {
+            return b[1] - a[1];
+        });
+        var lines = [];
+        for (var r = 0; r < reasons.length; r++) {
+            lines.push('   ' + reasons[r][1] + ' x ' + reasons[r][0]);
+        }
+        return lines.join('\n');
+    },
+
+    /**
+     * Write a drop breakdown onto the job record, if anything was dropped.
+     * @param {String} verb     'create' or 'update', for the wording
+     * @param {String} noun     What was being processed, e.g. 'unknown workload(s)'
+     * @param {Number} attempted How many went in
+     * @param {Object} result   Return value of create()/update()
+     */
+    _logDrops: function(verb, noun, attempted, result) {
+        if (!result) {
+            return;
+        }
+        var rendered = this._renderDrops(result.dropped || {});
+        if (!rendered) {
+            return;
+        }
+        var succeeded = result.count || 0;
+        this._updateJobRecord(this.jobSysId, {
+            logs: 'Could not ' + verb + ' ' + (attempted - succeeded) + ' of ' + attempted +
+                ' ' + noun + ':\n' + rendered
+        });
+    },
+
     create: function(payload) {
 
         this.logger._info("IllumioUpdateWorkloads: Initiating creating the workloads on PCE");
         var labelsToUse, hostname, public_ip, created_workloads = 0,
             sys_id;
+        var dropped = {};
         var payloadList = JSON.parse(payload);
 
         var payloadBody = [];
@@ -546,6 +931,7 @@ IllumioUpdateWorkloads.prototype = {
                 sys_id = payload.sys_id;
             } else {
                 this.logger._debug("IllumioUpdateWorkloads: Sys ID not found in the payload object : SKIPPED");
+                this._tallyDrop(dropped, 'no sys_id in the payload object');
                 continue;
             }
 
@@ -560,6 +946,7 @@ IllumioUpdateWorkloads.prototype = {
                     public_ip = payload.ip_address;
                 } else {
                     this.logger._error('Skipped creating workload ' + payload.hostname + ' as the IP Address ' + payload.ip_address + ' is invalid.');
+                    this._tallyDrop(dropped, 'invalid IP address on the ServiceNow record');
                     continue;
                 }
             }
@@ -576,6 +963,7 @@ IllumioUpdateWorkloads.prototype = {
             }
             if (!this.createLabels(labelsToCreate, labelsToUse)) {
                 this.logger._error("IllumioUpdateWorkloads: Failed to Create workload. Reason : Failed to create required labels");
+                this._tallyDrop(dropped, 'required label(s) could not be created on the PCE');
                 continue;
             }
 
@@ -628,7 +1016,9 @@ IllumioUpdateWorkloads.prototype = {
         }
         if (payloadBody.length == 0) {
             return {
-                "exception": 'PCE. Check MID Server logs for details.'
+                "exception": 'PCE. Check MID Server logs for details.',
+                "count": 0,
+                "dropped": dropped
             };
         }
 
@@ -654,7 +1044,7 @@ IllumioUpdateWorkloads.prototype = {
         var payloadBody_chunked_length = payloadBody_chunked.length;
         for (var i = 0; i < payloadBody_chunked_length; i++) {
 
-            if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+            if (this.utils.checkCancelledJobStatus(this.jobSysId)) {
                 return;
             }
 
@@ -666,10 +1056,13 @@ IllumioUpdateWorkloads.prototype = {
             this.logger._debug("Put Response Handler->", putResponse);
             if (putResponse.hasError) {
                 this.logger._debug("IllumioUpdateWorkloads: Failed create the workloads on PCE.");
+                this._tallyDrop(dropped, 'bulk_create batch ' + (i + 1) +
+                    ' failed outright, HTTP ' + putResponse.status);
                 return {
                     "status": false,
                     "count": created_workloads,
-                    "exception": 'PCE. Response status code: ' + putResponse.status
+                    "exception": 'PCE. Response status code: ' + putResponse.status,
+                    "dropped": dropped
                 };
             }
             var putResponseObject = putResponse.data;
@@ -680,6 +1073,11 @@ IllumioUpdateWorkloads.prototype = {
                 } else {
                     this.logger._error("IllumioUpdateWorkloads: Error while creating a workload : SKIPPED");
                     this.logger._error("IllumioUpdateWorkloads: Message : " + putResponseObject[putResponseIndex].message);
+                    // The PCE answers bulk_create per item, so a 200 can still carry hundreds of
+                    // rejections. Group by the message so the job log shows the reason once with
+                    // a count, rather than 428 identical lines or -- as before -- none at all.
+                    this._tallyDrop(dropped, 'PCE rejected the workload: ' +
+                        this._describeBulkError(putResponseObject[putResponseIndex]));
                 }
             }
 
@@ -696,7 +1094,8 @@ IllumioUpdateWorkloads.prototype = {
         this.logger._info("IllumioUpdateWorkloads: Workload creation complete");
         return {
             "status": true,
-            "count": created_workloads
+            "count": created_workloads,
+            "dropped": dropped
         };
     },
 
@@ -711,6 +1110,7 @@ IllumioUpdateWorkloads.prototype = {
 
         var href, labelsToUse, updated_workloads = 0;
         var index;
+        var dropped = {};
         var payloadList = JSON.parse(payload);
 
         var payloadBody = [];
@@ -737,6 +1137,7 @@ IllumioUpdateWorkloads.prototype = {
                 sys_id = payload.sys_id;
             } else {
                 this.logger._debug("IllumioUpdateWorkloads: Sys ID not found in the payload object : SKIPPED");
+                this._tallyDrop(dropped, 'no sys_id in the payload object');
                 continue;
             }
 
@@ -747,6 +1148,7 @@ IllumioUpdateWorkloads.prototype = {
 
                 // Create the unknown labels
                 this.logger._error("IllumioUpdateWorkloads: Failed to update workload. Reason : Failed to create required labels " + href);
+                this._tallyDrop(dropped, 'required label(s) could not be created on the PCE');
                 continue;
             }
             snowUpdateObject["sys_id"] = sys_id;
@@ -829,7 +1231,9 @@ IllumioUpdateWorkloads.prototype = {
 
         if (payloadBody.length == 0) {
             return {
-                "exception": 'PCE. Check MID Server logs for details.'
+                "exception": 'PCE. Check MID Server logs for details.',
+                "count": 0,
+                "dropped": dropped
             };
         }
 
@@ -854,7 +1258,7 @@ IllumioUpdateWorkloads.prototype = {
         for (var i = 0; i < payloadBody_chunked_length; i++) {
 
 
-            if (this.utils.checkCancelledJobStatus(this.jobSysId, this.SNOWurl, this.SNOWusername, this.SNOWpassword)) {
+            if (this.utils.checkCancelledJobStatus(this.jobSysId)) {
                 return;
             }
 
@@ -868,10 +1272,13 @@ IllumioUpdateWorkloads.prototype = {
             // If the PUT call failed
             if (putResponse.hasError) {
                 this.logger._error("IllumioUpdateWorkloads: Failed to update the workload on PCE.");
+                this._tallyDrop(dropped, 'bulk_update batch ' + (i + 1) +
+                    ' failed outright, HTTP ' + putResponse.status);
                 return {
                     "status": false,
                     "count": updated_workloads,
-                    "exception": 'PCE. Response status code: ' + putResponse.status
+                    "exception": 'PCE. Response status code: ' + putResponse.status,
+                    "dropped": dropped
                 };
             }
 
@@ -882,6 +1289,8 @@ IllumioUpdateWorkloads.prototype = {
                     snowUpdateQueueFinal.push(snowUpdateQueue_chunked[i][putResponseIndex]);
                 } else {
                     this.logger._error("IllumioUpdateWorkloads: Failed to update a workload on PCE : " + putResponseObject[putResponseIndex].message);
+                    this._tallyDrop(dropped, 'PCE rejected the workload: ' +
+                        this._describeBulkError(putResponseObject[putResponseIndex]));
                 }
             }
 
@@ -895,7 +1304,8 @@ IllumioUpdateWorkloads.prototype = {
         this.logger._info("IllumioUpdateWorkloads: Workload updation complete");
         return {
             "status": true,
-            "count": updated_workloads
+            "count": updated_workloads,
+            "dropped": dropped
         };
     },
     /**	* Receive the list of labels to create and the labels to use.
@@ -955,8 +1365,18 @@ IllumioUpdateWorkloads.prototype = {
                 } else {
                     this.logger._info("Created label -> " + label.key + " : " + label.value);
                 }
-                // Append to the list of recently created labels
-                this.newLabelsCreated[label.key] = {};
+                // Append to the list of recently created labels.
+                //
+                // Only initialise the bucket when it is absent. It used to be reassigned to {} on
+                // every create, which discarded every other value already cached under the same
+                // key -- so the cache held exactly one value per dimension and a run with several
+                // roles interleaved across workloads re-POSTed /labels/ for a value it had
+                // already created, got 406 "already exists", and followed it with a GET to look
+                // the href back up. Two PCE calls per workload per dimension instead of one per
+                // distinct label, which is what produced enough traffic to earn a 429.
+                if (!this.newLabelsCreated[label.key]) {
+                    this.newLabelsCreated[label.key] = {};
+                }
                 this.newLabelsCreated[label.key][storedLabelValue] = {
                     "href": respBody.href
                 };
@@ -1041,11 +1461,16 @@ IllumioUpdateWorkloads.prototype = {
         var snowGetUrl =
             TABLE_API +
             SCHEDULED_JOB_TABLE +
-            '?sysparm_query=sys_id=' +
-            this.jobSysId;
+            '?sysparm_query=sys_id=' + this.jobSysId +
+            // W1: was an unqualified GET -- no sysparm_fields, so it pulled back the WHOLE job
+            // record including `logs`, which grows for the length of the run. Asking "is this job
+            // still valid?" cost more with every line the job had already written.
+            '&sysparm_fields=job_status' +
+            '&sysparm_limit=1';
 
         var response = this.snHttpClient.get(snowGetUrl, '');
-        if (response.data.result.length == 0) {
+        if (response.hasError || !response.data || !response.data.result ||
+            response.data.result.length === 0) {
             this.logger._error('No Results Found for the Query');
             return false;
         }
@@ -1060,77 +1485,96 @@ IllumioUpdateWorkloads.prototype = {
     },
 
     /**
-     * Updates scheduled job record with given parameters
+     * Updates scheduled job record with given parameters.
      *
-     * @param {String} jobId sys_id of the job record
-     * @param {String} jobContent content of job
+     * One GET, one PUT, and the PUT carries only the fields that changed.
      *
+     * W1 collapsed three round trips into two. It used to call _checkInvalidatedJob() -- an
+     * unqualified GET that returned the whole record, `logs` included -- then GET `logs` again,
+     * then PUT the entire record back. Both reads carried the accumulated log string across the
+     * network, so the cost of writing one line rose with every line already written; on a 100k
+     * run that is tens of megabytes of log moved for no reason. The invalidation check is folded
+     * into the single GET below, which now asks for `job_status` as well.
+     *
+     * Two things went with the whole-record PUT and are worth naming, because both were defects
+     * rather than style:
+     *
+     *  - `jobRecord.illumio_pce_configuration.value` was dereferenced on a record fetched with
+     *    `sysparm_fields=logs`, so that field was never in the response. It existed only to
+     *    re-flatten a reference field for a PUT that no longer sends it.
+     *  - `String.replaceAll` is ES2021 and the MID runs Rhino. The same unescaping is done below
+     *    with `.replace(/../g, ..)`, which is ES5 and does the same job.
+     *
+     * @param {String} jobSysId sys_id of the job record
+     * @param {Object} jobContent Fields to write. `logs` is appended to what is already there;
+     *                 everything else is replaced.
      */
     _updateJobRecord: function(jobSysId, jobContent) {
 
+        var snowGetUrl =
+            TABLE_API +
+            SCHEDULED_JOB_TABLE +
+            '?sysparm_fields=logs,job_status&sysparm_query=sys_id=' + jobSysId +
+            '&sysparm_limit=1';
 
+        var putUrl = TABLE_API + SCHEDULED_JOB_TABLE + '/' + jobSysId;
 
+        var response = this.snHttpClient.get(snowGetUrl, '');
+        if (response.hasError || !response.data || !response.data.result ||
+            response.data.result.length === 0) {
+            this.logger._error(
+                '[_updateJobRecord] Error while checking status of given job on ServiceNow. ' +
+                'Proceeding with further actions.'
+            );
+            return false;
+        }
 
-        if (!this._checkInvalidatedJob()) {
+        var jobRecord = response.data.result[0];
+        var status = String(jobRecord.job_status);
 
-            var snowGetUrl =
-                TABLE_API +
-                SCHEDULED_JOB_TABLE +
-                '?sysparm_fields=logs&sysparm_query=sys_id=' +
-                jobSysId;
+        // job_status was not in sysparm_fields before this, so all three of these comparisons
+        // were against undefined: none of them ever fired, and a stopped job kept being written
+        // to for as long as the probe ran.
+        if (status == 'invalidated') {
+            this.logger._debug('[_updateJobRecord] Given job is invalidated. Aborting further actions.');
+            return true;
+        }
+        if (CANCELLED_JOB_STATUSES.indexOf(status) > -1) {
+            return true;
+        }
+        if (status == 'failed') {
+            this.logger._info('[_updateJobRecord] Given job has already failed. Aborting further actions.');
+            return false;
+        }
 
-            var putUrl = TABLE_API + SCHEDULED_JOB_TABLE + '/' + jobSysId;
-
-            var response = this.snHttpClient.get(snowGetUrl, '');
-            if (response.data.result.length == 0) {
-                this.logger._error(
-                    '[run] Error while checking status of given job on ServiceNow. Proceeding with further actions.'
-                );
-                return false;
-            }
-            var jobRecord = response.data.result[0];
-
-            if (response.hasError) {
-                return false;
-            } else if (jobRecord.job_status == 'cancelled') {
-                return true;
-            }
-
-            if (jobRecord.job_status != 'failed') {
-                for (var key in jobContent) {
-                    if (jobContent.hasOwnProperty(key)) {
-
-                        if (key != 'logs') {
-                            jobRecord[key] = jobContent[key];
-                        } else {
-                            jobRecord["logs"] = jobRecord["logs"].replaceAll("\\\"", "\"");
-                            jobRecord["logs"] = jobRecord["logs"].replaceAll("\\'", "'");
-                            jobRecord["logs"] = jobRecord["logs"].replaceAll("\\n", "\n");
-                            jobRecord["logs"] += '\n' + '[' + this.illumioDateFormat.format(new Date()) + '] ' + jobContent["logs"];
-                        }
-                    }
-                }
-                jobRecord["illumio_pce_configuration"] = jobRecord.illumio_pce_configuration.value;
-
-                var putResponse = this.snHttpClient.put(
-                    putUrl,
-                    '',
-                    null,
-                    jobRecord
-                );
-                if (putResponse.hasError) {
-                    return false;
-                } else {
-                    this.logger._info(
-                        'The Scheduled Job had updated the values with the logs'
-                    );
-                }
-            } else {
-                this.logger._info(
-                    '[_updateJobRecord] Given job is invalidated. Aborting further actions.'
-                );
+        var payload = {};
+        for (var key in jobContent) {
+            if (jobContent.hasOwnProperty(key) && key != 'logs') {
+                payload[key] = jobContent[key];
             }
         }
+
+        if (jobContent.hasOwnProperty('logs')) {
+            var existingLogs = String(jobRecord.logs == null ? '' : jobRecord.logs)
+                .replace(/\\"/g, '"')
+                .replace(/\\'/g, "'")
+                .replace(/\\n/g, '\n');
+            // W1: no per-line timestamp. The same line is emitted to syslog_app_scope, which
+            // timestamps it there, and the job log is a milestone list rather than a trace.
+            payload.logs = existingLogs + (existingLogs ? '\n' : '') + jobContent.logs;
+            // W2: the job log and Application Logs carry the same milestones. Anything worth a
+            // line on the job record is worth one in the correlated trail, where it sits next to
+            // the MID-side detail that produced it. _milestone pushes it to the instance too, so
+            // a job-log line and its surrounding context are readable from one place.
+            this.logger._milestone(String(jobContent.logs));
+        }
+
+        var putResponse = this.snHttpClient.put(putUrl, '', null, payload);
+        if (putResponse.hasError) {
+            return false;
+        }
+
+        this.logger._debug('The Scheduled Job had updated the values with the logs');
     },
 
 };]]></script>
@@ -1140,7 +1584,7 @@ IllumioUpdateWorkloads.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>c4a87d4adb4c6700dc9fabc5ca96191c</sys_id>
-        <sys_mod_count>107</sys_mod_count>
+        <sys_mod_count>115</sys_mod_count>
         <sys_name>IllumioUpdateWorkloads</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -1148,6 +1592,6 @@ IllumioUpdateWorkloads.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_c4a87d4adb4c6700dc9fabc5ca96191c</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
+        <sys_updated_on>2026-09-29 12:25:24</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

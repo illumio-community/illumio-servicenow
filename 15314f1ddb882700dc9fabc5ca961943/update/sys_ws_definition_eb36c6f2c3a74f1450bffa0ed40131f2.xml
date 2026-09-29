@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_ws_definition">
+    <sys_ws_definition action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <base_uri>/api/x_illu2_illumio/illumio_mid_log</base_uri>
+        <consumes>application/json,application/xml,text/xml</consumes>
+        <consumes_customized>false</consumes_customized>
+        <default_version>No active default version</default_version>
+        <doc_link/>
+        <enforce_acl>bb6f0a3ac3e74f1450bffa0ed4013142</enforce_acl>
+        <is_versioned>false</is_versioned>
+        <name>IllumioMIDLog</name>
+        <namespace>x_illu2_illumio</namespace>
+        <produces>application/json,application/xml,text/xml</produces>
+        <produces_customized>false</produces_customized>
+        <service_id>illumio_mid_log</service_id>
+        <short_description/>
+        <sys_class_name>sys_ws_definition</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-29 11:55:54</sys_created_on>
+        <sys_id>eb36c6f2c3a74f1450bffa0ed40131f2</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>IllumioMIDLog</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_ws_definition_eb36c6f2c3a74f1450bffa0ed40131f2</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 12:23:04</sys_updated_on>
+    </sys_ws_definition>
+</record_update>

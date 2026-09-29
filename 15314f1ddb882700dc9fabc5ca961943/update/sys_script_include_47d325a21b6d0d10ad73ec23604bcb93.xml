@@ -10,7 +10,6 @@
         <name>IllumioConstants</name>
         <sandbox_callable>false</sandbox_callable>
         <script><![CDATA[var MID_SERVER_UP_STATUS = "Up";
-var MID_SERVER_VALIDATED_STATUS = "true";
 var MID_SERVER_VERSION = gs.getProperty('mid.buildstamp', null);
 var MID_SERVER_USER_ROLE = "mid_server";
 var ILLUMIO_MID_SERVER_ROLE = "x_illu2_illumio.mid_server_user";
@@ -29,19 +28,137 @@ var DEFAULT_HTTP_RETRY_INTERVAL_MAX = 300;
 var HTTP_RETRY_COUNT_MAX = 100;
 var HTTP_RETRY_INTERVAL_INCREMENT_MAX = 600;
 var HTTP_RETRY_INTERVAL_MAX = 600;
-var IS_CASE_SENSITIVE = gs.getProperty("x_illu2_illumio.is_case_sensitive", true);]]></script>
+var IS_CASE_SENSITIVE = gs.getProperty("x_illu2_illumio.is_case_sensitive", true);
+
+// ---------------------------------------------------------------------------------------------
+// Shared batch sizes.
+//
+// Three buckets replacing a scatter of bare 500 and 1000 literals and two badly-named properties
+// (x_illu2_illumio.bulk_operation_batch_size and x_illu2_illumio.payload.batch.size, both
+// retired). Before this there was no way to answer "what does this app batch at" without grepping
+// for numbers, and the two properties that existed governed one path each while the numbers that
+// governed everything else were hard-coded.
+//
+// NAMED BY SIZE, NOT BY PURPOSE -- which means they are SHARED. Lowering BATCH_SIZE_MEDIUM to fix
+// one slow path also changes every other path that uses it. That is the deliberate trade: a small
+// legible surface instead of one property per call site. A path that genuinely needs its own
+// number should keep a named constant of its own rather than acquire a fourth bucket here.
+//
+// DISTINCT FROM THE NAMED CONSTANTS, WHICH ARE NOT PROPERTIES AND SHOULD NOT BECOME ONE.
+// IllumioSyncUtils.WORKLOAD_CHUNK_SIZE, CI_CHUNK_SIZE, LABEL_PAIR_BATCH_SIZE,
+// IllumioSyncFilterUtils.CSV_BATCH_SIZE, IllumioDiscoveryRepository.IN_CLAUSE_BATCH_SIZE and
+// IllumioDiscoveryUtils.DISCOVERY_WINDOW_SIZE / DELETE_BATCH_SIZE all hold numbers in this range
+// and all stay constants. They define the SHAPE of something -- the size of a payload row the MID
+// Server has to agree with, the width of an IN clause, the memory ceiling of a window -- rather
+// than a knob anyone should turn in the field. WORKLOAD_CHUNK_SIZE in particular is a contract
+// between the instance and the MID; making it settable is how the two ends stop agreeing.
+//
+// parseInt IS LOAD-BEARING. gs.getProperty returns a STRING even when the default passed in is a
+// number, and these feed _chunkArray, whose loop does `index += size`. With a string that is
+// concatenation, not addition: "0500", "0500500", and a loop that never reaches the end of the
+// array. The `||` fallback covers a property set to a non-numeric value, where parseInt gives NaN
+// and every comparison against it is false.
+//
+// MID-SIDE CODE CANNOT READ THESE. A MID script include has no gs. IllumioManageAsyncJobs keeps
+// its own _fallbackDefaultBatchSize and IllumioMIDConstants keeps MIN_PCE_CALL_INTERVAL_MS for
+// that reason; where a batch size has to cross the boundary it travels in the ECC message as the
+// glide.jms.batch_size / glide.jms.chunk_size parameter, which is what the call sites below send.
+var BATCH_SIZE_STANDARD =
+    parseInt(gs.getProperty("x_illu2_illumio.batch_size_standard", 1000), 10) || 1000;
+var BATCH_SIZE_MEDIUM =
+    parseInt(gs.getProperty("x_illu2_illumio.batch_size_medium", 500), 10) || 500;
+// RESERVED -- no call site reads this yet. Every 100 in the server code today is either a CSS
+// width, the 0-100 retry-count validation bound, or HTTP_RETRY_COUNT_MAX above, and none of those
+// is a batch size. Defined so the three-bucket scheme is complete and a future small batch has
+// somewhere to go rather than arriving as another literal.
+var BATCH_SIZE_SMALL =
+    parseInt(gs.getProperty("x_illu2_illumio.batch_size_small", 100), 10) || 100;
+
+// ---------------------------------------------------------------------------------------------
+// Table names.
+//
+// THE CANONICAL SERVER-SIDE COPY. Before this the names were bare strings at ~100 call sites --
+// 29 of them for the scheduled jobs table alone -- spread across Script Includes, Business Rules,
+// UI Actions and Scheduled Scripts. Renaming a table meant a grep and a prayer, and a typo in one
+// of those strings produces an empty GlideRecord rather than an error.
+//
+// EVERY FILE THAT READS ONE OF THESE MUST CALL gs.include("IllumioConstants") FIRST. That call is
+// the load-order mechanism -- without it a global here resolves to undefined and the constant
+// silently becomes a query against no table, which reports a run that found nothing rather than a
+// run that failed. It is line 1 in every Script Include and Business Rule that uses them. In a UI
+// Action whose body is an IIFE taking `gs` as a parameter it goes inside the IIFE instead, and in
+// the five dual-context UI Actions -- the ones whose Script field holds a client half as well --
+// it goes inside the `typeof window === 'undefined'` guard, because `gs` does not exist in the
+// browser and a top-level call would throw before the onclick handler was ever defined.
+//
+// Given the include, a reference from a prototype literal is safe as well as one from a function
+// body: the include runs before the literal is evaluated. IllumioStartDiscovery's WORKLOAD_PARAMS
+// and LABEL_PARAMS rely on that. Without the include, only function-body references survive,
+// because those are lazy -- which is why MAX_IP_ADDRESSES was historically read from inside loops.
+//
+// TWO PLACES DELIBERATELY DO NOT USE THESE AND KEEP THEIR OWN LITERALS:
+//
+//   IllumioSyncUtils -- its header states it calls no gs and touches no database, so that the
+//   condition parser can run unchanged in a plain Node harness. Reading a global from this file,
+//   which does call gs, would end that. Its table constants stay literals on purpose.
+//
+//   IllumioMIDConstants -- a MID script include runs in the MID Server's process and cannot see a
+//   scoped Script Include at all. That copy is duplicated by hand and says so.
+//
+// Both are pointed here by comment. Everything else should use the names below.
+// ---------------------------------------------------------------------------------------------
+
+var TABLE_SCHEDULED_JOBS = "x_illu2_illumio_illumio_scheduled_jobs";
+var TABLE_PCE_CONF = "x_illu2_illumio_illumio_pce_conf";
+var TABLE_PCE_WORKLOAD = "x_illu2_illumio_illumio_pce_workload";
+var TABLE_PCE_WORKLOAD_FIELD_VALUE = "x_illu2_illumio_illumio_pce_workload_field_value";
+var TABLE_CLASS_FIELD_MAPPING = "x_illu2_illumio_illumio_class_field_mapping";
+var TABLE_CONFIG_CLASS_MAPPING = "x_illu2_illumio_illumio_config_class_mapping";
+var TABLE_LABEL_DIMENSION = "x_illu2_illumio_illumio_label_dimension";
+var TABLE_SYNC_FILTER = "x_illu2_illumio_illumio_sync_filter";
+var TABLE_SYNC_FILTER_GROUP = "x_illu2_illumio_illumio_sync_filter_group";
+var TABLE_WORKLOAD_FIELD_FILTER_ITEM = "x_illu2_illumio_illumio_workload_field_filter_item";
+var TABLE_LABEL_FILTER_ITEM = "x_illu2_illumio_illumio_label_filter_item";
+var TABLE_PCE_FIELD_MAPPING = "x_illu2_illumio_illumio_pce_field_mapping";
+var TABLE_PCE_LABEL_GROUP_DETAILS = "x_illu2_illumio_illumio_pce_label_group_details";
+var TABLE_CRITICAL_LABEL_GROUP_CONFIG =
+    "x_illu2_illumio_illumio_critical_label_group_configuration";
+var TABLE_INCIDENT_MAPPING = "x_illu2_illumio_illumio_incident_mapping";
+var TABLE_PCE_ASYNC_JOBS = "x_illu2_illumio_illumio_pce_async_jobs";
+var TABLE_LABEL_GROUP_MAPPING = "x_illu2_illumio_illumio_label_group_mapping";
+var TABLE_LABEL_GROUP_MEMBER = "x_illu2_illumio_label_group_member";
+
+// ~100k rows in production. Whatever reads this table, do not hold the result for longer than one
+// window -- IllumioSyncRepoUtils.getLabelHrefsByPair builds and discards its map per window for
+// exactly that reason. Not to be confused with TABLE_LABEL_DIMENSION above, which is authored
+// configuration, tens of rows, and safe to cache for a whole run. Both have "label" in the name
+// and only one of them is small.
+var TABLE_PCE_LABELS_MAPPING = "x_illu2_illumio_illumio_pce_labels_mapping";
+
+// Discovery staging. Written by the MID Server's async-job mapping and truncated afterwards, so
+// these hold a full PCE snapshot mid-discovery and nothing between runs.
+var TABLE_PCE_WORKLOADS_MAPPING = "x_illu2_illumio_illumio_pce_workloads_mapping";
+var TABLE_PCE_WORKLOADS_MAPPING_STAGE = "x_illu2_illumio_illumio_pce_workloads_mapping_stage";
+var TABLE_PCE_LABELS_MAPPING_STAGE = "x_illu2_illumio_illumio_pce_labels_mapping_stage";
+
+// Payload tables. IllumioSyncUtils owns these as AUTOSYNC_PAYLOAD_TABLE / DELETION_PAYLOAD_TABLE
+// / PREVIEW_PAYLOAD_TABLE and its callers should use those; these exist for the call sites that
+// have no IllumioSyncUtils in hand. IllumioMIDConstants holds the third copy, by necessity.
+var TABLE_AUTOSYNC_PAYLOAD = "x_illu2_illumio_illumio_autosync_payload";
+var TABLE_DELETION_PAYLOAD = "x_illu2_illumio_illumio_deletion_payload";
+var TABLE_PREVIEW_PAYLOAD = "x_illu2_illumio_illumio_preview_payload";]]></script>
         <sys_class_name>sys_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2022-02-11 10:58:35</sys_created_on>
         <sys_id>47d325a21b6d0d10ad73ec23604bcb93</sys_id>
-        <sys_mod_count>10</sys_mod_count>
+        <sys_mod_count>11</sys_mod_count>
         <sys_name>IllumioConstants</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_47d325a21b6d0d10ad73ec23604bcb93</sys_update_name>
-        <sys_updated_by>crest.data</sys_updated_by>
-        <sys_updated_on>2025-07-29 09:58:13</sys_updated_on>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-24 05:43:11</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>47d325a21b6d0d10ad73ec23604bcb93</id>

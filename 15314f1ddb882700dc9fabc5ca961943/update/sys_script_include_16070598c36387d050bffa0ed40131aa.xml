@@ -9,7 +9,8 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioSyncRepoUtils</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioSyncRepoUtils = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioSyncRepoUtils = Class.create();
 
 /**
  * All database access for Sync Filter evaluation and the sync pipeline.
@@ -31,7 +32,65 @@ IllumioSyncRepoUtils.prototype = {
      *   construction works; injectable so tests can pass a double.
      */
     initialize: function(syncUtils) {
+        this.logger = new IllumioLogger(null, 'IllumioSyncRepoUtils');
         this.syncUtils = syncUtils || new IllumioSyncUtils();
+
+        // Built on first use by getDimensionKeyBySysId, then held for the life of this instance
+        // -- which is the life of the run, because IllumioSyncBuildUtils constructs one repo and
+        // walks every window through it. See that method for why caching this table is safe when
+        // caching the labels mapping table is not.
+        this._dimensionKeyBySysId = null;
+    },
+
+    /**
+     * Label dimension sys_id -> key, for the whole configuration set, cached for the run.
+     *
+     * Exists to kill an N+1. The label field value table is EAV, so every read of it needs the
+     * dimension KEY while the row only carries the dimension SYS_ID. Writing that as a dot-walk
+     * -- `gr.illumio_label_dimension.key` inside `while (gr.next())` -- reads like a join and is
+     * not one: GlideRecord resolves a reference lazily, per row, on first touch. At 100k
+     * workloads and five dimensions that is ~500,000 record loads behind what looks like a single
+     * query, and it is the reason phase 2 took six minutes.
+     *
+     * SAFE TO CACHE FOR THE RUN, unlike almost everything else this file reads. Label dimensions
+     * are authored configuration -- role, app, env, loc and whatever customs exist -- so this is
+     * tens of rows and single-digit KB. Do not confuse it with
+     * x_illu2_illumio_illumio_pce_labels_mapping, the label value -> PCE href table, which holds
+     * ~100k rows in production and must never live longer than one window (getLabelHrefsByPair
+     * builds and discards it per window for exactly that reason). Both have "label" in the name
+     * and only one of them is small.
+     *
+     * Not filtered by PCE Configuration: the table is global, and a run that meets a dimension
+     * belonging to another configuration wants its key resolved the same way regardless.
+     *
+     * Plain GlideRecord, per this file's default. Resolving a sys_id to the key it stands for is
+     * internal plumbing, not a disclosure -- the label VALUE is still read through a
+     * GlideRecordSecure on the field value table, which is where the data actually is.
+     *
+     * This is a deliberate behaviour change on the one caller that read secure,
+     * IllumioUtils.prepareWorkloadObject. Its dot-walk returned "" for a dimension the clicking
+     * user could not see, and the label was then skipped -- so the payload a manual sync produced
+     * depended on WHO ran it. Every caller now builds the same payload, which is what a sync
+     * should do. Background runs evaluate as system and were never affected either way.
+     *
+     * @returns {Object} { dimensionSysId: key }
+     */
+    getDimensionKeyBySysId: function() {
+        if (this._dimensionKeyBySysId) {
+            return this._dimensionKeyBySysId;
+        }
+
+        var map = {};
+
+        var gr = new GlideRecord(this.syncUtils.LABEL_DIMENSION_TABLE);
+        gr.query();
+
+        while (gr.next()) {
+            map[gr.getUniqueValue()] = gr.getValue("key") || "";
+        }
+
+        this._dimensionKeyBySysId = map;
+        return map;
     },
 
     // ---- sync filter configuration ----
@@ -211,7 +270,19 @@ IllumioSyncRepoUtils.prototype = {
     },
 
     /**
-     * Workloads discovered from a batch of CMDB CIs.
+     * Workloads discovered from a batch of CMDB CIs, inside an extent.
+     *
+     * The extent rides on this query rather than being applied afterwards. It used to be a
+     * separate pass: this method resolved the CIs to workloads, the caller collected them, and
+     * filterWorkloads then chunked the whole collection back through the workload table 500 at a
+     * time to apply `duplicate=false` and the extent. Both passes query the same table with the
+     * same chunk size, so a filter with a CMDB condition hit the workload table twice per 500
+     * rows -- ~8,000 queries at 2M CIs where 4,000 do the job -- and applied `duplicate=false`
+     * in both of them.
+     *
+     * `duplicate=false` was already here, which is what makes the fold safe: adding the extent
+     * gives this query the complete predicate set filterWorkloads applied, so the second pass has
+     * nothing left to do and the caller skips it.
      *
      * NOTE: ciSysIds.join(",") builds the IN clause with no escaping. Safe here because these
      * are sys_ids, which cannot contain a comma.
@@ -219,9 +290,12 @@ IllumioSyncRepoUtils.prototype = {
      * @param {String} pceConfigSysId sys_id of the PCE Configuration
      * @param {Array} ciSysIds CI sys_ids, one batch
      * @param {String} [sourceTable] CMDB table name, narrows the query when given
+     * @param {Array} [extentList] Extent entries from IllumioSyncUtils.splitExtent, empty or
+     *   omitted to apply no extent. Split once by the caller, not per batch.
      * @returns {Array} Workload sys_ids
      */
-    findWorkloadSysIdsBySourceRecords: function(pceConfigSysId, ciSysIds, sourceTable) {
+    findWorkloadSysIdsBySourceRecords: function(
+        pceConfigSysId, ciSysIds, sourceTable, extentList) {
         var sysIds = [];
 
         if (!ciSysIds || ciSysIds.length === 0) {
@@ -235,6 +309,7 @@ IllumioSyncRepoUtils.prototype = {
         if (!gs.nil(sourceTable)) {
             gr.addQuery("source_table", sourceTable);
         }
+        this._addExtentConditions(gr, extentList || []);
         gr.query();
 
         while (gr.next()) {
@@ -247,43 +322,138 @@ IllumioSyncRepoUtils.prototype = {
     // ---- workload-level filtering ----
 
     /**
-     * Narrow a filter's matched workloads to the non-duplicates, and to the configured extent.
+     * The non-duplicate workloads of one window of candidate sys_ids, inside an extent.
      *
-     * Always runs, even with no extent configured, because it is the only place `duplicate` is
-     * checked. The label aggregate deliberately leaves it out: `duplicate` lives on the workload
-     * table, so checking it there would mean a join on every row of every term, against one
-     * chunked pass over the matched workloads here.
+     * One query. The caller windows, because the caller holds the candidates as a SET and can
+     * walk it without ever building its key array -- see IllumioSyncUtils.eachSetWindow.
      *
-     * The extent condition building is unchanged from IllumioUtils._filterWorkloadsByExtent --
-     * each entry is "knownToPce" or "knownToPce-enforcementMode", ORed together.
+     * This is the only place `duplicate` is checked on the label side. The label aggregate
+     * deliberately leaves it out: `duplicate` lives on the workload table, so checking it there
+     * would mean a join on every row of every term, against one chunked pass over the matched
+     * workloads here. The CMDB side no longer needs this at all -- its own query carries both
+     * predicates now; see findWorkloadSysIdsBySourceRecords.
      *
-     * @param {Array} sysIds Workload sys_ids matched by the filter's conditions
-     * @param {String} extentValue Comma-separated extent value from the Sync Filter, may be nil
-     * @returns {Array} Surviving workload sys_ids
+     * The extent condition building is unchanged from the pre-R8 group model it came from: each
+     * entry is "knownToPce" or "knownToPce-enforcementMode", ORed together. (It moved here from
+     * IllumioUtils._filterWorkloadsByExtent, which is commented out under R13 -- named only so
+     * the history is findable, not as a pointer to live code.)
+     *
+     * Replaced filterWorkloads, which took the whole matched array and compacted the survivors
+     * into it in place. That array no longer exists: matches now go straight into the run's
+     * result set, so there is nothing to compact.
+     *
+     * @param {Array} windowSysIds Candidate workload sys_ids, at most WORKLOAD_CHUNK_SIZE of them
+     * @param {Array} [extentList] Extent entries from IllumioSyncUtils.splitExtent, empty or
+     *   omitted to apply no extent
+     * @returns {Array} The survivors
      */
-    filterWorkloads: function(sysIds, extentValue) {
-        var filtered = [];
+    findSurvivingWorkloads: function(windowSysIds, extentList) {
+        var sysIds = [];
 
-        if (!sysIds || sysIds.length === 0) {
-            return filtered;
+        if (!windowSysIds || windowSysIds.length === 0) {
+            return sysIds;
         }
 
-        var extentList = gs.nil(extentValue) ? [] : ("" + extentValue).split(",");
-        var chunks = this.syncUtils.chunkArray(sysIds, this.syncUtils.WORKLOAD_CHUNK_SIZE);
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+        gr.addQuery("sys_id", "IN", windowSysIds.join(","));
+        gr.addQuery("duplicate", false);
+        this._addExtentConditions(gr, extentList || []);
+        gr.query();
 
-        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-            var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
-            gr.addQuery("sys_id", "IN", chunks[chunkIndex].join(","));
-            gr.addQuery("duplicate", false);
-            this._addExtentConditions(gr, extentList);
-            gr.query();
+        while (gr.next()) {
+            sysIds.push(gr.getUniqueValue());
+        }
 
-            while (gr.next()) {
-                filtered.push(gr.getUniqueValue());
+        return sysIds;
+    },
+
+    /**
+     * Stream every workload of a PCE Configuration inside an extent, a batch of sys_ids at a time.
+     *
+     * For a Sync Filter whose extent is its only condition. findSurvivingWorkloads cannot serve
+     * this: it narrows candidates the caller already has, so using it would mean materialising
+     * every workload of the configuration first and then chunking it back through 500 at a time,
+     * purely to apply a predicate the database can apply in one query.
+     *
+     * Batched off one open cursor rather than returned whole, the same shape as eachCmdbCiSysId.
+     * The result of an extent-only filter is bounded by the workload count and nothing else, so
+     * returning it as an array would put a full-size array beside the result set it is about to
+     * be merged into -- the accumulation R28 exists to remove.
+     *
+     * Scoped by source_table when the filter has a Class Mapping, matching
+     * findWorkloadSysIdsBySourceRecords and _matchLabelCondition -- both narrow to the mapped
+     * class. An extent-only filter that ignored the Class Mapping set on it would match wider
+     * than the same filter with a condition added, and this feeds the deletion path.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @param {Array} extentList Extent entries from IllumioSyncUtils.splitExtent
+     * @param {String} [sourceTable] CMDB table name, narrows the query when given
+     * @param {Number} batchSize sys_ids per callback
+     * @param {Function} callback Called with (Array of workload sys_ids) per batch
+     * @returns {Number} Total workloads matched
+     */
+    eachWorkloadSysIdInExtent: function(
+        pceConfigSysId, extentList, sourceTable, batchSize, callback) {
+        var total = 0;
+        var batch = [];
+
+        if (!extentList || extentList.length === 0) {
+            return total;
+        }
+
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+        gr.addQuery("illumio_pce_configuration", pceConfigSysId);
+        gr.addQuery("duplicate", false);
+        if (!gs.nil(sourceTable)) {
+            gr.addQuery("source_table", sourceTable);
+        }
+        this._addExtentConditions(gr, extentList);
+        gr.query();
+
+        while (gr.next()) {
+            batch.push(gr.getUniqueValue());
+            total++;
+
+            if (batch.length >= batchSize) {
+                callback(batch);
+                batch = [];
             }
         }
 
-        return filtered;
+        if (batch.length > 0) {
+            callback(batch);
+        }
+
+        return total;
+    },
+
+    /**
+     * How many workloads a PCE Configuration could possibly contribute to a run.
+     *
+     * The ceiling the saturation short-circuit compares against. Every Sync Filter shape ends in
+     * a workload query carrying `duplicate=false`, so no filter can ever match a workload this
+     * count excludes, and once the run's result set reaches this number no later filter can add
+     * anything. `class_mapping` is deliberately NOT applied: the count is per configuration
+     * because the run is per configuration, and filters within it may be mapped to different
+     * classes or to none.
+     *
+     * GlideAggregate COUNT, not getRowCount() on a full query -- this must not walk rows.
+     *
+     * @param {String} pceConfigSysId sys_id of the PCE Configuration
+     * @returns {Number} Non-duplicate workloads on the configuration, 0 when it cannot be read
+     */
+    countEligibleWorkloads: function(pceConfigSysId) {
+        var ga = new GlideAggregate(this.syncUtils.WORKLOAD_TABLE);
+        ga.addQuery("illumio_pce_configuration", pceConfigSysId);
+        ga.addQuery("duplicate", false);
+        ga.addAggregate("COUNT");
+        ga.query();
+
+        if (ga.next()) {
+            return parseInt(ga.getAggregate("COUNT"), 10) || 0;
+        }
+
+        return 0;
     },
 
     /**
@@ -362,12 +532,14 @@ IllumioSyncRepoUtils.prototype = {
      * @returns {Number} Workloads visited
      */
     eachWorkloadChunk: function(sysIds, batchSize, encodedQuery, callback) {
+        var self = this;
         var visited = 0;
-        var chunks = this.syncUtils.chunkArray(sysIds, batchSize);
 
-        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-            visited += this.eachWorkloadInBatch(chunks[chunkIndex], encodedQuery, callback);
-        }
+        // eachChunk, not chunkArray: sysIds here is the whole of phase 1's result, so building
+        // every window up front would double the largest allocation in the run.
+        this.syncUtils.eachChunk(sysIds, batchSize, function(window) {
+            visited += self.eachWorkloadInBatch(window, encodedQuery, callback);
+        });
 
         return visited;
     },
@@ -415,9 +587,18 @@ IllumioSyncRepoUtils.prototype = {
     /**
      * Every label value of a batch of workloads, in one query.
      *
-     * Replaces the per-workload query IllumioUtils.prepareWorkloadObject:1230-1240 ran. The
-     * dimension key is dot-walked, which is one join in this single query rather than a lookup
-     * per row -- the same idiom generateWorkloadCsv:1377 already uses.
+     * Replaces the per-workload query IllumioUtils.prepareWorkloadObject:1230-1240 ran.
+     *
+     * ONE QUERY PER WINDOW AND NO REFERENCE LOADS. The dimension key used to be dot-walked here
+     * -- `gr.illumio_label_dimension.key` -- and the comment that sat on this line called it "one
+     * join in this single query". It was not. A dot-walk inside `while (gr.next())` is a lazy
+     * record load per row, so this method issued one query plus one load for every label value of
+     * every workload: ~500,000 of them on a 100k-workload run, against ~2,400 real queries in the
+     * whole of phase 2. It was, by two orders of magnitude, the slowest thing in the pipeline.
+     *
+     * getDimensionKeyBySysId answers the same question from a map built once per run, and
+     * getValue reads the sys_id off the row already in hand. That also stops allocating a
+     * throwaway referenced GlideRecord per row, so the window gets cheaper as well as faster.
      *
      * @param {Array} workloadSysIds Workload sys_ids, one batch
      * @returns {Object} { workloadSysId: { dimensionKey: { cmdb_value: , pce_value: } } }
@@ -429,12 +610,16 @@ IllumioSyncRepoUtils.prototype = {
             return byWorkload;
         }
 
+        var dimensionKeyBySysId = this.getDimensionKeyBySysId();
+
         var gr = new GlideRecord(this.syncUtils.WORKLOAD_FIELD_VALUE_TABLE);
         gr.addQuery(this.syncUtils.WORKLOAD_FIELD, "IN", workloadSysIds.join(","));
         gr.query();
 
         while (gr.next()) {
-            var dimensionKey = gr.illumio_label_dimension.key + "";
+            // Empty covers both cases the dot-walk covered: no dimension on the row, and a
+            // dimension whose record is gone. Skipping is what it did too.
+            var dimensionKey = dimensionKeyBySysId[gr.getValue("illumio_label_dimension")] || "";
             if (dimensionKey === "") {
                 continue;
             }
@@ -481,7 +666,7 @@ IllumioSyncRepoUtils.prototype = {
         for (var batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             var batch = batches[batchIndex];
 
-            var gr = new GlideRecord("x_illu2_illumio_illumio_pce_labels_mapping");
+            var gr = new GlideRecord(TABLE_PCE_LABELS_MAPPING);
             gr.addQuery("illumio_pce_configuration", pceConfigSysId);
 
             var condition = null;
@@ -521,12 +706,25 @@ IllumioSyncRepoUtils.prototype = {
      *
      * @param {String} payloadTable Payload table name
      * @param {String} payloadJson Serialised payload
+     * @param {Object} extraFields Optional - further columns to set, by column name. The preview
+     *                 table carries job_id, sequence, type and byte_length alongside the payload;
+     *                 taking them as a map keeps one insert path rather than a parallel method
+     *                 per payload table.
      * @returns {String} sys_id of the inserted row
      */
-    insertPayloadRow: function(payloadTable, payloadJson) {
+    insertPayloadRow: function(payloadTable, payloadJson, extraFields) {
         var gr = new GlideRecord(payloadTable);
         gr.initialize();
         gr.setValue("payload", payloadJson);
+
+        if (extraFields) {
+            for (var column in extraFields) {
+                if (extraFields.hasOwnProperty(column)) {
+                    gr.setValue(column, extraFields[column]);
+                }
+            }
+        }
+
         return gr.insert();
     },
 
@@ -549,11 +747,9 @@ IllumioSyncRepoUtils.prototype = {
             return deleted;
         }
 
-        var chunks = this.syncUtils.chunkArray(sysIds, this.syncUtils.WORKLOAD_CHUNK_SIZE);
-
-        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+        this.syncUtils.eachChunk(sysIds, this.syncUtils.WORKLOAD_CHUNK_SIZE, function(window) {
             var gr = new GlideRecord(payloadTable);
-            gr.addQuery("sys_id", "IN", chunks[chunkIndex].join(","));
+            gr.addQuery("sys_id", "IN", window.join(","));
             gr.query();
 
             while (gr.next()) {
@@ -561,9 +757,264 @@ IllumioSyncRepoUtils.prototype = {
                     deleted++;
                 }
             }
+        });
+
+        return deleted;
+    },
+
+    /**
+     * Delete every payload row belonging to one job.
+     *
+     * Replaces deletePayloadRows(table, sysIds) on the withdrawal paths. Since R33 the job
+     * reference on the row IS how a run's payload is identified -- the MID Server queries it
+     * rather than being handed a list -- so withdrawal can ask the same question, and the caller
+     * no longer has to carry an array of sys_ids for the whole run purely in order to be able to
+     * delete them later. That array was ~132 KB at 2M workloads as heap, which never mattered,
+     * and ~132 KB as an ECC XML attribute, which was H3.
+     *
+     * REFUSES TO RUN WITHOUT A JOB, and refuses to run on a table that has no job column. Both
+     * would otherwise degenerate into an unqualified query, and the caller's next line is
+     * deleteRecord() in a loop -- an addQuery on a column that does not exist does not raise, it
+     * simply does not constrain, so a mistyped column name here is the difference between
+     * withdrawing one run's rows and emptying the table. Cheap check, catastrophic failure.
+     *
+     * @param {String} payloadTable Payload table name
+     * @param {String} jobSysId Job whose rows are to be deleted
+     * @returns {Number} Rows deleted, -1 when the call was refused
+     */
+    deletePayloadRowsForJob: function(payloadTable, jobSysId) {
+        if (gs.nil(jobSysId)) {
+            this.logger.error("[IllumioSyncRepoUtils] Refusing to delete payload rows on " + payloadTable +
+                " with no job sys_id: the query would match every row in the table.");
+            return -1;
+        }
+
+        var jobField = this.syncUtils.PAYLOAD_JOB_FIELD;
+        var gr = new GlideRecord(payloadTable);
+
+        if (!gr.isValidField(jobField)) {
+            this.logger.error("[IllumioSyncRepoUtils] " + payloadTable + " has no '" + jobField +
+                "' column, so payload rows for job " + jobSysId + " cannot be identified and " +
+                "were NOT deleted. Check IllumioSyncUtils.PAYLOAD_JOB_FIELD against the table.");
+            return -1;
+        }
+
+        gr.addQuery(jobField, jobSysId);
+        gr.query();
+
+        var deleted = 0;
+        while (gr.next()) {
+            if (gr.deleteRecord()) {
+                deleted++;
+            }
         }
 
         return deleted;
+    },
+
+    /**
+     * Job statuses that mean a job will never read its payload rows again.
+     *
+     * This is deliberately the DEAD list and not the live one, and that direction is the entire
+     * safety property of the sweep below. A status missing from here is treated as still live, so
+     * its rows survive. Wrong in that direction, a finished run leaks fat payload rows until
+     * someone notices; wrong in the other direction, the sweep deletes rows out from under a run
+     * that is still using them. Only one of those is recoverable, so a status nobody thought to
+     * add here must fail towards the leak.
+     *
+     * `new` and `ready_to_map` are absent on purpose -- both are mid-flight states, and
+     * `ready_to_map` in particular is the discovery-to-mapping handoff, which is exactly when
+     * rows exist and nothing is marked running.
+     */
+    PAYLOAD_JOB_DEAD_STATUSES: ["completed", "completed_with_error", "partial_success", "failed",
+        "cancelled", "cancelled_threshold_limit_exceeded", "invalidated"],
+
+    /**
+     * How many jobs may be open before the sweep refuses to run at all.
+     *
+     * The survivor list becomes an encoded `NOT IN`, so it has to stay a query and not a wall of
+     * sys_ids. Real instances sit at one or two open jobs; hundreds means jobs are being stranded
+     * in `running`, which is its own bug and not something this function should paper over by
+     * issuing a query whose behaviour at that length nobody has checked. Refusing leaks rows,
+     * which is the safe direction.
+     */
+    PAYLOAD_LIVE_JOB_CAP: 200,
+
+    /**
+     * sys_ids of every job that could still be consuming payload rows.
+     *
+     * Asks the scheduled job table for jobs NOT in a terminal status -- a handful of rows --
+     * rather than for every job that ever finished, which is the whole table. The result is the
+     * survivor list for the sweep.
+     *
+     * No dot-walk from the payload row to the job's status, which would be the obvious shape.
+     * `job_id` is not guaranteed to be a reference column, and an addQuery on a field that does
+     * not resolve does not raise -- it simply stops constraining, which on a delete path is the
+     * difference between sweeping one dead run and emptying the table. Same reasoning as the
+     * isValidField guard below. Two queries against a known-good column beat one clever one.
+     *
+     * currentJobSysId is always in the result regardless of what the table says about it. The
+     * caller is by definition running, so this is true by construction -- but it also means a
+     * sweep can never delete its own rows even if this read races the job record's own update.
+     *
+     * @param {String} currentJobSysId Job doing the sweeping
+     * @returns {Array} sys_ids of open jobs, never empty
+     */
+    _liveJobSysIds: function(currentJobSysId) {
+        var ids = [currentJobSysId];
+        var seen = {};
+        seen[currentJobSysId] = true;
+
+        var gr = new GlideRecord(TABLE_SCHEDULED_JOBS);
+        gr.addQuery("job_status", "NOT IN", this.PAYLOAD_JOB_DEAD_STATUSES.join(","));
+        gr.query();
+
+        while (gr.next()) {
+            var sysId = gr.getUniqueValue();
+            if (!seen[sysId]) {
+                seen[sysId] = true;
+                ids.push(sysId);
+            }
+        }
+
+        return ids;
+    },
+
+    /**
+     * Delete payload rows left behind by jobs that are over.
+     *
+     * Called at the start of every run that writes payload rows, on all three payload tables. A
+     * stale row is unreachable rather than merely untidy: every consumer -- the MID Server that
+     * sends the rows and the withdrawal paths that retire them -- asks the table for "this job's
+     * rows", so a row whose job died is one nothing will ever read or delete again. Nothing else
+     * cleans these tables. The "Cleanup stagging tables" rule is about the mapping stage tables,
+     * and deletePayloadRowsForJob above only ever runs against the job still in hand. One sync or
+     * deletion row is IllumioSyncUtils.PAYLOAD_ROW_SIZE workloads of JSON, so a large run that
+     * died part-way leaves thousands of fat rows that accumulate for the life of the instance.
+     *
+     * The preview table needs this most and got it first: preview deliberately does NOT delete
+     * rows as the MID consumes them -- a MID failure at chunk 12 of 20 would otherwise destroy the
+     * only copy and force phase 1 to run again -- so its rows always outlive the run that wrote
+     * them. Sync and deletion rows are consumed destructively and so only survive a failure.
+     *
+     * SCOPED BY WHETHER THE OWNING JOB IS STILL OPEN, not by "is it this job". The older form
+     * swept `job_id != <this job> OR job_id is empty`, justified by a claim that only one Illumio
+     * job can run at a time. That claim was already false when it was written. Entry points do
+     * not share one guard: Discovery (IllumioStartDiscovery:61, Illumio Data Collection:26) and
+     * manual deletion (IllumioDeletionHandler:50) check for a running job WITH a configuration
+     * filter, so they start freely while another configuration's run is in flight, while the UI
+     * Actions went through IllumioUtils.getRunningJob, which had no such filter. Two
+     * configurations could therefore both be inside this function, and under the old query each
+     * one classified the other's in-flight rows as stale and deleted them -- silently, because
+     * the victim only finds out when its MID Server asks for rows that are no longer there.
+     *
+     * That was not a latent risk waiting on a future change. Discovery to auto sync writes the
+     * autosync table; manual deletion writes the deletion table; both sit behind per-configuration
+     * guards today.
+     *
+     * The UI Actions are per-configuration now too, which makes concurrent runs the normal case
+     * rather than the accident this was written against. That widens what this has to survive; it
+     * does not change the fix, which never depended on how many jobs could be open at once.
+     *
+     * "Still open" is the right test rather than "same configuration" because the payload tables
+     * carry no configuration column -- only job_id, payload, sequence, byte_length and type -- so
+     * a configuration-scoped sweep is not expressible here without a schema change. It is also the
+     * better test: what makes a row safe to delete is that nothing will ever read it again, and
+     * that is a property of its job's status, not of which configuration it came from. The same
+     * query keeps working however the running-job guards are eventually settled.
+     *
+     * Empty job references are swept too. Neither `!=` nor `NOT IN` matches NULL, and a row with
+     * no job reference is the worst of the three -- invisible to every by-job query there is,
+     * including the one that would otherwise delete it.
+     *
+     * deleteMultiple rather than the row-at-a-time loop above, because this runs on EVERY run and
+     * faces an unbounded backlog, where deletePayloadRowsForJob runs on an error path against one
+     * run's worth. The count is a separate aggregate over rows this is about to delete anyway;
+     * without it the sweep is silent about a dead run having happened at all.
+     *
+     * @param {String} payloadTable Payload table name
+     * @param {String} currentJobSysId Job doing the sweeping. Its rows always survive, as do the
+     *        rows of every other job that has not reached a terminal status.
+     * @param {Function} [onProgress] Job-record progress sink. The sweep reports the count and
+     *        its own timing through this; without one it is silent except on syslog.
+     * @returns {Number} Rows deleted, or -1 if the sweep was refused
+     */
+    deleteStalePayloadRows: function(payloadTable, currentJobSysId, onProgress) {
+        var report = typeof onProgress === 'function' ? onProgress : function() {};
+
+        if (gs.nil(currentJobSysId)) {
+            // Kept after the survivor list replaced "everything that is not this job". A caller
+            // with no job to name has no business running a delete on a shared table: it cannot
+            // be holding rows worth protecting, and every branch below reads better knowing the
+            // job is real. No caller does this today; refusing keeps it that way.
+            this.logger.error("[IllumioSyncRepoUtils] Refusing to sweep stale payload rows on " +
+                payloadTable + " with no job sys_id: the query would match every row.");
+            return -1;
+        }
+
+        var jobField = this.syncUtils.PAYLOAD_JOB_FIELD;
+
+        if (!new GlideRecord(payloadTable).isValidField(jobField)) {
+            this.logger.error("[IllumioSyncRepoUtils] " + payloadTable + " has no '" + jobField +
+                "' column, so stale payload rows cannot be identified and were NOT deleted. " +
+                "Check IllumioSyncUtils.PAYLOAD_JOB_FIELD against the table.");
+            return -1;
+        }
+
+        var liveJobIds = this._liveJobSysIds(currentJobSysId);
+
+        if (liveJobIds.length > this.PAYLOAD_LIVE_JOB_CAP) {
+            this.logger.error("[IllumioSyncRepoUtils] " + liveJobIds.length + " jobs are in a " +
+                "non-terminal status, so the survivor list for the " + payloadTable +
+                " sweep would be an " +
+                "encoded query that long. Refusing: stale payload rows were NOT deleted. Clear " +
+                "the stranded jobs on " + TABLE_SCHEDULED_JOBS + " and the next run sweeps them.");
+            report("Skipped stale payload cleanup: too many jobs still open");
+            return -1;
+        }
+
+        // Built once and reused by the count and the delete so the two cannot disagree about what
+        // they are looking at. A job that finishes between them just means the count was low by
+        // its rows, and the next run picks them up.
+        var survivors = liveJobIds.join(",");
+
+        var countStartedAt = new Date().getTime();
+
+        var counter = new GlideAggregate(payloadTable);
+        counter.addQuery(jobField, "NOT IN", survivors).addOrCondition(jobField, "");
+        counter.addAggregate("COUNT");
+        counter.query();
+
+        var stale = counter.next() ? parseInt(counter.getAggregate("COUNT"), 10) : 0;
+
+        // Reported even when it is zero. "Found stale payloads: 0" is the result of a check that
+        // ran, and on the run AFTER a failure it is how the operator sees that the wreckage is
+        // gone. The two cleanup lines below are the ones that stay quiet when there is nothing to
+        // clean, because "Completed cleanup" over an empty set describes work that did not happen.
+        report("Found stale payloads: " + stale + this.syncUtils.since(countStartedAt));
+
+        if (!stale) {
+            return 0;
+        }
+
+        report("Starting cleanup");
+
+        var deleteStartedAt = new Date().getTime();
+
+        var gr = new GlideRecord(payloadTable);
+        gr.addQuery(jobField, "NOT IN", survivors).addOrCondition(jobField, "");
+        gr.query();
+        gr.deleteMultiple();
+
+        report("Completed cleanup" + this.syncUtils.since(deleteStartedAt));
+
+        // Warn, not info, and kept alongside the job-record lines rather than replaced by them:
+        // rows here mean a previous run died without cleaning up after itself, and the job record
+        // of the run that swept them is not where anyone investigating that failure will look.
+        this.logger.warn("[IllumioSyncRepoUtils] Swept " + stale + " stale payload row(s) from " +
+            payloadTable + " left by earlier run(s) before starting job " + currentJobSysId + ".");
+
+        return stale;
     },
 
     type: "IllumioSyncRepoUtils"
@@ -573,13 +1024,13 @@ IllumioSyncRepoUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-21 12:40:54</sys_created_on>
         <sys_id>16070598c36387d050bffa0ed40131aa</sys_id>
-        <sys_mod_count>1</sys_mod_count>
+        <sys_mod_count>11</sys_mod_count>
         <sys_name>IllumioSyncRepoUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_16070598c36387d050bffa0ed40131aa</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
     </sys_script_include>
 </record_update>

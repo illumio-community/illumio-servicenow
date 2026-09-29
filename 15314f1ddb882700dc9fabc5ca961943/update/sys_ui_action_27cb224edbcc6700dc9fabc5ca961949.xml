@@ -126,7 +126,11 @@
 
             if (answer.data.limitExceeded) {
                 dialog = new GlideDialogWindow("x_illu2_illumio_IllumioInfoPopup");
-                dialog.setTitle("Workload modification or label creation limit has exceeded.");
+                // limitError means the limits could not be read at all, which is a
+                // misconfiguration rather than a limit being hit. Saying "limit has exceeded"
+                // sends the operator to check a threshold that was never the problem.
+                dialog.setTitle(answer.data.limitError ? answer.data.limitErrorMessage :
+                    "Workload modification or label creation limit has exceeded.");
                 dialog.render();
                 return false;
             }
@@ -222,7 +226,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>27cb224edbcc6700dc9fabc5ca961949</sys_id>
-        <sys_mod_count>255</sys_mod_count>
+        <sys_mod_count>256</sys_mod_count>
         <sys_name>Sync Server to PCE</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -230,7 +234,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_27cb224edbcc6700dc9fabc5ca961949</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2025-03-24 09:23:45</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:45</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_workload</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>true</ui16_compatible>

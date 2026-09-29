@@ -4,109 +4,148 @@
             <is_plain_text>false</is_plain_text>
             <name/>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>099499e8c3e70bd050bffa0ed401315d</sys_id>
+            <sys_created_on>2026-09-23 09:00:26</sys_created_on>
+            <sys_id>5cc7a678c36fcbd050bffa0ed40131a7</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
-            <text>Empty extent skips "Known to PCE" check and includes all matching workloads.</text>
+            <sys_updated_on>2026-09-23 09:00:26</sys_updated_on>
+            <text>&lt;style&gt;
+        ol {
+            list-style-type: disc;
+            margin-top: 1 em;
+            margin-left: 0;
+            margin-right: 0;
+            padding-left: 40px;
+        }
+
+        p {
+            margin-top: 1 em;
+            margin-left: 0;
+            margin-right: 0;
+        }
+    &lt;/style&gt;
+&lt;p&gt;Configure Sync Filter for granular and fine grained control for workload sync.&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;CMDB Conditions:&lt;/strong&gt; Conditions to evaluate fields from source table (defined by &lt;strong&gt;Class Mapping&lt;/strong&gt;).&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Label Conditions:&lt;/strong&gt; Conditions to evaluate labels.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Extent:&lt;/strong&gt; Specify Filter Criteria to match against &lt;strong&gt;Known to PCE&lt;/strong&gt; and &lt;strong&gt;Enforcement Mode&lt;/strong&gt; fields.&amp;nbsp;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&amp;nbsp;&lt;/p&gt;
+&lt;p&gt;An active Sync Filter will be considered as &lt;strong&gt;Empty&lt;/strong&gt; and will be skipped when:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;No &lt;strong&gt;CMDB Conditions&lt;/strong&gt; are specified.&lt;/li&gt;
+&lt;li&gt;No &lt;strong&gt;Label&lt;/strong&gt; &lt;strong&gt;Conditions&lt;/strong&gt; are specified&lt;strong&gt;.&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;No &lt;strong&gt;Extent&lt;/strong&gt; is specified.&lt;/li&gt;
+&lt;li&gt;Preview of&amp;nbsp;&lt;strong&gt;Label&lt;/strong&gt; &lt;strong&gt;Conditions&lt;/strong&gt; is only updated after the changes are saved.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Specifying any of the above make an active Sync Filter eligible during Auto Sync.&lt;/p&gt;
+&lt;p&gt;&amp;nbsp;&lt;/p&gt;
+&lt;p&gt;Some notes:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Manual Singular or Multiple Sync/Delete does not consider Sync Filters.&lt;/li&gt;
+&lt;li&gt;The&amp;nbsp;&lt;strong&gt;Label&lt;/strong&gt; &lt;strong&gt;Conditions&lt;/strong&gt; must strictly be formed only using &lt;strong&gt;Illumio Label Dimension&lt;/strong&gt; and &lt;strong&gt;CMDB Value&lt;/strong&gt; with &lt;strong&gt;IS&lt;/strong&gt; operator only.&lt;/li&gt;
+&lt;li&gt;Each set of a single&amp;nbsp;&lt;strong&gt;Illumio Label Dimension&lt;/strong&gt; and one or more (to match multiple values against a label) &lt;strong&gt;CMDB&lt;/strong&gt; &lt;strong&gt;Value&amp;nbsp;&lt;/strong&gt;is considered as one term and is evaluated independently.&lt;/li&gt;
+&lt;li&gt;Sync Filter selects the workloads that match all three (whichever is &lt;strong&gt;Non Empty&lt;/strong&gt;), i.e. Label Condition, CMDB Condition &amp;amp; Extent.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Export Matching Workloads&lt;/strong&gt; do not consider conflicts.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&amp;nbsp;&lt;/p&gt;</text>
             <type display_value="Info Box Blue">753f88a80f930000b12e6903cfe01206</type>
         </sys_ui_annotation>
         <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>name</element>
+            <element>5cc7a678c36fcbd050bffa0ed40131a7</element>
             <position>0</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>c99499e8c3e70bd050bffa0ed4013179</sys_id>
+            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
+            <sys_id>acc7a678c36fcbd050bffa0ed40131c2</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
+            <sys_user/>
+            <type>annotation</type>
+        </sys_ui_element>
+        <sys_ui_element action="INSERT_OR_UPDATE">
+            <element>name</element>
+            <position>1</position>
+            <sys_created_by>admin</sys_created_by>
+            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
+            <sys_id>a0c7a678c36fcbd050bffa0ed40131c4</sys_id>
+            <sys_mod_count>0</sys_mod_count>
+            <sys_ui_formatter/>
+            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
+            <sys_updated_by>admin</sys_updated_by>
+            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>pce_configuration</element>
-            <position>1</position>
+            <position>2</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>cd9499e8c3e70bd050bffa0ed401317a</sys_id>
+            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
+            <sys_id>6cc7a678c36fcbd050bffa0ed40131c4</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>class_mapping</element>
-            <position>2</position>
+            <position>3</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>899499e8c3e70bd050bffa0ed401317b</sys_id>
+            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
+            <sys_id>28c7a678c36fcbd050bffa0ed40131c5</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>type</element>
-            <position>3</position>
+            <position>4</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>459499e8c3e70bd050bffa0ed401317c</sys_id>
+            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
+            <sys_id>e0c7a678c36fcbd050bffa0ed40131c6</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>extent</element>
-            <position>4</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>019499e8c3e70bd050bffa0ed401317d</sys_id>
-            <sys_mod_count>0</sys_mod_count>
-            <sys_ui_formatter/>
-            <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
-            <sys_user/>
-            <type/>
-        </sys_ui_element>
-        <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>099499e8c3e70bd050bffa0ed401315d</element>
             <position>5</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>c99499e8c3e70bd050bffa0ed401317d</sys_id>
+            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
+            <sys_id>bcc7a678c36fcbd050bffa0ed40131c6</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
             <sys_user/>
-            <type>annotation</type>
+            <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>label_condition_table</element>
             <position>6</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>859499e8c3e70bd050bffa0ed401317e</sys_id>
+            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
+            <sys_id>78c7a678c36fcbd050bffa0ed40131c7</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
@@ -114,13 +153,13 @@
             <element>label_condition</element>
             <position>7</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>419499e8c3e70bd050bffa0ed401317f</sys_id>
+            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
+            <sys_id>34c7a678c36fcbd050bffa0ed40131c8</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
@@ -128,13 +167,13 @@
             <element>cmdb_condition_table</element>
             <position>8</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>0d9499e8c3e70bd050bffa0ed401317f</sys_id>
+            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
+            <sys_id>f8c7a678c36fcbd050bffa0ed40131fa</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
@@ -142,13 +181,13 @@
             <element>cmdb_condition</element>
             <position>9</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>c59499e8c3e70bd050bffa0ed4013180</sys_id>
+            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
+            <sys_id>b4c7a678c36fcbd050bffa0ed40131fb</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
@@ -156,13 +195,13 @@
             <element>active</element>
             <position>10</position>
             <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-22 08:18:33</sys_created_on>
-            <sys_id>819499e8c3e70bd050bffa0ed4013181</sys_id>
+            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
+            <sys_id>70c7a678c36fcbd050bffa0ed40131fc</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
             <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-22 08:18:33</sys_updated_on>
+            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>

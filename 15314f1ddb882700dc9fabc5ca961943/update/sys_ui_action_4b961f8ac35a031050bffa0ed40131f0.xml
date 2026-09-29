@@ -2,7 +2,7 @@
     <sys_ui_action action="INSERT_OR_UPDATE">
         <action_name>export_matching_workloads</action_name>
         <active>true</active>
-        <client>false</client>
+        <client>true</client>
         <client_script_v2><![CDATA[function onClick(g_form) {
 
 }]]></client_script_v2>
@@ -30,72 +30,159 @@
         <list_style/>
         <messages/>
         <name>Export Matching Workloads</name>
-        <onclick/>
+        <onclick>startExportMatchingWorkloads()</onclick>
         <order>101</order>
-        <script><![CDATA[(function executeExportMatchingWorkloadsForFilter(current, action, gs) {
-    var syncFilterSysId = current.getUniqueValue();
-    var tableName = current.getTableName();
-    var redirectUrl = tableName + '.do?sys_id=' + syncFilterSysId;
+        <script><![CDATA[/**
+ * Client half of the one-job-at-a-time guard. Onclick: startExportMatchingWorkloads()
+ *
+ * In this field rather than in `client_script_v2`, because that field is an empty stub on every
+ * UI Action in this application and nothing reads it. Both halves share the Script field, which
+ * is the whole reason the server half below is behind a `typeof window` guard.
+ *
+ * Purely to save a round trip that would end in an error message: the check that actually
+ * enforces the rule runs on the server immediately before the job record is inserted, because
+ * two people clicking within the same second both pass this one. Never treat this as the guard.
+ *
+ * GlideAjax is asynchronous, so the click always returns false and the form is submitted from
+ * the callback rather than by returning true.
+ */
+function startExportMatchingWorkloads() {
+    var check = new GlideAjax('x_illu2_illumio.IllumioUtilsAJAX');
+    check.addParam('sysparm_name', 'hasRunningJob');
+    // Scopes the check to the PCE Configuration this Sync Filter belongs to, so a job on a
+    // different one no longer greys this out. `pce_configuration` is the field name on the Sync
+    // Filter -- the scheduled job calls the same thing `illumio_pce_configuration`. Must match
+    // what the server half passes, or the two halves disagree and the client waves through
+    // something the server then refuses.
+    check.addParam('sysparm_config_sys_id', g_form.getValue('pce_configuration'));
 
-    if (gs.nil(syncFilterSysId)) {
-        gs.addErrorMessage("Unable to determine Sync Filter.");
-        action.setRedirectURL(redirectUrl);
-        return;
-    }
+    check.getXMLAnswer(function(answer) {
+        var response;
+
+        try {
+            response = answer ? JSON.parse(answer) : { running: false };
+        } catch (ex) {
+            // Never leave the click doing nothing. An unreadable answer means the guard could
+            // not be evaluated, and the server repeats the check anyway.
+            response = { running: false };
+        }
+
+        if (response.running) {
+            // Names the blocking job, because the action the user needs is usually to cancel it.
+            g_form.addErrorMessage(response.message);
+            return;
+        }
+
+        gsftSubmit(null, g_form.getFormElement(), 'export_matching_workloads');
+    });
+
+    return false;
+}
+
+// Server half: a trigger, and nothing else.
+//
+// This used to evaluate the Sync Filter, render the whole CSV to a string and write it as an
+// attachment, all inside the browser request. At 200k workloads that string is ~120 MB and the
+// transaction is minutes long. It is a job now, the same shape deletion took in R22: validate,
+// create the job record, raise the event, return. IllumioPreviewUtils does the work in the
+// scheduler and the MID Server assembles the file.
+//
+// Action name: export_matching_workloads (the client half submits it by that name).
+if (typeof window === 'undefined') {
+    // Declared inside the server guard for the same reason gs.include is: this Script
+    // field is evaluated in the browser too, for the client half above, and IllumioLogger
+    // is a server Script Include. At the top of the file it threw a ReferenceError on
+    // every form load and stopped the form rendering.
+    var illumioLogger = new IllumioLogger(null, 'Export Matching Workloads');
+
+    // Inside the server guard, not at the top of the file. This Script field is evaluated in
+    // the browser too, for the client half above, and `gs` does not exist there -- a
+    // top-level gs.include would throw a ReferenceError and kill the onclick handler.
+    gs.include("IllumioConstants");
+
+    var syncFilterSysId = current.getUniqueValue();
+    var redirectUrl = current.getTableName() + '.do?sys_id=' + syncFilterSysId;
 
     try {
         var utils = new IllumioUtils();
-        var result = utils.getWorkloadsBySyncFilter(syncFilterSysId, true, true); // skipActiveCheck, sysIdsOnly
+        // Scoped to the PCE Configuration this Sync Filter belongs to. It was instance-wide,
+        // which was propping up two sweeps that deleted anything they did not own -- both fixed,
+        // see getRunningJob. `pce_configuration` here, not `illumio_pce_configuration`: the
+        // Sync Filter names the field differently from the scheduled job, as below.
+        var runningJob = utils.getRunningJob(current.getValue('pce_configuration'));
 
-        if (!result.success) {
-            gs.addErrorMessage("Error: " + result.message);
+        if (runningJob) {
+            // The authoritative check. The client half ran the same one before submitting, but
+            // that was a different transaction and anything could have started since.
+            //
+            // The refusal gets a job record of its own, inserted already failed so it never
+            // counts as running. There is nowhere else to log it -- you cannot write to the log
+            // of a job you declined to create -- and without it a user reporting "the button
+            // does nothing" leaves no trace to look at. Genuine refusals are races, since the
+            // client check catches the rest, so this stays rare.
+            var message = utils.describeRunningJob(runningJob);
+
+            var refusedGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            refusedGr.initialize();
+            refusedGr.job_owner = gs.getUser().getID();
+            refusedGr.job_type = 'preview';
+            refusedGr.job_status = 'failed';
+            refusedGr.job_started = new GlideDateTime();
+            refusedGr.job_completed = new GlideDateTime();
+            refusedGr.current_operation = 'Preview refused';
+            // `pce_configuration` on the Sync Filter, `illumio_pce_configuration` on the
+            // scheduled job: the two tables genuinely name the same reference differently.
+            refusedGr.illumio_pce_configuration = current.getValue('pce_configuration');
+            refusedGr.logs = 'Export requested for Sync Filter "' + current.getValue('name') +
+                '" and refused. ' + message;
+            refusedGr.insert();
+
+            gs.addErrorMessage(message);
             action.setRedirectURL(redirectUrl);
-            return;
-        }
 
-        var sysIds = result.sysIds;
-
-        if (!sysIds || sysIds.length === 0) {
-            gs.addInfoMessage("No workloads match the current filter criteria.");
-            action.setRedirectURL(redirectUrl);
-            return;
-        }
-
-        var csvContent = utils.generateWorkloadCsv(sysIds);
-
-        var filterName = current.getValue('name') || 'sync_filter';
-        var timestamp = new GlideDateTime().getDisplayValue().replace(/[:\s]/g, '_');
-        var fileName = 'matching_workloads_' + filterName + '_' + timestamp + '.csv';
-
-        var targetGr = new GlideRecord(tableName);
-        targetGr.get(syncFilterSysId);
-
-        var sa = new GlideSysAttachment();
-
-        var oldAttGr = new GlideRecordSecure('sys_attachment');
-        oldAttGr.addQuery('table_name', tableName);
-        oldAttGr.addQuery('table_sys_id', syncFilterSysId);
-        oldAttGr.addQuery('file_name', 'STARTSWITH', 'matching_workloads_');
-        oldAttGr.query();
-        while (oldAttGr.next()) {
-            oldAttGr.deleteRecord();
-        }
-
-        var attachmentSysId = sa.write(targetGr, fileName, 'text/csv', csvContent);
-
-        if (gs.nil(attachmentSysId)) {
-            gs.error('[ExportMatchingWorkloadsForFilter] GlideSysAttachment.write returned nil. FileName: ' + fileName + ', CSV length: ' + csvContent.length);
-            gs.addErrorMessage("Failed to generate CSV export. Check application logs for details.");
         } else {
-            gs.addInfoMessage(sysIds.length + " matching workloads exported. Download the CSV from the attachments on this record.");
+            var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            jobGr.initialize();
+            jobGr.job_owner = gs.getUser().getID();
+            jobGr.job_type = 'preview';
+            jobGr.job_status = 'running';
+            jobGr.job_started = new GlideDateTime();
+            jobGr.current_operation = 'Preparing preview';
+            jobGr.illumio_pce_configuration = current.getValue('pce_configuration');
+            jobGr.logs = 'Export requested for Sync Filter "' + current.getValue('name') + '".';
+            var jobSysId = jobGr.insert();
+            // From here on the job record exists, so anything this action logs -- including
+            // an exception out of the block below -- lands under the same job id the
+            // scheduler half will use.
+            illumioLogger.setContext(jobSysId);
+
+            if (gs.nil(jobSysId)) {
+                gs.addErrorMessage('Failed to create the scheduled job for this preview.');
+            } else {
+                // parm2 carries what the job record cannot: the scheduled jobs table has a PCE
+                // Configuration reference but no generic target, and this preview is of one
+                // Sync Filter.
+                var context = JSON.stringify({
+                    type: new IllumioPreviewUtils().TYPE_FILTER_EXPORT,
+                    table: current.getTableName(),
+                    sysId: syncFilterSysId
+                });
+
+                gs.eventQueueScheduled('x_illu2_illumio.start_preview',
+                    jobGr, jobSysId, context, new GlideDateTime());
+
+                gs.addInfoMessage('Preview job started. The CSV will be attached to this record ' +
+                    'when it completes. Track progress in Scheduled Jobs.');
+            }
+
+            action.setRedirectURL(redirectUrl);
         }
     } catch (ex) {
-        gs.error('[ExportMatchingWorkloadsForFilter] Exception: ' + ex);
-        gs.addErrorMessage("Error exporting workloads: " + ex);
+        illumioLogger.error('Exception: ' + ex);
+        gs.addErrorMessage('Error starting the preview: ' + ex);
+        action.setRedirectURL(redirectUrl);
     }
-
-    action.setRedirectURL(redirectUrl);
-})(current, action, gs);
+}
 ]]></script>
         <show_form_icon_only>false</show_form_icon_only>
         <show_insert>false</show_insert>
@@ -109,7 +196,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>4b961f8ac35a031050bffa0ed40131f0</sys_id>
-        <sys_mod_count>4</sys_mod_count>
+        <sys_mod_count>13</sys_mod_count>
         <sys_name>Export Matching Workloads</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -117,7 +204,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_4b961f8ac35a031050bffa0ed40131f0</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-21 12:40:54</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:20:22</sys_updated_on>
         <table>x_illu2_illumio_illumio_sync_filter</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>
@@ -127,10 +214,10 @@
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-07-27 06:19:44</sys_created_on>
         <sys_id>f0c6df0ac35a031050bffa0ed401317b</sys_id>
-        <sys_mod_count>0</sys_mod_count>
+        <sys_mod_count>1</sys_mod_count>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-27 06:19:44</sys_updated_on>
+        <sys_updated_on>2026-09-22 17:51:18</sys_updated_on>
         <table>sys_ui_action</table>
-        <use_es_latest>true</use_es_latest>
+        <use_es_latest>false</use_es_latest>
     </sys_es_latest_script>
 </record_update>

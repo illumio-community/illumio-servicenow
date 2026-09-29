@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_properties">
+    <sys_properties action="DELETE">
+        <choices/>
+        <description>Maximum no. of workloads in each payload for autosync</description>
+        <ignore_cache>false</ignore_cache>
+        <is_private>false</is_private>
+        <name>x_illu2_illumio.max_workloads_in_each_payload_for_autosync</name>
+        <read_roles>admin,x_illu2_illumio.illumio_admin</read_roles>
+        <suffix>max_workloads_in_each_payload_for_autosync</suffix>
+        <sys_class_name>sys_properties</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2020-11-06 06:29:16</sys_created_on>
+        <sys_id>9a2711f5db18a0d01206fd641d961919</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>x_illu2_illumio.max_workloads_in_each_payload_for_autosync</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_properties_9a2711f5db18a0d01206fd641d961919</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2025-02-05 15:50:51</sys_updated_on>
+        <type>integer</type>
+        <value>10000</value>
+        <write_roles>admin,x_illu2_illumio.illumio_admin</write_roles>
+    </sys_properties>
+    <sys_translated_text action="DELETE" query="documentkey=9a2711f5db18a0d01206fd641d961919"/>
+<sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>265197833bafced0c55a348aa4e45a7a</instance_id>
+        <instance_name>dev279711</instance_name>
+        <name>sys_properties_9a2711f5db18a0d01206fd641d961919</name>
+        <payload><![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_properties">
+    <sys_properties action="INSERT_OR_UPDATE">
+        <choices/>
+        <description>Maximum no. of workloads in each payload for autosync</description>
+        <ignore_cache>false</ignore_cache>
+        <is_private>false</is_private>
+        <name>x_illu2_illumio.max_workloads_in_each_payload_for_autosync</name>
+        <read_roles>admin,x_illu2_illumio.illumio_admin</read_roles>
+        <suffix>max_workloads_in_each_payload_for_autosync</suffix>
+        <sys_class_name>sys_properties</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2020-11-06 06:29:16</sys_created_on>
+        <sys_id>9a2711f5db18a0d01206fd641d961919</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>x_illu2_illumio.max_workloads_in_each_payload_for_autosync</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_properties_9a2711f5db18a0d01206fd641d961919</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2025-02-05 15:50:51</sys_updated_on>
+        <type>integer</type>
+        <value>10000</value>
+        <write_roles>admin,x_illu2_illumio.illumio_admin</write_roles>
+    </sys_properties>
+    <sys_translated_text action="delete_multiple" query="documentkey=9a2711f5db18a0d01206fd641d961919"/>
+</record_update>]]></payload>
+        <payload_hash>-1996080786</payload_hash>
+        <record_name>x_illu2_illumio.max_workloads_in_each_payload_for_autosync</record_name>
+        <reverted_from/>
+        <source>846b38c0c392031050bffa0ed40131a5</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-07-20 13:55:18</sys_created_on>
+        <sys_id>ceebb088c392031050bffa0ed40131ea</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>19f7fcf46210000001</sys_recorded_at>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-07-20 13:55:18</sys_updated_on>
+        <type>System Property</type>
+        <update_guid>0aebb0888b920310f77634d9f3508aea</update_guid>
+        <update_guid_history>0aebb0888b920310f77634d9f3508aea:0,1ef9b84c13520310ca27afaf0b789c45:508717666,f7556ece6a828750d301150a81d636cb:0,c634ae06a8828750e1000c813413b22a:-524795891,5d99f4b412c68b10175c7a032e749201:0,fa1874b81b868b10a9084b2579f341b3:-1789997797,a7f30830698e4b10597a4be1a39a082b:0,da05243bd57943105e19d6f24634adb8:0,c949570265f14fd080e5373ea3cb9b7b:602298890,6cc1178de43507d021baf4bdd1cae2a6:0,529c8fc5ecf107d08d0b355d3b879596:-1778262764,f5781beb29900f10830fd690d919abc7:0,19c51bafb5500f1015329b021503508c:200345835,1b43acba36980710991b1daeff94cf37:0,22226cfef65807109c4d1090bdb6a516:1745703054,0740907e4d540710a639d1088d88bdf0:1843354978</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-24 05:39:03</sys_created_on>
+        <sys_db_object display_value="" name="sys_properties">sys_properties</sys_db_object>
+        <sys_id>c07d76e89a734f1a96c3f416e8b20c84</sys_id>
+        <sys_metadata>9a2711f5db18a0d01206fd641d961919</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio.max_workloads_in_each_payload_for_autosync</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sys_properties_9a2711f5db18a0d01206fd641d961919</sys_update_name>
+        <sys_update_version display_value="sys_properties_9a2711f5db18a0d01206fd641d961919">ceebb088c392031050bffa0ed40131ea</sys_update_version>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-24 05:39:03</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

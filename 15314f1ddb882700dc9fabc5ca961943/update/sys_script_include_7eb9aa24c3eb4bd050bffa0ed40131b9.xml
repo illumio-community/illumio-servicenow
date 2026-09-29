@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_illu2_illumio.IllumioStartWorkloadDeletion</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>IllumioStartWorkloadDeletion</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioStartWorkloadDeletion = Class.create();
+IllumioStartWorkloadDeletion.prototype = {
+
+    initialize: function() {
+        this.logger = new IllumioLogger(null, 'IllumioStartWorkloadDeletion');
+        this.utils = new IllumioUtils();
+    },
+
+    /**
+     * Runs a workload deletion as a job, off the x_illu2_illumio.start_workload_deletion event.
+     *
+     * The deliberate mirror of IllumioAutoSyncWithPCE.process. Deletion used to run both phases
+     * inline in the UI Action's transaction and create its job record afterwards, which meant
+     * phase 1 had nothing to log to, the running-job guard fired only after the work was already
+     * done, and a 100k configuration did minutes of work inside a browser request.
+     *
+     * The two paths now differ in exactly what they should differ in:
+     *
+     *   phase 1   getEligibleWorkloadSysIdsByConfig(config, 'deletion')  vs  'inclusion'
+     *   phase 2   IllumioSyncBuildUtils.prepareWorkloadsForPCE with a deletion shell and row builder
+     *   payload   DELETION_PAYLOAD_TABLE                                 vs  AUTOSYNC_PAYLOAD_TABLE
+     *   ECC       operation 'delete'                                     vs  'updateCreate'
+     *
+     * Everything else -- job record first, work in the scheduler, ECC carries row sys_ids only,
+     * MID Server reads the payload table -- is the same shape.
+     *
+     * @param {String} illumioJobId sys_id of the deletion scheduled job, from event.parm1
+     */
+    process: function(illumioJobId) {
+        try {
+            if (gs.nil(illumioJobId)) {
+                this.logger.error('[IllumioStartWorkloadDeletion] No job sys_id supplied');
+                return;
+            }
+
+            if (this.utils.isJobCancelled(illumioJobId)) {
+                return;
+            }
+
+            var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            if (!jobGr.get(illumioJobId)) {
+                this.logger.error('[IllumioStartWorkloadDeletion] Scheduled job not found: ' + illumioJobId);
+                return;
+            }
+
+            var configSysId = jobGr.getValue('illumio_pce_configuration');
+            var configGr = new GlideRecordSecure(TABLE_PCE_CONF);
+            if (!configGr.get(configSysId)) {
+                this._fail(illumioJobId,
+                    'PCE Configuration not found: ' + configSysId);
+                return;
+            }
+
+            // Phases 1 and 2. Every row written to the deletion payload table is withdrawn by
+            // prepareDeletionPayload itself on the cancel and exception paths, so a non-success
+            // return here means nothing is left behind to clean up.
+            var payload = this.utils.prepareDeletionPayload(configSysId, illumioJobId);
+
+            if (payload.cancelJob) {
+                this.utils.updateJobRecord(illumioJobId, {
+                    logs: payload.message,
+                    current_operation: 'Deletion cancelled',
+                    job_status: 'cancelled_threshold_limit_exceeded',
+                    job_completed: new GlideDateTime()
+                });
+                return;
+            }
+
+            if (!payload.success) {
+                this._fail(illumioJobId, payload.message);
+                return;
+            }
+
+            if (!payload.payloadRowCount) {
+                // Not a failure: the filters ran and matched nothing eligible. Completing rather
+                // than failing keeps this distinguishable from a broken run in the job list.
+                this.utils.updateJobRecord(illumioJobId, {
+                    logs: 'No workloads are eligible for deletion or unpair. ' + payload.message,
+                    current_operation: 'Deletion completed',
+                    job_status: 'completed',
+                    job_completed: new GlideDateTime()
+                });
+                return;
+            }
+
+            var summary = payload.deletionCount + ' workload(s) for deletion, ' +
+                payload.unpairCount + ' workload(s) for unpair' +
+                (payload.skippedCount > 0 ? ', ' + payload.skippedCount + ' skipped' : '');
+
+            this.utils.updateJobRecord(illumioJobId, {
+                logs: 'Deletion payload prepared: ' + summary,
+                current_operation: 'Dispatching deletion to MID Server'
+            });
+
+            if (payload.thresholdExceeded) {
+                this.utils.updateJobRecord(illumioJobId, {
+                    logs: 'Deletion threshold limit exceeded. Some workloads were not included.'
+                });
+            }
+
+            var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+
+            var parameters = {
+                jobSysId: illumioJobId,
+                operation: 'delete',
+                partialSucc: payload.thresholdExceeded ? 'true' : 'false',
+                skipped: payload.skippedCount + '',
+                // P0-1: the workloads themselves live in
+                // x_illu2_illumio_illumio_deletion_payload. R33 took the row sys_ids out of the
+                // message too -- the rows carry jobSysId and the MID Server queries for them, so
+                // this parameter no longer grows with the run. It used to carry both lists as
+                // JSON, then a comma-separated sys_id list; a count is all that is left.
+                payloadRows: payload.payloadRowCount + '',
+                pce_url: pceConfig.pceUrl,
+                pce_secret: pceConfig.pceSecret,
+                pce_username: pceConfig.pceUsername,
+                pce_org_id: pceConfig.pceOrganizationID + '',
+                pce_authorization: gs.base64Encode(
+                    pceConfig.pceUsername + ':' + pceConfig.pceSecret),
+                configSysId: configSysId,
+                time_zone: gs.getSession().getTimeZoneName(),
+                // Was x_illu2_illumio.bulk_operation_batch_size, retired. See IllumioConstants.
+                batch_size: BATCH_SIZE_STANDARD,
+                enable_pce_mid_proxy: pceConfig.enable_pce_mid_proxy,
+                retry_params: JSON.stringify(pceConfig.retry_params)
+            };
+
+            var eccQueue = new IllumioAddToECCQueue(
+                'IllumioUpdateWorkloads', pceConfig.midServer, parameters);
+
+            if (!eccQueue.insert()) {
+                this._withdraw(illumioJobId);
+                this._fail(illumioJobId, 'Failed to dispatch deletion to MID server');
+                return;
+            }
+
+            this.logger.info('[IllumioStartWorkloadDeletion] Dispatched deletion for PCE Configuration ' +
+                configGr.getValue('name') + ': ' + summary);
+        } catch (ex) {
+            this.logger.error('[IllumioStartWorkloadDeletion] Exception: ' + ex);
+            this._fail(illumioJobId, 'Exception occurred while preparing deletion: ' + ex);
+        }
+    },
+
+    /**
+     * Withdraw payload rows for a deletion that will never be dispatched.
+     *
+     * @param {String} illumioJobId Job whose rows prepareDeletionPayload wrote
+     */
+    _withdraw: function(illumioJobId) {
+        try {
+            var syncUtils = new IllumioSyncUtils();
+            var withdrawn = new IllumioSyncRepoUtils(syncUtils)
+                .deletePayloadRowsForJob(syncUtils.DELETION_PAYLOAD_TABLE, illumioJobId);
+            if (withdrawn > 0) {
+                this.logger.info('[IllumioStartWorkloadDeletion] Withdrew ' + withdrawn +
+                    ' payload record(s)');
+            }
+        } catch (ex) {
+            this.logger.error('[IllumioStartWorkloadDeletion] Failed to withdraw payload records: ' + ex);
+        }
+    },
+
+    /**
+     * Close the job out as failed with a final log line.
+     *
+     * @param {String} illumioJobId sys_id of the scheduled job
+     * @param {String} message Reason, written to the log and the current operation
+     */
+    _fail: function(illumioJobId, message) {
+        this.logger.error('[IllumioStartWorkloadDeletion] ' + message);
+        this.utils.updateJobRecord(illumioJobId, {
+            logs: message,
+            current_operation: 'Deletion failed',
+            job_status: 'failed',
+            job_completed: new GlideDateTime()
+        });
+    },
+
+    type: 'IllumioStartWorkloadDeletion'
+};
+]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-22 14:30:35</sys_created_on>
+        <sys_id>7eb9aa24c3eb4bd050bffa0ed40131b9</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>IllumioStartWorkloadDeletion</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_include_7eb9aa24c3eb4bd050bffa0ed40131b9</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
+    </sys_script_include>
+</record_update>

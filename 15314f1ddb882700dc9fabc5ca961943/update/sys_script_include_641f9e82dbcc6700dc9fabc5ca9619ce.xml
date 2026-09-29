@@ -9,11 +9,13 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioStartDiscovery</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioStartDiscovery = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioStartDiscovery = Class.create();
 IllumioStartDiscovery.prototype = {
     initialize: function() {
+        this.logger = new IllumioLogger(null, 'IllumioStartDiscovery');
         this.scheduledJobsGr = new GlideRecordSecure(
-            'x_illu2_illumio_illumio_scheduled_jobs'
+            TABLE_SCHEDULED_JOBS
         );
         this.utils = new x_illu2_illumio.IllumioUtils();
     },
@@ -25,10 +27,10 @@ IllumioStartDiscovery.prototype = {
     process: function(configSysId, isPostSync) {
         var userName = gs.getUser().getID();
         // Check if any job is already in running state
-        gs.info('Initiating Discovery');
+        this.logger.info('Initiating Discovery');
 
         var configClassGr = new GlideRecordSecure(
-            'x_illu2_illumio_illumio_config_class_mapping'
+            TABLE_CONFIG_CLASS_MAPPING
         );
         configClassGr.addActiveQuery();
         configClassGr.addQuery(
@@ -38,7 +40,7 @@ IllumioStartDiscovery.prototype = {
         configClassGr.query();
         while (configClassGr.next()) {
             var fieldMappingGr = new GlideRecordSecure(
-                'x_illu2_illumio_illumio_class_field_mapping'
+                TABLE_CLASS_FIELD_MAPPING
             );
             fieldMappingGr.addQuery('illumio_config_class_mapping', configClassGr.getUniqueValue());
             fieldMappingGr.addQuery('type', 'host_name');
@@ -46,7 +48,7 @@ IllumioStartDiscovery.prototype = {
             fieldMappingGr.setLimit(1);
             fieldMappingGr.query();
             if (!fieldMappingGr.hasNext()) {
-                gs.error(
+                this.logger.error(
                     'Can not start the discovery as there is no PCE field mapping configured.'
                 );
                 this.scheduledJobsGr.illumio_pce_configuration = configSysId;
@@ -57,16 +59,12 @@ IllumioStartDiscovery.prototype = {
                 this.scheduledJobsGr.job_type = 'data collection';
                 this.scheduledJobsGr.job_completed = new GlideDateTime();
                 this.scheduledJobsGr.logs =
-                    '[' +
-                    new Date(
-                        new GlideDateTime().getNumericValue()
-                    ).toISOString() +
-                    '] Can not start the discovery as there is no PCE field mapping configured';
+                    'Can not start the discovery as there is no PCE field mapping configured';
                 this.scheduledJobsGr.insert();
                 return false;
             }
             var runningJobsCount = new GlideAggregate(
-                'x_illu2_illumio_illumio_scheduled_jobs'
+                TABLE_SCHEDULED_JOBS
             );
             runningJobsCount.addQuery('illumio_pce_configuration', configSysId);
             runningJobsCount.addQuery('job_status', 'running');
@@ -76,7 +74,7 @@ IllumioStartDiscovery.prototype = {
                 this.scheduledJobsGr.initialize();
                 this.scheduledJobsGr.job_owner = userName;
                 if (runningJobsCount.getAggregate('COUNT') > 0) {
-                    gs.info(
+                    this.logger.info(
                         'Can not start discovery as there is already one discovery job in running status.'
                     );
                     this.scheduledJobsGr.illumio_pce_configuration = configSysId;
@@ -86,11 +84,7 @@ IllumioStartDiscovery.prototype = {
                     this.scheduledJobsGr.job_type = 'data collection';
                     this.scheduledJobsGr.job_completed = new GlideDateTime();
                     this.scheduledJobsGr.logs =
-                        '[' +
-                        new Date(
-                            new GlideDateTime().getNumericValue()
-                        ).toISOString() +
-                        '] Can not start discovery as there is already one discovery job in running status';
+                        'Can not start discovery as there is already one discovery job in running status';
                     this.scheduledJobsGr.insert();
                     return false;
                 } else {
@@ -100,12 +94,14 @@ IllumioStartDiscovery.prototype = {
                     this.scheduledJobsGr.job_status = 'running';
                     this.scheduledJobsGr.current_operation =
                         'Fetching PCE data';
-                    var timestamp = new Date(new GlideDateTime().getNumericValue()).toISOString();
+                    // W2: no per-line timestamp. The same milestones go to syslog_app_scope,
+                    // which timestamps them there; the job log is a milestone list, and a
+                    // timestamp on every line of it was the thing making it unreadable.
                     this.scheduledJobsGr.logs =
-                        '[' + timestamp + '] Illumio data collection started' +
+                        'Illumio data collection started' +
                         (isPostSync ? ' [POST_SYNC]' : '');
                     this.scheduledJobsGr.logs +=
-                        '\n[' + timestamp + '] PHASE - START: Fetch & Store PCE Data';
+                        '\nPHASE - START: Fetch & Store PCE Data';
                     this.scheduledJobsGr.job_type = 'data collection';
                     var jobSysId = this.scheduledJobsGr.insert();
 
@@ -125,6 +121,11 @@ IllumioStartDiscovery.prototype = {
         }
     },
 
+    // REACHED BY A COMPUTED NAME, NOT BY A LITERAL ONE. createAsyncJobs does
+    // `this[type.toUpperCase() + '_PARAMS']` at :156, so neither of these two appears anywhere in
+    // the codebase spelled out. A search for "WORKLOAD_PARAMS" finds only this line, which makes
+    // them look dead to any dead-code sweep -- grep-based or otherwise. They are not. Renaming
+    // either one means changing the `types` array in createAsyncJobs to match.
     WORKLOAD_PARAMS: {
         keys_to_map: [
             'href',
@@ -138,10 +139,14 @@ IllumioStartDiscovery.prototype = {
             'os_id'
         ],
         primary_key_to_map: 'hostname',
+        mapping_table: TABLE_PCE_WORKLOADS_MAPPING,
+        result_table: TABLE_PCE_WORKLOADS_MAPPING_STAGE,
     },
     LABEL_PARAMS: {
         keys_to_map: ['href', 'key', 'value'],
         primary_key_to_map: 'value',
+        mapping_table: TABLE_PCE_LABELS_MAPPING,
+        result_table: TABLE_PCE_LABELS_MAPPING_STAGE,
     },
 
     /**
@@ -150,7 +155,7 @@ IllumioStartDiscovery.prototype = {
      * @returns {Boolean} true if the job is successfully created else false
      */
     createAsyncJobs: function(jobSysId, configSysId) {
-        gs.info('Creating async jobs on PCE');
+        this.logger.info('Creating async jobs on PCE');
         var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
         var types = ['workload', 'label'];
 
@@ -177,10 +182,12 @@ IllumioStartDiscovery.prototype = {
                             type +
                             's',
                         operation: 'create_async_job',
-                        mapping_table_name: 'x_illu2_illumio_illumio_pce_' + type + 's_mapping',
-                        result_table_name: 'x_illu2_illumio_illumio_pce_' +
-                            type +
-                            's_mapping_stage',
+                        // Were built by concatenating 'x_illu2_illumio_illumio_pce_' + type,
+                        // which put four table names in the app that no search for them could
+                        // find and that renaming a table would silently miss. They now come off
+                        // the _PARAMS object above, which reads the TABLE_* globals.
+                        mapping_table_name: params['mapping_table'],
+                        result_table_name: params['result_table'],
                         keys_to_map: JSON.stringify(params['keys_to_map']),
                         primary_key_to_map: params['primary_key_to_map'],
                         illumio_scheduled_job_id: jobSysId,
@@ -188,7 +195,10 @@ IllumioStartDiscovery.prototype = {
                         time_zone: gs.getSession().getTimeZoneName(),
                         enable_pce_mid_proxy: pceConfig.enable_pce_mid_proxy,
                         retry_params: JSON.stringify(pceConfig.retry_params),
-                        chunk_size: gs.getProperty("x_illu2_illumio.payload.batch.size", 1000)
+                        // Was x_illu2_illumio.payload.batch.size, retired: the only
+                        // dot-separated property name in the app, and it sized the MID's
+                        // async-job mapping chunk rather than any payload.
+                        chunk_size: BATCH_SIZE_STANDARD
                     };
                     var illumioAddToECCQueue = new IllumioAddToECCQueue(
                         'IllumioManageAsyncJobs',
@@ -207,7 +217,7 @@ IllumioStartDiscovery.prototype = {
                         );
                         return false;
                     }
-                    gs.info('Started async job to fetch PCE ' + type + 's');
+                    this.logger.info('Started async job to fetch PCE ' + type + 's');
                 }
 
 
@@ -236,19 +246,20 @@ IllumioStartDiscovery.prototype = {
     },
 
     type: 'IllumioStartDiscovery',
-};]]></script>
+};
+]]></script>
         <sys_class_name>sys_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:20:29</sys_created_on>
         <sys_id>641f9e82dbcc6700dc9fabc5ca9619ce</sys_id>
-        <sys_mod_count>129</sys_mod_count>
+        <sys_mod_count>131</sys_mod_count>
         <sys_name>IllumioStartDiscovery</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_641f9e82dbcc6700dc9fabc5ca9619ce</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-16 09:04:01</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:42</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>641f9e82dbcc6700dc9fabc5ca9619ce</id>

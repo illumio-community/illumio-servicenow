@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_ui_action">
     <sys_ui_action action="INSERT_OR_UPDATE">
-        <action_name/>
+        <action_name>preview_discovery_filter_mode</action_name>
         <active>true</active>
-        <client>false</client>
+        <client>true</client>
         <client_script_v2><![CDATA[function onClick(g_form) {
 
 }]]></client_script_v2>
@@ -30,131 +30,172 @@
         <list_style/>
         <messages/>
         <name>Preview Discovery Filter Mode</name>
-        <onclick/>
+        <onclick>startPreviewDiscoveryFilterMode()</onclick>
         <order>100</order>
-        <script><![CDATA[gs.include("IllumioConstants");
-(function executePreviewDiscoveryFilter(current, action, gs) {
+        <script><![CDATA[/**
+ * Client half of the one-job-at-a-time guard. Onclick: startPreviewDiscoveryFilterMode()
+ *
+ * Same shape as the twin in "Preview Workload Deletion": in the Script field rather than in
+ * client_script_v2, because that field is an empty stub on every UI Action in this application
+ * and nothing reads it. Both halves share this field, which is why the server half below is
+ * behind a `typeof window` guard.
+ *
+ * Purely to save a round trip that would end in an error message. The check that enforces the
+ * rule runs on the server immediately before the job record is inserted, because two people
+ * clicking within the same second both pass this one. Never treat this as the guard.
+ *
+ * GlideAjax is asynchronous, so the click always returns false and the form is submitted from
+ * the callback rather than by returning true.
+ */
+function startPreviewDiscoveryFilterMode() {
+    var check = new GlideAjax('x_illu2_illumio.IllumioUtilsAJAX');
+    check.addParam('sysparm_name', 'hasRunningJob');
+    // Scopes the check to the PCE Configuration this Class Mapping belongs to, so a job on a
+    // different one no longer greys this out. Must match what the server half passes, or the
+    // two halves disagree and the client waves through something the server then refuses.
+    check.addParam('sysparm_config_sys_id', g_form.getValue('illumio_pce_configuration'));
+
+    check.getXMLAnswer(function(answer) {
+        var response;
+
+        try {
+            response = answer ? JSON.parse(answer) : { running: false };
+        } catch (ex) {
+            // Never leave the click doing nothing. An unreadable answer means the guard could
+            // not be evaluated, and the server repeats the check anyway.
+            response = { running: false };
+        }
+
+        if (response.running) {
+            g_form.addErrorMessage(response.message);
+            return;
+        }
+
+        gsftSubmit(null, g_form.getFormElement(), 'preview_discovery_filter_mode');
+    });
+
+    return false;
+}
+
+// Server half: a trigger, and nothing else.
+//
+// This used to do the whole job inside the click -- page every CMDB record the mapping would
+// process, apply the exclusion filter in memory, render the CSV to a string, and write it with
+// GlideSysAttachment. Capped at x_illu2_illumio.maximum_ci_records, so it was never the memory
+// hazard the workload exports were; it was a scan of up to 25,000 CMDB records held open in an
+// interactive transaction, which has a far shorter ceiling than a scheduled one.
+//
+// P0-2 point 9, the fifth and last UI Action to move. The work now lives in
+// IllumioPreviewUtils.processFilterModePreview, reached through the Script Action on
+// x_illu2_illumio.start_filter_mode_previe.
+//
+// Action name: preview_discovery_filter_mode (the client half submits it by that name).
+if (typeof window === 'undefined') {
+    // Declared inside the server guard for the same reason gs.include is: this Script
+    // field is evaluated in the browser too, for the client half above, and IllumioLogger
+    // is a server Script Include. At the top of the file it threw a ReferenceError on
+    // every form load and stopped the form rendering.
+    var illumioLogger = new IllumioLogger(null, 'Preview Discovery Filter Mode');
+
+    // Inside the server guard, not at the top of the file. This Script field is evaluated in the
+    // browser too, for the client half above, and `gs` does not exist there -- a top-level
+    // gs.include would throw a ReferenceError and kill the onclick handler.
+    gs.include("IllumioConstants");
+
     var mappingSysId = current.getUniqueValue();
     var tableName = current.getTableName();
     var redirectUrl = tableName + '.do?sys_id=' + mappingSysId;
 
-    if (gs.nil(mappingSysId)) {
-        gs.addErrorMessage("Unable to determine Config Class Mapping.");
-        action.setRedirectURL(redirectUrl);
-        return;
-    }
-
     try {
-        var sourceTable = current.getValue('source_table');
-        var condition = current.getValue('conditions_for_excluding_workloads');
-        var filterMode = current.getValue('filter_mode') || 'exclusion_legacy';
+        var utils = new IllumioUtils();
 
-        if (gs.nil(sourceTable)) {
-            gs.addErrorMessage("No source table configured on this mapping.");
+        if (gs.nil(current.getValue('source_table'))) {
+            // Checked here rather than in the job. It costs nothing, it is the most common
+            // reason this button cannot work, and telling the user now beats creating a job
+            // that exists only to fail.
+            gs.addErrorMessage('No source table is configured on this mapping.');
             action.setRedirectURL(redirectUrl);
-            return;
-        }
 
-        var hostFieldGr = new GlideRecordSecure('x_illu2_illumio_illumio_class_field_mapping');
-        hostFieldGr.addQuery('illumio_config_class_mapping', mappingSysId);
-        hostFieldGr.addQuery('type', 'host_name');
-        hostFieldGr.addActiveQuery();
-        hostFieldGr.setLimit(1);
-        hostFieldGr.query();
-
-        if (!hostFieldGr.next()) {
-            gs.addErrorMessage("Preview requires a hostname field mapping. Configure a Host Name mapping first.");
-            action.setRedirectURL(redirectUrl);
-            return;
-        }
-
-        var isAdvancedHostname = hostFieldGr.getValue('advanced') == '1';
-        var hostnameField = isAdvancedHostname ? null : hostFieldGr['ci_field'].getDisplayValue();
-
-        var maxRecords = parseInt(gs.getProperty("x_illu2_illumio.maximum_ci_records") || '25000');
-        // iterateFilteredCMDBRecords moved off IllumioUtils onto IllumioDiscoveryRepository.
-        // That method was this script's only use of IllumioUtils, so the construction swaps
-        // entirely rather than gaining a second object.
-        var repo = new IllumioDiscoveryRepository();
-        var discoverHelper = new IllumioDiscoverAndMapCMDBServers();
-
-        var headers = ['sys_id', 'name', 'sys_class_name', 'ip_address', 'hostname'];
-        var lines = [headers.join(',')];
-
-        var result = repo.iterateFilteredCMDBRecords(
-            sourceTable, filterMode, condition, maxRecords,
-            function(previewGr) {
-                var row = [];
-                for (var h = 0; h < headers.length; h++) {
-                    var val = '';
-                    if (headers[h] === 'hostname' && hostnameField) {
-                        val = discoverHelper.getValueFromDotWalkableField(previewGr, hostnameField) || '';
-                    } else if (headers[h] === 'hostname' && isAdvancedHostname) {
-                        val = '(script-based)';
-                    } else {
-                        val = previewGr.getValue(headers[h]) || '';
-                    }
-                    if (val.indexOf(',') !== -1 || val.indexOf('"') !== -1) {
-                        val = '"' + val.replace(/"/g, '""') + '"';
-                    }
-                    row.push(val);
-                }
-                lines.push(row.join(','));
-            }
-        );
-
-        if (result.fetchedCount === 0) {
-            var zeroMsg = "No CMDB records match the current filter configuration.";
-            if (result.excludedCount > 0) {
-                zeroMsg += " (" + result.excludedCount + " record(s) excluded by condition.)";
-            }
-            gs.addInfoMessage(zeroMsg);
-            action.setRedirectURL(redirectUrl);
-            return;
-        }
-
-        var csvContent = lines.join('\n');
-
-        var now = new GlideDateTime();
-        var displayValue = now.getDisplayValue().replace(/[:\s]/g, '-').replace(/[^0-9\-]/g, '').split('-');
-        var yy = (displayValue[0] || '00').slice(-2);
-        var mm = ('0' + (displayValue[1] || '0')).slice(-2);
-        var dd = ('0' + (displayValue[2] || '0')).slice(-2);
-        var hh = ('0' + (displayValue[3] || '0')).slice(-2);
-        var min = ('0' + (displayValue[4] || '0')).slice(-2);
-        var fileName = 'DISCOVERY-PREVIEW-' + dd + '-' + mm + '-' + yy + '-' + hh + '-' + min + '.csv';
-
-        var targetGr = new GlideRecord(tableName);
-        targetGr.get(mappingSysId);
-
-        var sa = new GlideSysAttachment();
-        var existingAttachments = sa.getAttachments(tableName, mappingSysId);
-        while (existingAttachments.next()) {
-            if ((existingAttachments.getValue('file_name') || '').indexOf('DISCOVERY-PREVIEW-') === 0) {
-                sa.deleteAttachment(existingAttachments.getUniqueValue());
-            }
-        }
-
-        var attachmentSysId = sa.write(targetGr, fileName, 'text/csv', csvContent);
-
-        if (gs.nil(attachmentSysId)) {
-            gs.error('[PreviewDiscoveryFilter] GlideSysAttachment.write returned nil. FileName: ' + fileName + ', CSV length: ' + csvContent.length);
-            gs.addErrorMessage("Failed to generate discovery preview CSV. Check application logs for details.");
         } else {
-            var modeLabel = filterMode === 'inclusion' ? 'Inclusion' : 'Exclusion (Legacy)';
-            var msg = result.fetchedCount + " CMDB record(s) will be processed by discovery (mode: " + modeLabel + "). Preview CSV attached.";
-            if (result.excludedCount > 0) {
-                msg += " " + result.excludedCount + " record(s) excluded.";
+            // Scoped to the PCE Configuration this Class Mapping belongs to. It was
+            // instance-wide, which was propping up two sweeps that deleted anything they did
+            // not own -- both fixed, see getRunningJob.
+            var runningJob = utils.getRunningJob(
+                current.getValue('illumio_pce_configuration'));
+
+            if (runningJob) {
+                // The authoritative check. The client half ran the same one before submitting,
+                // but that was a different transaction and anything could have started since.
+                //
+                // The refusal gets a job record of its own, inserted already failed so it never
+                // counts as running. There is nowhere else to log it, and without it a user
+                // reporting "the button does nothing" leaves no trace to look at.
+                var message = utils.describeRunningJob(runningJob);
+
+                var refusedGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+                refusedGr.initialize();
+                refusedGr.job_owner = gs.getUser().getID();
+                refusedGr.job_type = 'preview';
+                refusedGr.job_status = 'failed';
+                refusedGr.job_started = new GlideDateTime();
+                refusedGr.job_completed = new GlideDateTime();
+                refusedGr.current_operation = 'Preview refused';
+                refusedGr.illumio_pce_configuration =
+                    current.getValue('illumio_pce_configuration');
+                refusedGr.logs = 'Discovery filter mode preview requested for source table "' +
+                    current.getValue('source_table') + '" and refused. ' + message;
+                refusedGr.insert();
+
+                gs.addErrorMessage(message);
+                action.setRedirectURL(redirectUrl);
+
+            } else {
+                var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+                jobGr.initialize();
+                jobGr.job_owner = gs.getUser().getID();
+                jobGr.job_type = 'preview';
+                jobGr.job_status = 'running';
+                jobGr.job_started = new GlideDateTime();
+                jobGr.current_operation = 'Preparing preview';
+                jobGr.illumio_pce_configuration =
+                    current.getValue('illumio_pce_configuration');
+                jobGr.logs = 'Discovery filter mode preview requested for source table "' +
+                    current.getValue('source_table') + '".';
+                var jobSysId = jobGr.insert();
+                // From here on the job record exists, so anything this action logs -- including
+                // an exception out of the block below -- lands under the same job id the
+                // scheduler half will use.
+                illumioLogger.setContext(jobSysId);
+
+                if (gs.nil(jobSysId)) {
+                    gs.addErrorMessage('Failed to create the scheduled job for this preview.');
+                } else {
+                    // parm2 carries what the job record cannot: the scheduled jobs table has a
+                    // PCE Configuration reference but no generic target, and this preview
+                    // attaches to the Config Class Mapping rather than to the configuration.
+                    var context = JSON.stringify({
+                        type: new IllumioPreviewUtils().TYPE_FILTER_MODE,
+                        table: tableName,
+                        sysId: mappingSysId
+                    });
+
+                    gs.eventQueueScheduled('x_illu2_illumio.start_filter_mode_previe',
+                        jobGr, jobSysId, context, new GlideDateTime());
+
+                    gs.addInfoMessage('Discovery preview job started. The CSV will be attached ' +
+                        'to this record when it completes. Track progress in Scheduled Jobs.');
+                }
+
+                action.setRedirectURL(redirectUrl);
             }
-            gs.addInfoMessage(msg);
         }
     } catch (ex) {
-        gs.error('[PreviewDiscoveryFilter] Exception: ' + ex);
-        gs.addErrorMessage("Error generating discovery preview: " + ex);
+        illumioLogger.error('Exception: ' + ex);
+        gs.addErrorMessage('Error starting the discovery preview: ' + ex);
+        action.setRedirectURL(redirectUrl);
     }
-
-    action.setRedirectURL(redirectUrl);
-})(current, action, gs);]]></script>
+}
+]]></script>
         <show_form_icon_only>false</show_form_icon_only>
         <show_insert>false</show_insert>
         <show_list_icon_only>false</show_list_icon_only>
@@ -167,7 +208,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>31d29e02c30b031050bffa0ed40131e0</sys_id>
-        <sys_mod_count>5</sys_mod_count>
+        <sys_mod_count>12</sys_mod_count>
         <sys_name>Preview Discovery Filter Mode</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -175,7 +216,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_31d29e02c30b031050bffa0ed40131e0</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-15 16:10:06</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:20:22</sys_updated_on>
         <table>x_illu2_illumio_illumio_config_class_mapping</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sysevent_script_action">
+    <sysevent_script_action action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <condition_script/>
+        <description/>
+        <event_name>x_illu2_illumio.start_preview</event_name>
+        <name>StartPreview</name>
+        <order>100</order>
+        <script><![CDATA[var preview = new IllumioPreviewUtils();
+preview.process(event.parm1, event.parm2);
+]]></script>
+        <synchronous>false</synchronous>
+        <sys_class_name>sysevent_script_action</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-22 17:49:38</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>6e479fa8c3a787d050bffa0ed40131db</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>StartPreview</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sysevent_script_action_6e479fa8c3a787d050bffa0ed40131db</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-22 18:21:17</sys_updated_on>
+    </sysevent_script_action>
+</record_update>

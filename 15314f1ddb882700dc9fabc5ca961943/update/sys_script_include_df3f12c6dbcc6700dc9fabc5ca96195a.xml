@@ -9,8 +9,15 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioUpdatePCE</name>
         <sandbox_callable>true</sandbox_callable>
-        <script><![CDATA[var IllumioUpdatePCE = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioUpdatePCE = Class.create();
 IllumioUpdatePCE.prototype = Object.extendsObject(global.AbstractAjaxProcessor, {
+
+    // On the prototype rather than built in initialize. AbstractAjaxProcessor's own initialize
+    // takes (request, responseXML, gc) and does real work with them; overriding it here to add
+    // one line means forwarding three arguments correctly in five separate files for no gain.
+    // Nothing calls setContext on it, so there is no shared state to get wrong.
+    logger: new IllumioLogger(null, 'IllumioUpdatePCE'),
 
     /**
      * Starts the process of updating workloads
@@ -19,7 +26,7 @@ IllumioUpdatePCE.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
         var configSysId = this.getParameter("sysparm_config_sys_id");
 
         var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
-        var mappingOfFields = new IllumioGetPCEConfiguration().getMappedFields(configSysId);
+        var mappingOfFields = new IllumioGetPCEConfiguration().getLabelDimensionsBySourceTable(configSysId);
         mappingOfFields = JSON.stringify(mappingOfFields.fields);
         var payload = this.getParameter('sysparm_payload');
         var operation = this.getParameter('sysparm_operation');
@@ -45,7 +52,8 @@ IllumioUpdatePCE.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
                 pce_org_id: pceConfig.pceOrganizationID + "",
                 pce_authorization: gs.base64Encode(pceConfig.pceUsername + ':' + pceConfig.pceSecret),
                 time_zone: gs.getSession().getTimeZoneName(),
-                batch_size: gs.getProperty('x_illu2_illumio.bulk_operation_batch_size', 1000),
+                // Was x_illu2_illumio.bulk_operation_batch_size, retired. See IllumioConstants.
+                batch_size: BATCH_SIZE_STANDARD,
                 enable_pce_mid_proxy: pceConfig.enable_pce_mid_proxy,
                 configSysId: configSysId,
                 retry_params: JSON.stringify(pceConfig.retry_params)
@@ -59,42 +67,43 @@ IllumioUpdatePCE.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
             }
 			
             if (operation == "create")
-                gs.info("Creating new workload(s) on PCE");
+                this.logger.info("Creating new workload(s) on PCE");
             else if (operation == "update")
-                gs.info("Updating workload(s) on PCE");
+                this.logger.info("Updating workload(s) on PCE");
             else if (operation == "updateCreate")
-                gs.info("Creating/Updating record(s) on PCE");
+                this.logger.info("Creating/Updating record(s) on PCE");
             else
-                gs.error("Error while updating or creating a workload in PCE");
+                this.logger.error("Error while updating or creating a workload in PCE");
 
         } catch (exception) {
-            gs.error('Exception occurred while preparing request data. Exception: ' + exception);
-            var scheduledJobsGr = new GlideRecordSecure('x_illu2_illumio_illumio_scheduled_jobs');
+            this.logger.error('Exception occurred while preparing request data. Exception: ' + exception);
+            var scheduledJobsGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
             if (scheduledJobsGr.get(jobSysId)) {
                 scheduledJobsGr.job_status = 'failed';
                 scheduledJobsGr.job_completed = new GlideDateTime();
-                scheduledJobsGr.logs += '\n[' + new Date(new GlideDateTime().getNumericValue()).toISOString() + '] Synchronization with PCE failed';
+                scheduledJobsGr.logs += '\nSynchronization with PCE failed';
                 scheduledJobsGr.update();
             } else {
-                gs.error('Scheduled job with sys_id ' + jobSysId + ' not found of data syncing');
+                this.logger.error('Scheduled job with sys_id ' + jobSysId + ' not found of data syncing');
             }
         }
     },
 
     type: 'IllumioUpdatePCE'
-});]]></script>
+});
+]]></script>
         <sys_class_name>sys_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:19:56</sys_created_on>
         <sys_id>df3f12c6dbcc6700dc9fabc5ca96195a</sys_id>
-        <sys_mod_count>43</sys_mod_count>
+        <sys_mod_count>46</sys_mod_count>
         <sys_name>IllumioUpdatePCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_df3f12c6dbcc6700dc9fabc5ca96195a</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-06-23 16:03:45</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:42</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>df3f12c6dbcc6700dc9fabc5ca96195a</id>

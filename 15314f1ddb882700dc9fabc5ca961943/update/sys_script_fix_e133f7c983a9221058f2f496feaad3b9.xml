@@ -4,7 +4,11 @@
         <description>This script is introduced in the Illumio v2.4.0 to support a newly introduced status on the Illumio Scheduled Jobs table. Incidents are now also being raised for jobs in this new state. The script updates the description of the 'incident_creation_for_scheduled_job' system property to reflect this new status as well.</description>
         <name>Update description of system property</name>
         <record_for_rollback>true</record_for_rollback>
-        <script><![CDATA[gs.info("Running 'Update description of system property' fix script of Illumio.");
+        <script><![CDATA[// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Update description of system property');
+
+illumioLogger.info("Running 'Update description of system property' fix script of Illumio.");
 
 var sysPropGr = new GlideRecord("sys_properties");
 if (sysPropGr.get("2977e35c476d8e1066773e7d826d43e5")) {
@@ -13,24 +17,24 @@ if (sysPropGr.get("2977e35c476d8e1066773e7d826d43e5")) {
 
     sysPropGr.setValue("description", updatedDescription);
     if (sysPropGr.update())
-        gs.info("Successfully updated the description of the '{0}' system property.", propertyName);
+        illumioLogger.info("Successfully updated the description of the '{0}' system property.", propertyName);
     else
-        gs.error("Error updating the description of the '{0}' system property.", propertyName);
+        illumioLogger.error("Error updating the description of the '{0}' system property.", propertyName);
 } else {
-    gs.error("System property '{0}' was not found.", propertyName);
+    illumioLogger.error("System property '{0}' was not found.", propertyName);
 }]]></script>
         <sys_class_name>sys_script_fix</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2025-05-15 07:01:22</sys_created_on>
         <sys_id>e133f7c983a9221058f2f496feaad3b9</sys_id>
-        <sys_mod_count>6</sys_mod_count>
+        <sys_mod_count>7</sys_mod_count>
         <sys_name>Update description of system property</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_fix_e133f7c983a9221058f2f496feaad3b9</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-07-20 15:45:33</sys_updated_on>
+        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
         <unloadable>false</unloadable>
     </sys_script_fix>
     <sys_es_latest_script action="INSERT_OR_UPDATE">

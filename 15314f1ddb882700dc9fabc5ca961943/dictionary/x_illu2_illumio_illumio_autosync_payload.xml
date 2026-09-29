@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
     <element db_object_id="23b285a79300021062233f018bba1057" label="Illumio AutoSync Payload" max_length="40" name="x_illu2_illumio_illumio_autosync_payload" type="collection">
         <element label="Payload" max_length="1000000" name="payload" type="string"/>
+        <element label="Job Id" max_length="32" name="job_id" reference="x_illu2_illumio_illumio_scheduled_jobs" type="reference"/>
+        <index name="index">
+            <element name="job_id"/>
+        </index>
     </element>
 </database>

@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_script_client">
+    <sys_script_client action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <applies_extended>false</applies_extended>
+        <condition/>
+        <description/>
+        <field>label_condition</field>
+        <global>true</global>
+        <isolate_script>true</isolate_script>
+        <messages/>
+        <name>Sync Filter Describe Label Condition</name>
+        <order/>
+        <script><![CDATA[/**
+ * Sync Filter -- onChange of label_condition.
+ *
+ * Shows the saved Label Condition as a readable expression under the field, on form load:
+ *
+ *   Matches: (env=(Development or Production or QA) and role=Load Balancer) or (os=Linux)
+ *
+ * Why this is needed. The condition builder heads every group with "All of these conditions must
+ * be met". That is stock chrome for the outer AND group, and it says nothing about the two
+ * structures that actually decide what a filter matches: the `or` rows nested INSIDE a group, and
+ * the OR BETWEEN groups. So a condition that reads as one thing on the form evaluates as another,
+ * and the author has no way to tell from looking at it. For a deletion filter that matters a lot.
+ *
+ * ON LOAD ONLY, BY DECISION. A `conditions` field is not edited like a normal input: the builder
+ * assembles the encoded query itself and writes it into the underlying field programmatically,
+ * which does not fire the change event onChange is bound to. Measured on this form -- this handler
+ * runs once on load and then never again, whatever is done to the rows. Following edits live would
+ * mean polling the field value on a timer, which was built and then dropped as not worth its
+ * weight. So the expression describes the condition AS SAVED. After editing the rows, save and
+ * reload to see the expression for the new condition.
+ *
+ * Nothing is stored. The expression is computed on demand, so there is no column that can go stale
+ * against the condition it describes.
+ *
+ * The rendering is server-side (IllumioUtilsAJAX.describeLabelCondition) because it runs the
+ * evaluator's own parser -- the description is built from the parse that produces the query, so
+ * the two cannot disagree -- and because turning a dimension sys_id into its key is a database
+ * read.
+ */
+function onChange(control, oldValue, newValue, isLoading, isTemplate) {
+    if (isTemplate) {
+        return;
+    }
+
+    // Deliberately NOT returning on isLoading -- load is the only time this runs, so returning
+    // there would disable the script entirely.
+
+    g_form.hideFieldMsg('label_condition', true);
+
+    if (newValue === '') {
+        return;
+    }
+
+    var describe = new GlideAjax('x_illu2_illumio.IllumioUtilsAJAX');
+    describe.addParam('sysparm_name', 'describeLabelCondition');
+    describe.addParam('sysparm_label_condition', newValue);
+
+    describe.getXMLAnswer(function(answer) {
+        if (!answer) {
+            return;
+        }
+
+        var response = JSON.parse(answer);
+
+        // Parse errors are deliberately NOT shown here. An existing filter can be mid-repair, and
+        // the save-time business rule is the authoritative gate -- it reports these same messages,
+        // precisely, at the point where they can still be acted on.
+        if (!response.text) {
+            return;
+        }
+
+        g_form.showFieldMsg('label_condition', 'Matches: ' + response.text, 'info');
+    });
+}
+]]></script>
+        <sys_class_name>sys_script_client</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-22 15:19:29</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>07e4766cc32f4bd050bffa0ed40131a8</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>Sync Filter Describe Label Condition</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_script_client_07e4766cc32f4bd050bffa0ed40131a8</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-22 15:55:00</sys_updated_on>
+        <table>x_illu2_illumio_illumio_sync_filter</table>
+        <type>onChange</type>
+        <ui_type>0</ui_type>
+        <view/>
+    </sys_script_client>
+</record_update>

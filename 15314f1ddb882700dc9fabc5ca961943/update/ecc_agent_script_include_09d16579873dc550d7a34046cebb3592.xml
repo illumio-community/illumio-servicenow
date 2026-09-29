@@ -4,45 +4,148 @@
         <description/>
         <name>IllumioMIDConstants</name>
         <script><![CDATA[ms.include("IllumioHttpIncludes");
-var METHODS = {
-    GET: "GET",
-    POST: "POST",
-    PUT: "PUT",
-    DELETE: "DELETE"
-};
-var METHOD_CLASSES = {
-    GET: GetMethod,
-    POST: PostMethod,
-    PUT: PutMethod,
-    DELETE: DeleteMethod
-};
-var WORKLOAD_FIELD_VALUE_ENDPOINT = "/api/x_illu2_illumio/illumioupdateworkloadfieldvalue/update_label_dimension";
-var AUTOSYNC_JOB_TABLE="x_illu2_illumio_illumio_autosync_payload";
+
+// ---------------------------------------------------------------------------------------------
+// TABLE AND FIELD NAMES BELOW ARE A SECOND COPY, ON PURPOSE.
+//
+// The centralized copy lives on the instance, in IllumioConstants (TABLE_* globals) and in the
+// per-class constants that read from it. A MID script include runs in the MID Server's own
+// process and cannot see a scoped Script Include or call gs, so there is no way for it to read
+// the instance's copy at parse time. Passing the names down in the ECC message was considered and
+// rejected: it would make every probe's parameter list carry them and couple the MID to the exact
+// message shape.
+//
+// So: when a table or field is renamed on the instance, BOTH copies have to change. A mismatch
+// here does not raise -- the MID queries a table that does not exist, or a column that does not
+// exist, and reports a run that found nothing rather than a run that failed. Check this file
+// against IllumioConstants whenever a table is renamed.
+// ---------------------------------------------------------------------------------------------
+
 var RETRY_CODES = [429];
-var MAX_IP_ADDRESSES = 32;
-var MAX_RETRY_COUNTS = 3;
+// Platform REST paths, not app tables. These two have no instance-side counterpart and are not
+// duplicated anywhere -- they are how the MID reaches the instance in the first place.
 var TABLE_API = "/api/now/table/";
+
+// W5. Where the MID pushes its error and warning lines so they land in Application Logs next to
+// the server-side ones. NOT a table -- a scoped Scripted REST resource whose script only calls
+// gs.error/gs.warn. It touches no GlideRecord on purpose: the cross-scope 500 that killed
+// UpdateLabelDimensionsValue came out of record access, and a sink that cannot fail that way is
+// worth more than one that could carry a richer payload.
+//
+// The path is <namespace>/<api_id>/<relative_path>. Namespace is the scope; api_id and
+// relative_path are set on the API record, so THIS STRING AND THAT RECORD MUST AGREE -- a
+// mismatch returns 404 on every push and the only symptom is MID lines quietly not arriving.
+var MID_LOG_PUSH_API = "/api/x_illu2_illumio/illumio_mid_log/push";
+// R13 / 2026-09-29: superseded, kept for the reasoning. This was the buffer's page size. The
+// buffer is gone -- lines go to the instance one at a time now. Measured against what the MID
+// already spends, the batching was not paying for itself: _updateJobRecord is a GET plus a PUT
+// and the sync batch loop calls it five times, so ~10 instance round-trips per batch are already
+// in flight. Turning a healthy 100k run's ~101 log lines into 2 POSTs rather than 101 moved
+// instance chatter by ~10%. Against that it cost ordering -- a 100-line batch is written inside
+// one second, syslog_app_scope's Created column is second-precision, so a flushed batch came back
+// shuffled -- plus module state shared across probe runs, lines dropped whole on a failed push,
+// and a finally in every probe that a throw past the wrapper would skip.
+// var MID_LOG_BUFFER_MAX = 100;
+
+// Ceiling on log pushes per probe run. NOT a page size -- each push carries one line.
+//
+// This bounds the one case the buffer was genuinely earning its keep. IllumioUpdateWorkloads has
+// ~6 _error sites that fire PER WORKLOAD, not per batch, so a 100k run failing on every workload
+// would be 100k POSTs unbounded. A fixed ceiling caps that outright instead of dividing it by the
+// page size and still leaving it proportional to the failure count.
+//
+// A healthy run is nowhere near this: one probe-entered line plus one _milestone per payload
+// batch, ~101 lines on a 100k sync. Past the ceiling the run's remaining lines stay in agent0.log
+// on the MID host, and the last push spends itself saying so.
+var MID_LOG_PUSH_MAX = 500;
+
+// Centralized copy: TABLE_SCHEDULED_JOBS in IllumioConstants.
 var SCHEDULED_JOB_TABLE = "x_illu2_illumio_illumio_scheduled_jobs";
+// Centralized copy: TABLE_PCE_ASYNC_JOBS in IllumioConstants.
 var ASYNC_JOB_TABLE = "x_illu2_illumio_illumio_pce_async_jobs";
+// Centralized copy: IllumioSyncUtils.AUTOSYNC_PAYLOAD_TABLE / TABLE_AUTOSYNC_PAYLOAD.
 var AUTOSYNC_PAYLOAD_TABLE = "x_illu2_illumio_illumio_autosync_payload";
 // P0-1. Deletion carries its workloads in payload rows now rather than in the ECC message, the
 // same way auto sync already did.
+// Centralized copy: IllumioSyncUtils.DELETION_PAYLOAD_TABLE / TABLE_DELETION_PAYLOAD.
 var DELETION_PAYLOAD_TABLE = "x_illu2_illumio_illumio_deletion_payload";
-var PCE_WORKLOADS_TABLE = "x_illu2_illumio_illumio_pce_workload";
-var PCE_WORKLOADS_MAPPING_TABLE = "x_illu2_illumio_illumio_pce_workloads_mapping";
+// Preview exports. Unlike the two payload tables above these rows carry finished CSV text rather
+// than an operation bundle -- the MID appends them to a file in order and never parses them.
+// Centralized copy: IllumioSyncUtils.PREVIEW_PAYLOAD_TABLE / TABLE_PREVIEW_PAYLOAD.
+var PREVIEW_PAYLOAD_TABLE = "x_illu2_illumio_illumio_preview_payload";
+// The reference back to the Scheduled Job, on all three payload tables above.
+//
+// R33: this is how the MID finds its work. The ECC message used to carry a comma-separated list
+// of payload row sys_ids, which became one XML attribute and grew with the run -- ~132 KB at 2M
+// workloads, and worse every time the window size dropped. The message now carries jobSysId only
+// and the MID queries for the rows.
+//
+// Centralized copy: IllumioSyncUtils.PAYLOAD_JOB_FIELD. MUST MATCH IT. Of everything duplicated
+// in this file this is the one most likely to bite: a wrong table name at least fails visibly on
+// the next call, whereas a wrong COLUMN name in an addQuery does not raise at all -- it simply
+// stops constraining, so the MID finds either nothing or everything.
+var PAYLOAD_JOB_FIELD = "job_id";
+// sysparm_limit for the query that finds a job's payload rows. Set explicitly rather than left to
+// the Table API's own default, because that default is a platform setting an admin can change and
+// a run silently truncated to the first N rows sends part of itself to the PCE and reports
+// success. One row is IllumioSyncUtils.PAYLOAD_ROW_SIZE workloads, so this is 20M workloads' worth
+// -- far past any real run, which is the point: it is a guard rail, not a page size. The response
+// carries sys_ids only, never the payloads.
+var PAYLOAD_ROW_QUERY_LIMIT = 20000;
+// Attachment API. A platform REST path, not an app table -- no instance-side counterpart. The
+// file is POSTed as the raw request body, so this is the /file endpoint rather than /upload,
+// which expects multipart form data.
+var ATTACHMENT_FILE_API = "/api/now/attachment/file";
+// Centralized copy: TABLE_PCE_LABELS_MAPPING in IllumioConstants. ~100k rows in production --
+// see the note there before caching anything read out of it.
 var PCE_LABELS_MAPPING_TABLE = "x_illu2_illumio_illumio_pce_labels_mapping";
+// Retry settings for the MID-side operations that have no PCE Configuration to read them from
+// (authentication, async job polling, preview upload). A CALLER-SIDE default, deliberately: the
+// operation chooses it explicitly and it is visible at the call site. IllumioHTTPClient does not
+// substitute it -- an operation that is handed an incomplete retry configuration runs without
+// retrying rather than with numbers nobody entered. All three are greater than zero, which is
+// what IllumioHTTPClient._validateRetryParams requires.
 var DEFAULT_RETRY_PARAMS = {
     http_retry_count: 5,
     http_retry_interval_increment: 30,
     http_retry_interval_max: 300
-};]]></script>
+};
+// Job statuses that mean "stop, the instance is no longer expecting this work". The MID checks
+// this set rather than the single value 'cancelled', because a job can be stopped three different
+// ways and only one of them writes that value:
+//   cancelled                          -- operator pressed Cancel, or the wall-clock timeout in
+//                                         the Illumio Invalidate Running Job script action fired
+//   cancelled_threshold_limit_exceeded -- a configured threshold was hit, or the thresholds could
+//                                         not be resolved at all (IllumioThresholdLimit throws)
+//   invalidated                        -- the job record was superseded
+// Matching only 'cancelled' meant a threshold-cancelled job kept pushing to the PCE for the rest
+// of the run: the instance had given up on it and the MID had not been told.
+//
+// Centralized copy: the same set is IllumioSyncRepoUtils' dead-status list minus the statuses that
+// mean the job finished on its own. Those are not here on purpose -- a job that reached
+// 'completed' while the MID was still working is a different bug and should not be swallowed as
+// an orderly cancellation.
+var CANCELLED_JOB_STATUSES = [
+    "cancelled",
+    "cancelled_threshold_limit_exceeded",
+    "invalidated"
+];
+// Minimum spacing between consecutive calls to the PCE, in milliseconds. Applies to the PCE
+// client only, never to the client that talks back to the instance. This is what actually stops
+// the 429s: backoff is reactive and only runs after the PCE has already refused a call, and a
+// refusal is an error in the log even when the retry that follows succeeds. Label creation is the
+// loop that provoked it -- one POST /api/v2/orgs/N/labels/ per missing label, back to back.
+//
+// 100ms caps the PCE at ~10 calls/second. On a 10k workload sync the labels are created once and
+// then found in cache, so the added wall clock is seconds, not minutes.
+var MIN_PCE_CALL_INTERVAL_MS = 100;]]></script>
         <sys_class_name>ecc_agent_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2022-02-21 13:10:19</sys_created_on>
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>09d16579873dc550d7a34046cebb3592</sys_id>
-        <sys_mod_count>21</sys_mod_count>
+        <sys_mod_count>28</sys_mod_count>
         <sys_name>IllumioMIDConstants</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -50,6 +153,6 @@ var DEFAULT_RETRY_PARAMS = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_09d16579873dc550d7a34046cebb3592</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 09:12:25</sys_updated_on>
+        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

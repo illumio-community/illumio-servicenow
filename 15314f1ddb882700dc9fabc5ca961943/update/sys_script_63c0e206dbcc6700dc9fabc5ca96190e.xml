@@ -28,9 +28,13 @@
         <rest_variables/>
         <role_conditions/>
         <script><![CDATA[gs.include('IllumioConstants');
+// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+// the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
+var illumioLogger = new IllumioLogger(null, 'Update PCE Configuration');
+
 (function executeRule(current, previous /*null when async*/ ) {
 	
-	var pceConfigGr = new GlideRecordSecure('x_illu2_illumio_illumio_pce_conf');
+	var pceConfigGr = new GlideRecordSecure(TABLE_PCE_CONF);
     pceConfigGr.addQuery('name', current.getValue('name'));
     pceConfigGr.addQuery('sys_id', '!=', current.getUniqueValue());
     pceConfigGr.query();
@@ -47,9 +51,9 @@
 
 
     if (current.operation() == 'insert') {
-        gs.info('New configuration {0} added by {1}({2})', current.name , gs.getUserName(), gs.getUserID());
+        illumioLogger.info('New configuration {0} added by {1}({2})', current.name , gs.getUserName(), gs.getUserID());
     } else {
-        gs.info('{0}({1}) updated configuration {2}', gs.getUserName(), gs.getUserID(), current.name);
+        illumioLogger.info('{0}({1}) updated configuration {2}', gs.getUserName(), gs.getUserID(), current.name);
     }
 
     // Trimming threshold limit values
@@ -87,18 +91,30 @@
         var maxRetryInterval = !gs.nil(current.getValue('http_retry_interval_max')) ? parseInt(current.getValue('http_retry_interval_max')) : DEFAULT_HTTP_RETRY_INTERVAL_MAX;
         var retryIntervalIncrement = !gs.nil(current.getValue('http_retry_interval_increment')) ? parseInt(current.getValue('http_retry_interval_increment')) : DEFAULT_HTTP_RETRY_INTERVAL_INCREMENT;
 
+        // The bound comes from the constant in every message below rather than being spelled out
+        // again. The three numbers used to be typed into the text, so changing a constant left the
+        // message telling the user a limit that was no longer enforced.
+        //
+        // The two interval checks also had each other's constant: http_retry_interval_max was
+        // validated against HTTP_RETRY_INTERVAL_INCREMENT_MAX and the increment against
+        // HTTP_RETRY_INTERVAL_MAX. Both are 600, so nothing behaved differently -- but raising one
+        // of them would have moved the other field's limit instead of its own.
         if (!(0 <= retryCount && retryCount <= HTTP_RETRY_COUNT_MAX)) {
-            gs.addErrorMessage('The Retry count should be in the range of 0 to 100');
+            gs.addErrorMessage('The Retry count should be in the range of 0 to ' +
+                HTTP_RETRY_COUNT_MAX);
             current.setAbortAction(true);
             return;
         }
-        if (!(0 <= maxRetryInterval && maxRetryInterval <= HTTP_RETRY_INTERVAL_INCREMENT_MAX)) {
-            gs.addErrorMessage('The HTTP Retry interval max should be in the range of 0 to 600');
+        if (!(0 <= maxRetryInterval && maxRetryInterval <= HTTP_RETRY_INTERVAL_MAX)) {
+            gs.addErrorMessage('The HTTP Retry interval max should be in the range of 0 to ' +
+                HTTP_RETRY_INTERVAL_MAX);
             current.setAbortAction(true);
             return;
         }
-        if (!(0 <= retryIntervalIncrement && retryIntervalIncrement <= HTTP_RETRY_INTERVAL_MAX)) {
-            gs.addErrorMessage('The HTTP Retry interval increment should be in the range of 0 to 600');
+        if (!(0 <= retryIntervalIncrement &&
+                retryIntervalIncrement <= HTTP_RETRY_INTERVAL_INCREMENT_MAX)) {
+            gs.addErrorMessage('The HTTP Retry interval increment should be in the range of 0 to ' +
+                HTTP_RETRY_INTERVAL_INCREMENT_MAX);
             current.setAbortAction(true);
             return;
         }
@@ -116,15 +132,15 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>63c0e206dbcc6700dc9fabc5ca96190e</sys_id>
-        <sys_mod_count>69</sys_mod_count>
+        <sys_mod_count>71</sys_mod_count>
         <sys_name>Update PCE Configuration</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_63c0e206dbcc6700dc9fabc5ca96190e</sys_update_name>
-        <sys_updated_by>crest.data</sys_updated_by>
-        <sys_updated_on>2025-07-16 13:17:21</sys_updated_on>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-29 10:11:44</sys_updated_on>
         <template>active=true^script=var startDiscovery = new x_illu2_illumio.IllumioStartDiscovery(); startDiscovery.process(current.getUniqueValue());^EQ</template>
         <when>before</when>
     </sys_script>
