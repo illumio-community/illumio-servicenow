@@ -2,15 +2,15 @@
     <element attributes="enforce_dot_walk_cross_scope_access=true" db_object_id="61d54f64c3ef4bd050bffa0ed40131ba" label="Illumio Preview Payload" max_length="40" name="x_illu2_illumio_illumio_preview_payload" type="collection">
         <element choice="3" label="Type" max_length="40" name="type" type="choice">
             <choice>
-                <element inactive_on_update="false" label="Preview Deletion" sequence="2" value="preview_deletion"/>
                 <element inactive_on_update="false" label="Show Matching Workloads" sequence="0" value="show_matching_workloads"/>
-                <element inactive_on_update="false" label="Preview Filter Mode" sequence="3" value="preview_filter_mode"/>
                 <element inactive_on_update="false" label="Show Matching Workloads For Config" sequence="1" value="show_matching_workloads_for_config"/>
+                <element inactive_on_update="false" label="Preview Deletion" sequence="2" value="preview_deletion"/>
+                <element inactive_on_update="false" label="Preview Filter Mode" sequence="3" value="preview_filter_mode"/>
             </choice>
         </element>
         <element label="Byte Length" max_length="40" name="byte_length" type="integer"/>
-        <element label="payload" max_length="16777215" name="payload" type="string"/>
         <element label="sequence" max_length="40" name="sequence" type="integer"/>
+        <element label="payload" max_length="16777215" name="payload" type="string"/>
         <element label="Job Id" max_length="32" name="job_id" reference="x_illu2_illumio_illumio_scheduled_jobs" type="reference"/>
         <index name="index">
             <element name="job_id"/>

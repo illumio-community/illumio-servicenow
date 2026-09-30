@@ -1,32 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?><database>
     <element audit="true" db_object_id="07b245a79300021062233f018bba1042" label="Illumio Scheduled Jobs" max_length="40" name="x_illu2_illumio_illumio_scheduled_jobs" type="collection">
+        <element label="Current Operation" max_length="40" name="current_operation" type="string"/>
         <element label="Job Completed" max_length="40" name="job_completed" type="glide_date_time"/>
-        <element attributes="readonly_clickthrough=true" label="Incident" max_length="32" name="incident" read_only="true" read_only_option="client_script_modifiable" reference="incident" type="reference"/>
+        <element attributes="readonly_clickthrough=true" label="Illumio PCE Configuration" max_length="32" name="illumio_pce_configuration" reference="x_illu2_illumio_illumio_pce_conf" type="reference"/>
+        <element label="Job Started" max_length="40" name="job_started" type="glide_date_time"/>
+        <element attributes="readonly_clickthrough=true" label="Job Owner" max_length="32" name="job_owner" reference="sys_user" type="reference"/>
         <element choice="1" label="Job Status" max_length="40" name="job_status" type="string">
             <choice>
-                <element inactive_on_update="false" label="Failed" sequence="2" value="failed"/>
-                <element inactive_on_update="false" label="Cancelled: Threshold Limit Exceeded" sequence="6" value="cancelled_threshold_limit_exceeded"/>
-                <element inactive_on_update="false" label="Cancelled" sequence="5" value="cancelled"/>
-                <element inactive_on_update="false" label="Completed with errors" sequence="1" value="completed_with_error"/>
-                <element inactive_on_update="false" label="Running" sequence="4" value="running"/>
-                <element inactive_on_update="false" label="Partial Success" sequence="3" value="partial_success"/>
                 <element inactive_on_update="false" label="Completed" sequence="0" value="completed"/>
-            </choice>
-        </element>
-        <element label="Job Started" max_length="40" name="job_started" type="glide_date_time"/>
-        <element label="Current Operation" max_length="40" name="current_operation" type="string"/>
-        <element choice="1" label="Job Type" max_length="40" name="job_type" type="choice">
-            <choice>
-                <element inactive_on_update="false" label="Data Sync" sequence="1" value="data sync"/>
-                <element inactive_on_update="false" label="Data Collection" sequence="0" value="data collection"/>
-                <element inactive_on_update="false" label="Preview" sequence="4" value="preview"/>
-                <element inactive_on_update="false" label="Deletion" sequence="3" value="deletion"/>
-                <element inactive_on_update="false" label="Connectivity Check" sequence="2" value="connectivity_check"/>
+                <element inactive_on_update="false" label="Completed with errors" sequence="1" value="completed_with_error"/>
+                <element inactive_on_update="false" label="Failed" sequence="2" value="failed"/>
+                <element inactive_on_update="false" label="Partial Success" sequence="3" value="partial_success"/>
+                <element inactive_on_update="false" label="Running" sequence="4" value="running"/>
+                <element inactive_on_update="false" label="Cancelled" sequence="5" value="cancelled"/>
+                <element inactive_on_update="false" label="Cancelled: Threshold Limit Exceeded" sequence="6" value="cancelled_threshold_limit_exceeded"/>
             </choice>
         </element>
         <element label="Logs" max_length="16777215" name="logs" type="string"/>
-        <element attributes="readonly_clickthrough=true" label="Job Owner" max_length="32" name="job_owner" reference="sys_user" type="reference"/>
-        <element attributes="readonly_clickthrough=true" label="Illumio PCE Configuration" max_length="32" name="illumio_pce_configuration" reference="x_illu2_illumio_illumio_pce_conf" type="reference"/>
+        <element attributes="readonly_clickthrough=true" label="Incident" max_length="32" name="incident" read_only="true" read_only_option="client_script_modifiable" reference="incident" type="reference"/>
+        <element choice="1" label="Job Type" max_length="40" name="job_type" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Data Collection" sequence="0" value="data collection"/>
+                <element inactive_on_update="false" label="Data Sync" sequence="1" value="data sync"/>
+                <element inactive_on_update="false" label="Connectivity Check" sequence="2" value="connectivity_check"/>
+                <element inactive_on_update="false" label="Deletion" sequence="3" value="deletion"/>
+                <element inactive_on_update="false" label="Preview" sequence="4" value="preview"/>
+            </choice>
+        </element>
         <index name="index">
             <element name="illumio_pce_configuration"/>
         </index>

@@ -120,7 +120,6 @@
         <sys_id>2b0cfe67974d0a50b7daf896f053af70</sys_id>
         <sys_mod_count>5</sys_mod_count>
         <sys_name>Unique Workloads</sys_name>
-        <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>

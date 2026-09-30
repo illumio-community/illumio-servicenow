@@ -119,7 +119,6 @@
         <sys_id>667e024edb8c6700dc9fabc5ca9619b0</sys_id>
         <sys_mod_count>38</sys_mod_count>
         <sys_name>Total Duplicate Workloads</sys_name>
-        <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>

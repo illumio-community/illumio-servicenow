@@ -24,8 +24,9 @@
         <scope>x_illu2_illumio</scope>
         <scoped_administration>false</scoped_administration>
         <short_description/>
+        <sn_managed>false</sn_managed>
         <source>x_illu2_illumio</source>
-        <store_correlation_id>REPOAPP0002914677</store_correlation_id>
+        <store_correlation_id>REPOAPP0003128388</store_correlation_id>
         <store_url>https://tpp.servicenow.com/sn_appstore_s</store_url>
         <subscription_entitlement/>
         <sys_class_name>sys_app</sys_class_name>
@@ -33,16 +34,16 @@
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-20 05:52:41</sys_created_on>
         <sys_id>15314f1ddb882700dc9fabc5ca961943</sys_id>
-        <sys_mod_count>52</sys_mod_count>
+        <sys_mod_count>54</sys_mod_count>
         <sys_updated_by>koushik.choudhury</sys_updated_by>
-        <sys_updated_on>2026-07-27 15:04:55</sys_updated_on>
+        <sys_updated_on>2026-09-30 13:23:21</sys_updated_on>
         <template/>
         <trackable>true</trackable>
         <uninstall_blocked>false</uninstall_blocked>
         <user_role/>
         <vendor/>
         <vendor_prefix/>
-        <version>2.5.18</version>
+        <version>2.6.0</version>
     </sys_app>
     <sys_translated_text action="delete_multiple" query="documentkey=15314f1ddb882700dc9fabc5ca961943"/>
     <sys_attachment action="INSERT_OR_UPDATE">
