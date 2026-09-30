@@ -21,7 +21,66 @@ IllumioStartDiscovery.prototype = {
     },
 
     /**
+     * Write a terminal, failed data-collection job record and log the reason.
+     *
+     * Extracted from process(), which spelled the same eight assignments out three times. Every
+     * refusal to start discovery has to leave a record behind: the callers of process() are
+     * Script Actions and UI Actions that have no other way to tell the user why nothing happened,
+     * and a refusal with no job row is indistinguishable from discovery never having been asked
+     * for.
+     *
+     * @param {String} configSysId PCE configuration the refusal belongs to
+     * @param {String} operation Short label for current_operation
+     * @param {String} message Reason, written to the job log and to syslog
+     * @returns {Boolean} Always false, so callers can `return this._refuse(...)`
+     */
+    _refuse: function(configSysId, operation, message) {
+        this.logger.error(message);
+        // initialize() on every path. The original called it only on the already-running branch,
+        // so the field-mapping branch inserted on a GlideRecordSecure that had never been
+        // initialized -- which works, but skips dictionary defaults and silently carries over
+        // field values if the record object is ever reused. One shared this.scheduledJobsGr and
+        // three insert sites is exactly that situation.
+        this.scheduledJobsGr.initialize();
+        this.scheduledJobsGr.job_owner = gs.getUser().getID();
+        this.scheduledJobsGr.illumio_pce_configuration = configSysId;
+        this.scheduledJobsGr.job_started = new GlideDateTime();
+        this.scheduledJobsGr.job_status = JOB_STATUS_FAILED;
+        this.scheduledJobsGr.current_operation = operation;
+        this.scheduledJobsGr.job_type = JOB_TYPE_DATA_COLLECTION;
+        this.scheduledJobsGr.job_completed = new GlideDateTime();
+        this.scheduledJobsGr.logs = message;
+        this.scheduledJobsGr.insert();
+        return false;
+    },
+
+    /**
      * Starts the discovery process
+     *
+     * **Restructured (ND-3).** The guard and the job creation used to sit INSIDE
+     * `while (configClassGr.next())`, and every branch of that body returned. Three consequences,
+     * all fixed here, none of which changed what a correctly-configured instance does:
+     *
+     *  1. **Only the first class mapping was ever checked for a host_name mapping.** The loop
+     *     returned on its first iteration whatever it found, so a configuration with three source
+     *     tables had two of them unchecked. Discovery then ran over a table it could not derive a
+     *     hostname for, and the workloads it produced were dropped at the far end by the MID
+     *     Server -- which discards PCE workloads with no hostname by design, so the failure
+     *     surfaced as a silently short sync, not as an error. Now EVERY active mapping is
+     *     checked and the refusal names the ones that are misconfigured.
+     *  2. **"First" was not a defined row.** There was no orderBy, so which mapping got checked
+     *     was whatever order the database returned, and a configuration could pass one run and
+     *     fail the next with nothing changed. Ordered by source_table now.
+     *  3. **Zero active mappings returned `undefined` having created no job record.** The loop
+     *     body never ran. The caller saw a falsy return and could not distinguish it from a real
+     *     failure, and the user saw nothing at all. That case now gets its own named refusal.
+     *
+     * The running-job guard and the job insert moved OUT of the loop, where they always belonged:
+     * both are per-CONFIGURATION, not per-class-mapping, and running them inside a loop that
+     * always returned on its first pass is why that was never visible.
+     *
+     * @param {String} configSysId PCE configuration to collect for
+     * @param {Boolean} isPostSync Tags the job log when discovery follows a sync
      * @returns {Boolean} true if the job is successfully created else false
      */
     process: function(configSysId, isPostSync) {
@@ -37,8 +96,21 @@ IllumioStartDiscovery.prototype = {
             'illumio_pce_configuration',
             configSysId
         );
+        // Stable order so the refusal below lists the offending mappings the same way twice, and
+        // so a run cannot pass or fail depending on row order. See point 2 above.
+        configClassGr.orderBy('source_table');
         configClassGr.query();
+
+        // Names only, not records. A configuration has a handful of class mappings, not a
+        // workload-sized number of them, so this is bounded by configuration size and not by n.
+        var mappedTables = [];
+        var tablesMissingHostName = [];
+
         while (configClassGr.next()) {
+            var sourceTable = configClassGr.getValue('source_table') ||
+                configClassGr.getUniqueValue();
+            mappedTables.push(sourceTable);
+
             var fieldMappingGr = new GlideRecordSecure(
                 TABLE_CLASS_FIELD_MAPPING
             );
@@ -48,77 +120,94 @@ IllumioStartDiscovery.prototype = {
             fieldMappingGr.setLimit(1);
             fieldMappingGr.query();
             if (!fieldMappingGr.hasNext()) {
-                this.logger.error(
-                    'Can not start the discovery as there is no PCE field mapping configured.'
-                );
-                this.scheduledJobsGr.illumio_pce_configuration = configSysId;
-                this.scheduledJobsGr.job_started = new GlideDateTime();
-                this.scheduledJobsGr.job_status = 'failed';
-                this.scheduledJobsGr.current_operation =
-                    'PCE Field Mapping Missing';
-                this.scheduledJobsGr.job_type = 'data collection';
-                this.scheduledJobsGr.job_completed = new GlideDateTime();
-                this.scheduledJobsGr.logs =
-                    'Can not start the discovery as there is no PCE field mapping configured';
-                this.scheduledJobsGr.insert();
-                return false;
-            }
-            var runningJobsCount = new GlideAggregate(
-                TABLE_SCHEDULED_JOBS
-            );
-            runningJobsCount.addQuery('illumio_pce_configuration', configSysId);
-            runningJobsCount.addQuery('job_status', 'running');
-            runningJobsCount.addAggregate('COUNT');
-            runningJobsCount.query();
-            if (runningJobsCount.next()) {
-                this.scheduledJobsGr.initialize();
-                this.scheduledJobsGr.job_owner = userName;
-                if (runningJobsCount.getAggregate('COUNT') > 0) {
-                    this.logger.info(
-                        'Can not start discovery as there is already one discovery job in running status.'
-                    );
-                    this.scheduledJobsGr.illumio_pce_configuration = configSysId;
-                    this.scheduledJobsGr.job_started = new GlideDateTime();
-                    this.scheduledJobsGr.job_status = 'failed';
-                    this.scheduledJobsGr.current_operation = 'Already running';
-                    this.scheduledJobsGr.job_type = 'data collection';
-                    this.scheduledJobsGr.job_completed = new GlideDateTime();
-                    this.scheduledJobsGr.logs =
-                        'Can not start discovery as there is already one discovery job in running status';
-                    this.scheduledJobsGr.insert();
-                    return false;
-                } else {
-                    // Create new job
-                    this.scheduledJobsGr.illumio_pce_configuration = configSysId;
-                    this.scheduledJobsGr.job_started = new GlideDateTime();
-                    this.scheduledJobsGr.job_status = 'running';
-                    this.scheduledJobsGr.current_operation =
-                        'Fetching PCE data';
-                    // W2: no per-line timestamp. The same milestones go to syslog_app_scope,
-                    // which timestamps them there; the job log is a milestone list, and a
-                    // timestamp on every line of it was the thing making it unreadable.
-                    this.scheduledJobsGr.logs =
-                        'Illumio data collection started' +
-                        (isPostSync ? ' [POST_SYNC]' : '');
-                    this.scheduledJobsGr.logs +=
-                        '\nPHASE - START: Fetch & Store PCE Data';
-                    this.scheduledJobsGr.job_type = 'data collection';
-                    var jobSysId = this.scheduledJobsGr.insert();
-
-                    var discoveryStartStatus = this.createAsyncJobs(jobSysId, configSysId);
-                    if (!discoveryStartStatus) {
-                        this.utils.handleFailure(
-                            jobSysId,
-                            'Discovery start error',
-                            'Adding to ECC queue failed',
-                            configSysId
-                        );
-                        return false;
-                    }
-                    return true;
-                }
+                tablesMissingHostName.push(sourceTable);
             }
         }
+
+        if (mappedTables.length === 0) {
+            // NEW REFUSAL. This path previously fell out of the loop and returned undefined with
+            // no record written at all.
+            return this._refuse(
+                configSysId,
+                'No Class Mapping Configured',
+                'Can not start the discovery as there is no active class mapping configured ' +
+                'for this PCE configuration.'
+            );
+        }
+
+        if (tablesMissingHostName.length > 0) {
+            // Message stem kept verbatim -- it is what the existing job records say and what
+            // anyone searching the job log or syslog for this failure will search for. The list
+            // of tables is appended, because the whole point of checking all of them is being
+            // able to say which one is wrong.
+            return this._refuse(
+                configSysId,
+                'PCE Field Mapping Missing',
+                'Can not start the discovery as there is no PCE field mapping configured' +
+                ' for: ' + tablesMissingHostName.join(', ')
+            );
+        }
+
+        var runningJobsCount = new GlideAggregate(
+            TABLE_SCHEDULED_JOBS
+        );
+        runningJobsCount.addQuery('illumio_pce_configuration', configSysId);
+        runningJobsCount.addQuery('job_status', JOB_STATUS_RUNNING);
+        runningJobsCount.addAggregate('COUNT');
+        runningJobsCount.query();
+        // A COUNT aggregate with no groupBy always returns exactly one row, so `next()` is true
+        // and the count is 0 when nothing matches. The original wrapped everything below in this
+        // `if` and had an `else` on the count instead; kept as a guard so a query that somehow
+        // returns nothing refuses rather than starting a second concurrent job.
+        if (!runningJobsCount.next()) {
+            return this._refuse(
+                configSysId,
+                'Already running',
+                'Can not start discovery: the running-job check returned no result.'
+            );
+        }
+
+        if (runningJobsCount.getAggregate('COUNT') > 0) {
+            this.logger.info(
+                'Can not start discovery as there is already one discovery job in running status.'
+            );
+            return this._refuse(
+                configSysId,
+                'Already running',
+                'Can not start discovery as there is already one discovery job in running status'
+            );
+        }
+
+        // Create new job
+        this.scheduledJobsGr.initialize();
+        this.scheduledJobsGr.job_owner = userName;
+        this.scheduledJobsGr.illumio_pce_configuration = configSysId;
+        this.scheduledJobsGr.job_started = new GlideDateTime();
+        this.scheduledJobsGr.job_status = JOB_STATUS_RUNNING;
+        this.scheduledJobsGr.current_operation =
+            'Fetching PCE data';
+        // W2: no per-line timestamp. The same milestones go to syslog_app_scope,
+        // which timestamps them there; the job log is a milestone list, and a
+        // timestamp on every line of it was the thing making it unreadable.
+        this.scheduledJobsGr.logs =
+            'Illumio data collection started' +
+            (isPostSync ? ' [POST_SYNC]' : '');
+        this.scheduledJobsGr.logs +=
+            '\nPHASE - START: Fetch & Store PCE Data';
+        this.scheduledJobsGr.job_type = JOB_TYPE_DATA_COLLECTION;
+        var jobSysId = this.scheduledJobsGr.insert();
+
+        var discoveryStartStatus = this.createAsyncJobs(jobSysId, configSysId);
+        if (!discoveryStartStatus) {
+            this.utils.handleFailure(
+                jobSysId,
+                'Discovery start error',
+                'Adding to ECC queue failed',
+                configSysId
+            );
+            return false;
+        }
+        return true;
     },
 
     // REACHED BY A COMPUTED NAME, NOT BY A LITERAL ONE. createAsyncJobs does
@@ -252,14 +341,14 @@ IllumioStartDiscovery.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:20:29</sys_created_on>
         <sys_id>641f9e82dbcc6700dc9fabc5ca9619ce</sys_id>
-        <sys_mod_count>131</sys_mod_count>
+        <sys_mod_count>132</sys_mod_count>
         <sys_name>IllumioStartDiscovery</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_641f9e82dbcc6700dc9fabc5ca9619ce</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:42</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:03</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>641f9e82dbcc6700dc9fabc5ca9619ce</id>

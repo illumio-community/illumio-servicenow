@@ -39,7 +39,31 @@ IllumioUpdateWorkloads.prototype = {
         this.pceOrgId = probe.getParameter('glide.jms.pce_org_id');
         this.pceMIDProxy = probe.getParameter('glide.jms.enable_pce_mid_proxy');
 
-        this.batchSize = parseInt(probe.getParameter('glide.jms.batch_size'));
+        // Guarded the same way IllumioManageAsyncJobs guards `glide.jms.chunk_size`, and for the
+        // same reason. `parseInt` with no radix, no fallback and no `< 1` check turned a missing
+        // or junk parameter into `batchSize = NaN`, and NaN is the worst possible value here
+        // because it fails SILENTLY rather than throwing. Every chunking loop in this file has
+        // the shape `for (i = 0; i < len; i += this.batchSize)`: the first pass takes
+        // `slice(0, NaN)`, which is `slice(0, 0)` -- an EMPTY chunk -- and then `i += NaN` makes
+        // `i` NaN, `NaN < len` is false, and the loop ends. One empty chunk, PUT to the PCE as an
+        // empty body, and the run reports success having synced nothing.
+        //
+        // DEFAULT_MID_BATCH_SIZE, not a literal, so this and IllumioManageAsyncJobs cannot drift.
+        // A MID script include has no `gs` and cannot read the system property the instance sets,
+        // so the number is duplicated by hand from BATCH_SIZE_STANDARD in IllumioConstants -- see
+        // the note on the constant. Divergence is not fatal: it only changes the chunk size on a
+        // run whose ECC message was already malformed.
+        this.batchSize = parseInt(probe.getParameter('glide.jms.batch_size'), 10) ||
+            DEFAULT_MID_BATCH_SIZE;
+        if (this.batchSize < 1) {
+            this.logger._warning(
+                "Invalid 'x_illu2_illumio.batch_size_standard' provided. Proceeding with " +
+                DEFAULT_MID_BATCH_SIZE +
+                " as default value. Please set a valid value to " +
+                "'x_illu2_illumio.batch_size_standard' property."
+            );
+            this.batchSize = DEFAULT_MID_BATCH_SIZE;
+        }
 
         // `workloads_to_delete` and `vens_to_unpair` used to be read here. R33 moved the delete
         // branch onto the deletion payload table -- see _payloadRowSysIds -- and no sender puts
@@ -67,14 +91,28 @@ IllumioUpdateWorkloads.prototype = {
 
         this.newLabelsCreated = {};
 
-        // Mapping
-        this.pceLabels = {};
-        this.selectLabels = {};
+        // R13 (commented, not deleted). Both assigned here and read nowhere in this file or any
+        // other MID script include -- the comment above them just said "Mapping", which is what
+        // kept them looking load-bearing. They are of a piece with the label reverse-lookup R34
+        // commented out (collectLabelDetails / labelDetails): that was the code that would have
+        // filled them. `newLabelsCreated` above is live and is NOT part of this -- it is what
+        // the label creation path actually writes to.
+        // this.pceLabels = {};
+        // this.selectLabels = {};
 
         this.created = true;
         this.updatedManaged = true;
         this.updatedUnManaged = true;
-        this.labelDetails = new Object();
+        // R34: the href -> {key, value} reverse lookup. Run-long and never cleared -- filled
+        // once, unfiltered, from a ~100k-row table (PCE_LABELS_MAPPING_TABLE), and held for the
+        // life of the probe across every payload row. Objective 3's only leak.
+        //
+        // Removed rather than windowed, because its sole consumer was `payloadPut`, which
+        // nothing has ever read (see the note on snowUpdateObject in create()). The MID needs no
+        // label data FROM ServiceNow: the payload arrives with `labels` and `createlabels`
+        // already resolved by the instance, and nothing is written back -- post-sync discovery
+        // rebuilds the mapping table wholesale.
+        // this.labelDetails = new Object();
         this.operation = probe.getParameter('glide.jms.operation');
 
         this.utils = new IllumioPCEUtils(this.timeZone, this.jobSysId);
@@ -264,7 +302,7 @@ IllumioUpdateWorkloads.prototype = {
 
                 if (updateResult.count && updateResult.count != 0) {
                     jobContent = {
-                        job_status: 'completed',
+                        job_status: JOB_STATUS_COMPLETED,
                         logs: 'Updated ' + payloadToUpdate[0].hostname + ' workload on PCE and ServiceNow',
                         current_operation: 'Updated ' + payloadToUpdate[0].hostname + ' workload on PCE',
                         job_completed: this.snowDateFormat.format(new Date()) + ""
@@ -272,7 +310,7 @@ IllumioUpdateWorkloads.prototype = {
                     this._updateJobRecord(this.jobSysId, jobContent);
                 } else {
                     jobContent = {
-                        job_status: 'failed',
+                        job_status: JOB_STATUS_FAILED,
                         logs: 'Failed to update ' + payloadToUpdate[0].hostname + ' workload on ' + updateResult.exception,
                         job_completed: this.snowDateFormat.format(new Date()) + ""
                     };
@@ -281,7 +319,7 @@ IllumioUpdateWorkloads.prototype = {
             } catch (exception) {
                 this.logger._except("IllumioUpdateWorkloads: Exception while updating workload on PCE : " + exception);
                 jobContent = {
-                    job_status: 'failed',
+                    job_status: JOB_STATUS_FAILED,
                     logs: "Exception while updating workload on PCE : " + exception,
                     job_completed: this.snowDateFormat.format(new Date()) + "",
                 };
@@ -302,7 +340,7 @@ IllumioUpdateWorkloads.prototype = {
 
                 if (createResult.count && createResult.count != 0) {
                     jobContent = {
-                        job_status: 'completed',
+                        job_status: JOB_STATUS_COMPLETED,
                         logs: 'Created ' + payloadToCreate[0].hostname + ' workload on PCE',
                         current_operation: 'Created ' + payloadToCreate[0].hostname + ' workload on PCE',
                         job_completed: this.snowDateFormat.format(new Date()) + ""
@@ -310,7 +348,7 @@ IllumioUpdateWorkloads.prototype = {
                     this._updateJobRecord(this.jobSysId, jobContent);
                 } else {
                     jobContent = {
-                        job_status: 'failed',
+                        job_status: JOB_STATUS_FAILED,
                         logs: 'Failed to create ' + payloadToCreate[0].hostname + ' workload on ' + createResult.exception,
                         job_completed: this.snowDateFormat.format(new Date()) + ""
                     };
@@ -319,7 +357,7 @@ IllumioUpdateWorkloads.prototype = {
             } catch (exception) {
                 this.logger._except("IllumioUpdateWorkloads: Exception while creating workload on PCE : " + exception);
                 jobContent = {
-                    job_status: 'failed',
+                    job_status: JOB_STATUS_FAILED,
                     logs: "Exception while creating workload on PCE : " + exception,
                     job_completed: this.snowDateFormat.format(new Date()) + "",
                 };
@@ -330,7 +368,12 @@ IllumioUpdateWorkloads.prototype = {
 
         if (this.operation == "updateCreate") {
             this.logger._debug("Type : updateCreate");
-            this.collectLabelDetails();
+            // R34: was an unfiltered, unprojected, unlimited GET of the whole PCE Labels Mapping
+            // table for this configuration -- ~100k rows in production -- issued ONCE here,
+            // outside the payload-row loop, so it could not be windowed by construction. Only
+            // the Table API's 10,000-row default kept it from landing whole on the MID heap.
+            // Its result fed getLabelDetails, which fed payloadPut, which nothing reads.
+            // this.collectLabelDetails();
             try {
 
                 var unknownWorkloads, managedWorkloads, unmanagedWorkloads;
@@ -353,7 +396,7 @@ IllumioUpdateWorkloads.prototype = {
                     this.logger._error('[updateCreate] No payload rows found for job ' +
                         this.jobSysId + '. Nothing to send to the PCE.');
                     this._updateJobRecord(this.jobSysId, {
-                        job_status: 'failed',
+                        job_status: JOB_STATUS_FAILED,
                         logs: 'No payload rows could be found for this job, so nothing was sent ' +
                             'to the PCE. The workloads were prepared but the MID Server could ' +
                             'not read them back.',
@@ -418,7 +461,12 @@ IllumioUpdateWorkloads.prototype = {
 
                         totalWorkloads = totalWorkloads + payload.createUnknown.length;
                         // If there are unknown workloads to create
-                        unknownWorkloads = JSON.stringify(payload.createUnknown);
+                        // R34: passed as the array itself. This used to be
+                        // JSON.stringify(payload.createUnknown), which create() immediately
+                        // JSON.parse'd back into a second identical array -- three live copies
+                        // of the bucket (original, string, reparse) at the call boundary, for
+                        // no gain. create() accepts either form.
+                        unknownWorkloads = payload.createUnknown;
                         // Syslog. This is one of three sub-operations within a row; the job
                         // record's unit is the row, reported once at the end of the loop body.
                         this.logger._debug('Creating ' + payload.createUnknown.length +
@@ -455,7 +503,9 @@ IllumioUpdateWorkloads.prototype = {
                         this._updateJobRecord(this.jobSysId, {
                             current_operation: 'Updating managed workloads (' + batchLabel + ')'
                         });
-                        managedWorkloads = JSON.stringify(payload.updateManaged);
+                        // R34: the array itself, not a stringify/re-parse round trip. See the
+                        // note on createUnknown above.
+                        managedWorkloads = payload.updateManaged;
                         var updatedManagedResult = this.update(managedWorkloads);
                         if (!updatedManagedResult) {
                             this.logger._debug("[updateCreate]: Job is cancelled");
@@ -487,7 +537,9 @@ IllumioUpdateWorkloads.prototype = {
                         this._updateJobRecord(this.jobSysId, {
                             current_operation: 'Updating unmanaged workloads (' + batchLabel + ')'
                         });
-                        unmanagedWorkloads = JSON.stringify(payload.updateUnManaged);
+                        // R34: the array itself, not a stringify/re-parse round trip. See the
+                        // note on createUnknown above.
+                        unmanagedWorkloads = payload.updateUnManaged;
                         var updatedUnManagedResult = this.update(unmanagedWorkloads);
                         if (!updatedUnManagedResult) {
                             this.logger._debug("[updateCreate]: Job is cancelled");
@@ -536,7 +588,7 @@ IllumioUpdateWorkloads.prototype = {
                 if (skippedWorkloads == totalWorkloads) {
                     // If no workloads are created/updated on PCE and ServiceNow
                     jobContent = {
-                        job_status: 'failed',
+                        job_status: JOB_STATUS_FAILED,
                         logs: 'Synchronization with PCE failed (All workloads skipped)',
                         job_completed: this.snowDateFormat.format(new Date()) + "",
                     };
@@ -548,7 +600,7 @@ IllumioUpdateWorkloads.prototype = {
                     // differed only in the status they set.
                     var totalSkipped = skippedWorkloads + skippedWl;
                     jobContent = {
-                        job_status: skippedWorkloads != 0 ? 'completed_with_error' :
+                        job_status: skippedWorkloads != 0 ? JOB_STATUS_COMPLETED_WITH_ERROR :
                             (this.partialSucc == 'true' ? 'partial_success' : 'completed'),
                         logs: 'Sync complete: ' + createdUnknownWorkloads + ' for creation, ' +
                             (updatedManagedWorkloads + updatedUnManagedWorkloads) +
@@ -563,7 +615,7 @@ IllumioUpdateWorkloads.prototype = {
             } catch (exception) {
                 this.logger._except("IllumioUpdateWorkloads: Exception while updating or creating workload on PCE : " + exception);
                 jobContent = {
-                    job_status: 'failed',
+                    job_status: JOB_STATUS_FAILED,
                     logs: "Exception while updating or creating workload on PCE : " + exception,
                     job_completed: this.snowDateFormat.format(new Date()) + "",
                 };
@@ -601,7 +653,7 @@ IllumioUpdateWorkloads.prototype = {
                     this.logger._error('[delete] No payload rows found for job ' + this.jobSysId +
                         '. Nothing was sent to the PCE.');
                     this._updateJobRecord(this.jobSysId, {
-                        job_status: 'failed',
+                        job_status: JOB_STATUS_FAILED,
                         logs: 'No deletion payload rows could be found for this job, so nothing ' +
                             'was sent to the PCE. The workloads were prepared but the MID ' +
                             'Server could not read them back.',
@@ -694,7 +746,7 @@ IllumioUpdateWorkloads.prototype = {
                             if (unpairResponse.hasError) {
                                 this.logger._error("IllumioUpdateWorkloads: Failed to unpair VENs (batch " + (ub + 1) + "). Response status code: " + unpairResponse.status);
                                 jobContent = {
-                                    job_status: 'failed',
+                                    job_status: JOB_STATUS_FAILED,
                                     logs: 'Failed to unpair VENs (batch ' + (ub + 1) + '). Response status code: ' + unpairResponse.status,
                                     job_completed: this.snowDateFormat.format(new Date()) + ""
                                 };
@@ -743,7 +795,7 @@ IllumioUpdateWorkloads.prototype = {
                             if (deleteResponse.hasError) {
                                 this.logger._error("IllumioUpdateWorkloads: Failed to delete workloads (batch " + (db + 1) + "). Response status code: " + deleteResponse.status);
                                 jobContent = {
-                                    job_status: 'failed',
+                                    job_status: JOB_STATUS_FAILED,
                                     logs: 'Failed to delete workloads (batch ' + (db + 1) + '). Response status code: ' + deleteResponse.status,
                                     job_completed: this.snowDateFormat.format(new Date()) + ""
                                 };
@@ -777,12 +829,12 @@ IllumioUpdateWorkloads.prototype = {
                 }
 
                 var failedWorkloads = totalWorkloads - deletedWorkloads - unpairedVens;
-                var status = this.partialSucc == 'true' ? 'partial_success' : 'completed';
+                var status = this.partialSucc == 'true' ? JOB_STATUS_PARTIAL_SUCCESS : JOB_STATUS_COMPLETED;
                 if (failedWorkloads > 0) {
-                    status = 'completed_with_error';
+                    status = JOB_STATUS_COMPLETED_WITH_ERROR;
                 }
                 if (deletedWorkloads === 0 && unpairedVens === 0) {
-                    status = 'failed';
+                    status = JOB_STATUS_FAILED;
                 }
 
                 // One line, in the same shape as the instance-side "Summary:" that closes phase 2.
@@ -805,7 +857,7 @@ IllumioUpdateWorkloads.prototype = {
             } catch (exception) {
                 this.logger._except("IllumioUpdateWorkloads: Exception during deletion: " + exception);
                 jobContent = {
-                    job_status: 'failed',
+                    job_status: JOB_STATUS_FAILED,
                     logs: "Exception during deletion: " + exception,
                     job_completed: this.snowDateFormat.format(new Date()) + ""
                 };
@@ -915,10 +967,20 @@ IllumioUpdateWorkloads.prototype = {
         var labelsToUse, hostname, public_ip, created_workloads = 0,
             sys_id;
         var dropped = {};
-        var payloadList = JSON.parse(payload);
+        // R34: accepts the array directly from updateCreate, or a JSON string on the
+        // single-workload `create` operation, which reads its payload straight off the ECC
+        // message parameter and has no array to hand.
+        var payloadList = typeof payload === 'string' ? JSON.parse(payload) : payload;
 
         var payloadBody = [];
-        var snowUpdateQueue = []; // List of payloads for updating snow tables
+        // R34: this array MUST stay -- it is index-aligned with payloadBody, and that alignment
+        // is how a per-item PCE bulk_create response maps back to a workload further down
+        // (snowUpdateQueue_chunked[i][putResponseIndex]). What it carries shrank to `hostname`,
+        // the only property anything reads. The write-back fields it used to hold -- sys_id,
+        // public_ip, labels, interfaces and the payloadPut bag -- are gone: nothing in this repo
+        // has ever read payloadPut, because post-sync discovery rebuilds the ServiceNow tables
+        // rather than the MID writing them back.
+        var snowUpdateQueue = [];
 
         // Filtered list acc to workloads status after PCE REST Call
 
@@ -951,11 +1013,10 @@ IllumioUpdateWorkloads.prototype = {
                 }
             }
 
+            // R34: was { sys_id, hostname, public_ip, payloadPut: {} }. Only `hostname` is ever
+            // read back (the success count and debug line below the bulk_create).
             var snowUpdateObject = {
-                "sys_id": sys_id,
-                "hostname": hostname,
-                "public_ip": public_ip,
-                "payloadPut": {}
+                "hostname": hostname
             };
 
             if (labelsToCreate.length > 0) {
@@ -976,42 +1037,48 @@ IllumioUpdateWorkloads.prototype = {
             if (public_ip != "" && public_ip != undefined) {
                 workloadBody.public_ip = public_ip;
             }
-            snowUpdateObject["payloadPut"]["interfaces"] = JSON.stringify({
-                "umw0": {
-                    "pce_value": "",
-                    "cmdb_value": ""
-                }
-            });
             workloadBody.interfaces = this.interfaces.length > 0 ? this.interfaces : [];
             payloadBody.push(workloadBody);
 
-            // Update snow_update queue
-            snowUpdateObject["labels"] = labelsToUse;
-
-
-            for (var label_index = 0, label_length = labelsToUse.length; label_index < label_length; label_index++) {
-                var label, labelDetails, key, value;
-                label = labelsToUse[label_index];
-                labelDetails = this.getLabelDetails(label);
-                if (labelDetails) {
-                    key = labelDetails.key;
-                    value = labelDetails.value;
-                    snowUpdateObject.payloadPut[key] = value;
-                } else {
-                    this.logger._error('Could not find label having href: ' + label.href);
-                }
-            }
-            var interface_length = this.interfaces.length;
-            var snowInterface = {};
-            for (var interface_index = 0; interface_index < interface_length; interface_index++) {
-                var interface_name = this.interfaces[interface_index].name;
-                var interface_address = this.interfaces[interface_index].address;
-                snowInterface[interface_name] = {};
-                snowInterface[interface_name]['pce_value'] = interface_address;
-                snowInterface[interface_name]['cmdb_value'] = interface_address;
-                snowUpdateObject.payloadPut['interfaces'] = JSON.stringify(snowInterface);
-
-            }
+            // R34: the workload is fully prepared for the PCE at the push above. Everything that
+            // used to follow built `payloadPut`, the write-back bag for the ServiceNow Workload
+            // Field Value table -- and nothing in this repo has ever read it. The MID stopped
+            // writing back when post-sync discovery took over rebuilding those tables; the
+            // builders were left behind. `grep -rn "payloadPut" Illumio/src` was ten writes and
+            // zero reads.
+            //
+            // Removing it also removes the only caller of getLabelDetails, and with it the
+            // ~100k-row PCE Labels Mapping read and the run-long labelDetails map it filled.
+            // Nothing here was needed for the PCE: `labels` is already complete on workloadBody
+            // (the instance resolved it, and createLabels appended any it had to create).
+            //
+            // snowUpdateObject["payloadPut"]["interfaces"] = JSON.stringify({
+            //     "umw0": { "pce_value": "", "cmdb_value": "" }
+            // });
+            // snowUpdateObject["labels"] = labelsToUse;
+            //
+            // for (var label_index = 0, label_length = labelsToUse.length; label_index < label_length; label_index++) {
+            //     var label, labelDetails, key, value;
+            //     label = labelsToUse[label_index];
+            //     labelDetails = this.getLabelDetails(label);
+            //     if (labelDetails) {
+            //         key = labelDetails.key;
+            //         value = labelDetails.value;
+            //         snowUpdateObject.payloadPut[key] = value;
+            //     } else {
+            //         this.logger._error('Could not find label having href: ' + label.href);
+            //     }
+            // }
+            // var interface_length = this.interfaces.length;
+            // var snowInterface = {};
+            // for (var interface_index = 0; interface_index < interface_length; interface_index++) {
+            //     var interface_name = this.interfaces[interface_index].name;
+            //     var interface_address = this.interfaces[interface_index].address;
+            //     snowInterface[interface_name] = {};
+            //     snowInterface[interface_name]['pce_value'] = interface_address;
+            //     snowInterface[interface_name]['cmdb_value'] = interface_address;
+            //     snowUpdateObject.payloadPut['interfaces'] = JSON.stringify(snowInterface);
+            // }
             snowUpdateQueue.push(snowUpdateObject);
         }
         if (payloadBody.length == 0) {
@@ -1111,10 +1178,13 @@ IllumioUpdateWorkloads.prototype = {
         var href, labelsToUse, updated_workloads = 0;
         var index;
         var dropped = {};
-        var payloadList = JSON.parse(payload);
+        // R34: accepts the array directly, or a JSON string. Same reason as create().
+        var payloadList = typeof payload === 'string' ? JSON.parse(payload) : payload;
 
         var payloadBody = [];
-        var snowUpdateQueue = []; // List of payloads for updating snow tables
+        // R34: kept for its index alignment with payloadBody, shrunk to `hostname`. See the
+        // fuller note in create().
+        var snowUpdateQueue = [];
 
         // Prepare the payload with list of workloads to be updated
         for (var payloadIndex = 0; payloadIndex < payloadList.length; payloadIndex++) {
@@ -1151,12 +1221,9 @@ IllumioUpdateWorkloads.prototype = {
                 this._tallyDrop(dropped, 'required label(s) could not be created on the PCE');
                 continue;
             }
-            snowUpdateObject["sys_id"] = sys_id;
-            snowUpdateObject["href"] = href;
-            snowUpdateObject["labels"] = labelsToUse;
+            // R34: was sys_id / href / labels / hostname / payloadPut. Only `hostname` is ever
+            // read back. See the fuller note in create().
             snowUpdateObject["hostname"] = payload.hostname;
-
-            snowUpdateObject["payloadPut"] = {};
 
             workloadBody["href"] = href;
             workloadBody["labels"] = labelsToUse;
@@ -1172,30 +1239,13 @@ IllumioUpdateWorkloads.prototype = {
                         interfaces = payload.interfaces;
                     }
                     workloadBody["interfaces"] = interfaces;
-                    snowUpdateObject["interfaces"] = interfaces;
-                    snowUpdateObject["payloadPut"]["interfaces"] = JSON.stringify({
-                        "umw0": {
-                            "pce_value": "",
-                            "cmdb_value": ""
-                        }
-                    });
-
+                    // R34: the loop survives only to find umw0 for workloadBody.public_ip, which
+                    // the PCE needs. snowUpdateObject["interfaces"] and the snowInterface builder
+                    // that stood here fed payloadPut and are gone -- see the note in create().
                     var interfacesLength = interfaces.length;
-                    var snowInterface = {};
                     for (index = 0; index < interfacesLength; index++) {
-
-
-                        var interface_name = interfaces[index].name;
-                        var interface_address = interfaces[index].address;
-                        snowInterface[interface_name] = {};
-                        snowInterface[interface_name]['pce_value'] = interface_address;
-                        snowInterface[interface_name]['cmdb_value'] = interface_address;
-                        snowUpdateObject.payloadPut['interfaces'] = JSON.stringify(snowInterface);
-
-
                         if (interfaces[index].name == "umw0" && interfaces[index].address != undefined && interfaces[index].address != "") {
                             workloadBody["public_ip"] = interfaces[index].address;
-                            snowUpdateObject.payloadPut["public_ip_address"] = interfaces[index].address;
                         }
                     }
                 }
@@ -1203,28 +1253,36 @@ IllumioUpdateWorkloads.prototype = {
             // Add the object to the list in payload
             payloadBody.push(workloadBody);
 
-            if (payload.updateFields) {
-                var updateFieldsLen = payload.updateFields.length;
-                for (var updateFieldCount = 0; updateFieldCount < updateFieldsLen; updateFieldCount++) {
-                    snowUpdateObject.payloadPut[payload.updateFields[updateFieldCount]] = "";
-                }
-            }
-
-            // Prepare the object to push to snow update queue
-            for (var labelsToUse_i = 0; labelsToUse_i < labelsToUse.length; labelsToUse_i++) {
-
-                var label, labelDetails, key, value;
-                label = labelsToUse[labelsToUse_i];
-                labelDetails = this.getLabelDetails(label);
-                if (labelDetails) {
-                    key = labelDetails.key;
-                    value = labelDetails.value;
-                    if (payload.updateFields.indexOf(key) > -1)
-                        snowUpdateObject.payloadPut[key] = value;
-                } else {
-                    this.logger._error('Could not find label having href: ' + label.href);
-                }
-            }
+            // R34: the workload is fully prepared for the PCE at the push above. Two blocks used
+            // to follow, both building `payloadPut` and both dead -- nothing reads it:
+            //
+            //   1. blanking every mapped dimension, so the write-back would clear a field whose
+            //      label had been removed;
+            //   2. resolving each href back to (key, value) via getLabelDetails to refill them.
+            //
+            // (2) was the only caller of getLabelDetails, and so the only reason the ~100k-row
+            // PCE Labels Mapping table was read into the run-long labelDetails map at all.
+            //
+            // if (payload.updateFields) {
+            //     var updateFieldsLen = payload.updateFields.length;
+            //     for (var updateFieldCount = 0; updateFieldCount < updateFieldsLen; updateFieldCount++) {
+            //         snowUpdateObject.payloadPut[payload.updateFields[updateFieldCount]] = "";
+            //     }
+            // }
+            //
+            // for (var labelsToUse_i = 0; labelsToUse_i < labelsToUse.length; labelsToUse_i++) {
+            //     var label, labelDetails, key, value;
+            //     label = labelsToUse[labelsToUse_i];
+            //     labelDetails = this.getLabelDetails(label);
+            //     if (labelDetails) {
+            //         key = labelDetails.key;
+            //         value = labelDetails.value;
+            //         if (payload.updateFields.indexOf(key) > -1)
+            //             snowUpdateObject.payloadPut[key] = value;
+            //     } else {
+            //         this.logger._error('Could not find label having href: ' + label.href);
+            //     }
+            // }
 
             snowUpdateQueue.push(snowUpdateObject);
         }
@@ -1394,64 +1452,71 @@ IllumioUpdateWorkloads.prototype = {
     },
 
 
-    /**
-     * collect the label details from the ServiceNow
-     * @param {string} href 
-     */
-    collectLabelDetails: function(href) {
-
-        var labelGetUrl =
-            TABLE_API +
-            PCE_LABELS_MAPPING_TABLE +
-            '?illumio_pce_configuration=' +
-            this.configSysId;
-        if (href) {
-            labelGetUrl = labelGetUrl + '&href=' + href;
-        }
-
-        var response = this.snHttpClient.get(labelGetUrl, '');
-        if (response.data.result.length == 0) {
-            this.logger._error('No Results Found for the Query');
-            return false;
-        }
-        var labelMappingRecords = response.data.result;
-
-        for (var i = 0; i < labelMappingRecords.length; i++) {
-            var mappingRecord = labelMappingRecords[i];
-            this.labelDetails[mappingRecord.href] = {
-                key: mappingRecord.key + '',
-                value: mappingRecord.value + '',
-            };
-
-        }
-    },
-
-    /**
-     * Fetch and return the details of the labels from PCE
-     * @param {JSON} label object.
-     * @return {JSON} details of label.
-     */
-    getLabelDetails: function(label) {
-
-        if (this.labelDetails[label.href]) {
-            return this.labelDetails[label.href];
-        }
-        this.collectLabelDetails(label.href);
-        if (this.labelDetails[label.href]) {
-            return this.labelDetails[label.href];
-        }
-
-        var url = "/api/v2" + label.href;
-        var labelDetails = this.pceHttpClient.get(url);
-
-        if (!labelDetails.hasError) {
-            this.labelDetails[label.href] = {};
-            this.labelDetails[label.href]['key'] = labelDetails.data.key;
-            this.labelDetails[label.href]['value'] = labelDetails.data.value;
-            return this.labelDetails[label.href];
-        }
-        return null;
-    },
+    // R34: collectLabelDetails and getLabelDetails are retired together. They resolved a PCE
+    // label href back to its (key, value) so that `payloadPut` could be built -- and payloadPut
+    // was the MID's write-back to the ServiceNow Workload Field Value table, which post-sync
+    // discovery replaced. Nothing reads it, so nothing needs this.
+    //
+    // Why this mattered enough to name: collectLabelDetails was called once from updateCreate
+    // with no href, which made it an unfiltered, unprojected, unlimited GET of the whole PCE
+    // Labels Mapping table for the configuration -- ~100k rows in production. It ran OUTSIDE the
+    // payload-row loop, so no amount of windowing could have bounded it, and the map it filled
+    // (this.labelDetails) was never cleared. Objective 3's only leak and objective 2's item 3
+    // were the same object. Only the Table API's 10,000-row default kept it from landing whole,
+    // which also meant the cache silently missed on an arbitrary 90% of the table and quietly
+    // fell through to the per-href and then per-PCE-call paths below.
+    //
+    // Do NOT reinstate these to "look up a label on the MID". The MID needs no label data from
+    // ServiceNow: the payload arrives with `labels` (hrefs the instance resolved) and
+    // `createlabels` (what must be made), and createLabels appends the hrefs it mints. That is
+    // the complete set the PCE needs, and nothing goes back.
+    //
+    // collectLabelDetails: function(href) {
+    //     var labelGetUrl =
+    //         TABLE_API +
+    //         PCE_LABELS_MAPPING_TABLE +
+    //         '?illumio_pce_configuration=' +
+    //         this.configSysId;
+    //     if (href) {
+    //         labelGetUrl = labelGetUrl + '&href=' + href;
+    //     }
+    //
+    //     var response = this.snHttpClient.get(labelGetUrl, '');
+    //     if (response.data.result.length == 0) {
+    //         this.logger._error('No Results Found for the Query');
+    //         return false;
+    //     }
+    //     var labelMappingRecords = response.data.result;
+    //
+    //     for (var i = 0; i < labelMappingRecords.length; i++) {
+    //         var mappingRecord = labelMappingRecords[i];
+    //         this.labelDetails[mappingRecord.href] = {
+    //             key: mappingRecord.key + '',
+    //             value: mappingRecord.value + '',
+    //         };
+    //     }
+    // },
+    //
+    // getLabelDetails: function(label) {
+    //     if (this.labelDetails[label.href]) {
+    //         return this.labelDetails[label.href];
+    //     }
+    //     this.collectLabelDetails(label.href);
+    //     if (this.labelDetails[label.href]) {
+    //         return this.labelDetails[label.href];
+    //     }
+    //
+    //     var url = "/api/v2" + label.href;
+    //     var labelDetails = this.pceHttpClient.get(url);
+    //
+    //     if (!labelDetails.hasError) {
+    //         this.labelDetails[label.href] = {};
+    //         this.labelDetails[label.href]['key'] = labelDetails.data.key;
+    //         this.labelDetails[label.href]['value'] = labelDetails.data.value;
+    //         return this.labelDetails[label.href];
+    //     }
+    //     return null;
+    // },
     /**
      * Check if job is invalidated or not
      * @return {Boolean} running job was invalidated or not.
@@ -1475,12 +1540,12 @@ IllumioUpdateWorkloads.prototype = {
             return false;
         }
         var jobRecord = response.data.result[0];
-        if (jobRecord.job_status == 'invalidated') {
+        if (jobRecord.job_status == JOB_STATUS_INVALIDATED) {
             this.logger._debug(
                 '[run] Given job is invalidated. Aborting further actions.'
             );
             return true;
-        } else if (jobRecord.job_status == "cancelled") return false;
+        } else if (jobRecord.job_status == JOB_STATUS_CANCELLED) return false;
 
     },
 
@@ -1535,14 +1600,14 @@ IllumioUpdateWorkloads.prototype = {
         // job_status was not in sysparm_fields before this, so all three of these comparisons
         // were against undefined: none of them ever fired, and a stopped job kept being written
         // to for as long as the probe ran.
-        if (status == 'invalidated') {
+        if (status == JOB_STATUS_INVALIDATED) {
             this.logger._debug('[_updateJobRecord] Given job is invalidated. Aborting further actions.');
             return true;
         }
         if (CANCELLED_JOB_STATUSES.indexOf(status) > -1) {
             return true;
         }
-        if (status == 'failed') {
+        if (status == JOB_STATUS_FAILED) {
             this.logger._info('[_updateJobRecord] Given job has already failed. Aborting further actions.');
             return false;
         }
@@ -1584,7 +1649,7 @@ IllumioUpdateWorkloads.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>c4a87d4adb4c6700dc9fabc5ca96191c</sys_id>
-        <sys_mod_count>115</sys_mod_count>
+        <sys_mod_count>116</sys_mod_count>
         <sys_name>IllumioUpdateWorkloads</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -1592,6 +1657,6 @@ IllumioUpdateWorkloads.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_c4a87d4adb4c6700dc9fabc5ca96191c</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:25:24</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:01</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

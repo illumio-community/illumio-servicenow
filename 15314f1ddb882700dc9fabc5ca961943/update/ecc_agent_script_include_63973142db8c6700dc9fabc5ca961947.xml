@@ -15,12 +15,12 @@ IllumioManageAsyncJobs.prototype = {
         // the logger can be given its correlation context before anything logs.
         this.illumio_jobId = probe.getParameter('glide.jms.illumio_scheduled_job_id');
         this.logger = new IllumioLogUtil(this.illumio_jobId, 'IllumioManageAsyncJobs');
-        // Only reached when glide.jms.chunk_size is missing or unparseable. SHOULD MATCH the
-        // default on BATCH_SIZE_STANDARD in IllumioConstants -- a MID script include has no gs
-        // and cannot read a system property, so the number is duplicated by hand, the same way
-        // PAYLOAD_JOB_FIELD is in IllumioMIDConstants. Divergence is not fatal here: it only
-        // changes the chunk size on a run whose ECC message was already malformed.
-        this._fallbackDefaultBatchSize = 1000;
+        // Only reached when glide.jms.chunk_size is missing or unparseable. The number itself
+        // moved to DEFAULT_MID_BATCH_SIZE in IllumioMIDConstants, which carries the note on why
+        // it is duplicated by hand from BATCH_SIZE_STANDARD; IllumioUpdateWorkloads now guards
+        // `glide.jms.batch_size` the same way and reads the same constant, so the two cannot
+        // drift. The property is kept because the warning below reads it.
+        this._fallbackDefaultBatchSize = DEFAULT_MID_BATCH_SIZE;
         var url = String(ms.getConfigParameter("url"));
         if (url.charAt(url.length - 1) == '/') {
             url = url.substring(0, url.length - 1);
@@ -196,7 +196,7 @@ IllumioManageAsyncJobs.prototype = {
     getAsyncJobStatus: function(configSysId) {
 
         try {
-            var jobStatus = 'failed';
+            var jobStatus = ASYNC_JOB_STATUS_FAILED;
             var resultUrl = '';
             var isResultsAvailable = false;
 
@@ -222,7 +222,7 @@ IllumioManageAsyncJobs.prototype = {
 
                 if (!resultUrl) {
                     this.logger._error('IllumioManageAsyncJobs - Job completed but datafiles url is not present in response. Setting job status to failed.');
-                    jobStatus = 'failed';
+                    jobStatus = ASYNC_JOB_STATUS_FAILED;
                 } else {
                     isResultsAvailable = this.getAsyncJobResults(resultUrl, configSysId);
                 }
@@ -231,7 +231,7 @@ IllumioManageAsyncJobs.prototype = {
             // Results are available and stored in mapping tables
             // Set status to 'ready_to_map' to indicate getting CMDB servers and map with PCE data
             if (isResultsAvailable) {
-                jobStatus = 'ready_to_map';
+                jobStatus = ASYNC_JOB_STATUS_READY_TO_MAP;
             }
 
             var payload = {
@@ -412,7 +412,7 @@ IllumioManageAsyncJobs.prototype = {
 
 		if (this.currentJobSysID && this.currentJobSysID !== 'null') {
 			var payload = {
-				job_status: 'failed'
+				job_status: ASYNC_JOB_STATUS_FAILED
 			};
 			this.snHttpClient.put(
 				TABLE_API + ASYNC_JOB_TABLE + "/" + this.currentJobSysID, 
@@ -425,7 +425,7 @@ IllumioManageAsyncJobs.prototype = {
         var illumio_job_id = probe.getParameter('glide.jms.illumio_scheduled_job_id');
         if (illumio_job_id) {
             var payload = {
-                job_status: 'failed',
+                job_status: JOB_STATUS_FAILED,
                 logs: exception,
                 job_completed: this.snowDateFormat.format(new Date()) + ""
             };
@@ -474,7 +474,7 @@ IllumioManageAsyncJobs.prototype = {
             return true;
         }
 
-        if (status == 'failed') {
+        if (status == JOB_STATUS_FAILED) {
             this.logger._info(
                 '[_updateJobRecord] Given job has already failed. Aborting further actions.'
             );
@@ -517,7 +517,7 @@ IllumioManageAsyncJobs.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>63973142db8c6700dc9fabc5ca961947</sys_id>
-        <sys_mod_count>96</sys_mod_count>
+        <sys_mod_count>97</sys_mod_count>
         <sys_name>IllumioManageAsyncJobs</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -525,6 +525,6 @@ IllumioManageAsyncJobs.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_63973142db8c6700dc9fabc5ca961947</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

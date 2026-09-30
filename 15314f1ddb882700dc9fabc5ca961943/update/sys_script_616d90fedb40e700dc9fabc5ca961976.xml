@@ -27,16 +27,20 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+        <script><![CDATA[gs.include("IllumioConstants");
+
+(function executeRule(current, previous /*null when async*/) {
 
 	// trigger event to invalidate the job after certain minutes
 	var seconds;
-	if(current.job_type+''=='connectivity_check'){
-		seconds = gs.getProperty('x_illu2_illumio.invalidate_authentication_job_limit') || 300;
+	if(current.job_type+''==JOB_TYPE_CONNECTIVITY_CHECK){
+		seconds = gs.getProperty(PROP_INVALIDATE_AUTHENTICATION_JOB_LIMIT) ||
+			DEFAULT_INVALIDATE_AUTHENTICATION_JOB_LIMIT;
 		
 	}
 	else{
-		seconds = gs.getProperty('x_illu2_illumio.invalidate_running_job_limit') || 1800;
+		seconds = gs.getProperty(PROP_INVALIDATE_RUNNING_JOB_LIMIT) ||
+			DEFAULT_INVALIDATE_RUNNING_JOB_LIMIT;
 	}
 	var when = new GlideDateTime();
 	when.addSeconds(seconds);
@@ -49,7 +53,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>616d90fedb40e700dc9fabc5ca961976</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>10</sys_mod_count>
         <sys_name>Illumio Invalidate Running Job</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -57,7 +61,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_616d90fedb40e700dc9fabc5ca961976</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2024-04-09 11:22:50</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:04</sys_updated_on>
         <template/>
         <when>after</when>
     </sys_script>

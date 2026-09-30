@@ -38,7 +38,7 @@ var illumioLogger = new IllumioLogger(null, 'Illumio Poll PCE Async Job Status')
 function updateJob(sys_id) {
     var grAsync = new GlideRecordSecure(TABLE_PCE_ASYNC_JOBS);
     if (grAsync.get(sys_id)) {
-        grAsync.job_status = 'completed';
+        grAsync.job_status = ASYNC_JOB_STATUS_COMPLETED;
         if (!grAsync.update()) {
             illumioLogger.error('Error while updating the record from x_illu2_illumio_illumio_pce_async_jobs table having sys id: ' + sys_id);
         }
@@ -56,7 +56,7 @@ function updateJob(sys_id) {
     try {
 
         // If status is ready_to_map, dump data to mapping table from staging table
-        if (current.job_status + "" == 'ready_to_map') {
+        if (current.job_status + "" == ASYNC_JOB_STATUS_READY_TO_MAP) {
             var data = [];
             var configSysId = utils.getConfigurationId(current.illumio_job_id);
             var jobId = current.illumio_job_id + "";
@@ -183,7 +183,7 @@ function updateJob(sys_id) {
         var jobContent = {
             logs: "Exception occurred while creating/getting the status of the async job " + e,
             current_operation: "Fetching PCE data",
-            job_status: "failed",
+            job_status: JOB_STATUS_FAILED,
             job_completed: new GlideDateTime(),
         };
         new IllumioUtils().updateJobRecord(current.illumio_job_id, jobContent);
@@ -198,7 +198,7 @@ function updateJob(sys_id) {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>6db41282dbcc6700dc9fabc5ca96191f</sys_id>
-        <sys_mod_count>91</sys_mod_count>
+        <sys_mod_count>92</sys_mod_count>
         <sys_name>Illumio Poll PCE Async Job Status</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -206,7 +206,7 @@ function updateJob(sys_id) {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_6db41282dbcc6700dc9fabc5ca96191f</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:56:34</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:04</sys_updated_on>
         <template/>
         <when>async</when>
     </sys_script>

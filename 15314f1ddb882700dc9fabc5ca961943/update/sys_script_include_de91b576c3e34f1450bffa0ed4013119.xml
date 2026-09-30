@@ -9,7 +9,8 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioLogger</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var IllumioLogger = Class.create();
+        <script><![CDATA[gs.include("IllumioConstants");
+var IllumioLogger = Class.create();
 
 /**
  * Server-side logger. The instance half of the MID's IllumioLogUtil.
@@ -46,7 +47,7 @@ IllumioLogger.prototype = {
     initialize: function(jobSysId, component) {
         // Read once per logger, not per line. gs.getProperty is a cached lookup, but a property
         // read per log line on a path that logs per record is still a per-record cost.
-        this.debugEnabled = gs.getProperty('x_illu2_illumio.debug_logging', 'false') == 'true';
+        this.debugEnabled = gs.getProperty(PROP_DEBUG_LOGGING, 'false') == 'true';
         this.setContext(jobSysId, component);
     },
 
@@ -194,13 +195,13 @@ IllumioLogger.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-29 10:11:40</sys_created_on>
         <sys_id>de91b576c3e34f1450bffa0ed4013119</sys_id>
-        <sys_mod_count>1</sys_mod_count>
+        <sys_mod_count>2</sys_mod_count>
         <sys_name>IllumioLogger</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_de91b576c3e34f1450bffa0ed4013119</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:01</sys_updated_on>
     </sys_script_include>
 </record_update>

@@ -25,7 +25,13 @@ IllumioAutoSyncWithPCE.prototype = {
 
     initialize: function() {
         this.logger = new IllumioLogger(null, 'IllumioAutoSyncWithPCE');
-        this.sys_ids = [];
+        // R13 (commented, not deleted). Assigned here and read NOWHERE -- not in this file, not
+        // in any other, confirmed by grepping `.sys_ids` across the whole app. It predates R33,
+        // which moved the payload row sys_ids onto the payload table; see payloadRowCount below,
+        // which is what replaced the list this was a sibling of. Dead state on a Script Include
+        // that is reused across a run is worth removing even when it is empty, because the next
+        // reader has to prove it is unused before touching anything near it.
+        // this.sys_ids = [];
         this.managedWorkloadsList = [];
         this.unManagedWorkloadsList = [];
         this.unknownWorkloadsList = [];
@@ -112,7 +118,7 @@ IllumioAutoSyncWithPCE.prototype = {
                         "cannot run. If the configuration exists, check that the running user " +
                         "can read it -- this is a GlideRecordSecure query.",
                     current_operation: "Synchronizing workloads to PCE",
-                    job_status: "failed",
+                    job_status: JOB_STATUS_FAILED,
                     job_completed: new GlideDateTime()
                 });
                 return;
@@ -138,7 +144,10 @@ IllumioAutoSyncWithPCE.prototype = {
             // denominator and the Summary. See IllumioUtils.jobTraceLogger.
             var trace = utils.jobTraceLogger(illumioJobId);
 
+            // setJobContext, or phase 1's per-term and per-drain lines land under `[-]` and fall
+            // out of `message STARTSWITH "[<job sys_id>]"` -- see IllumioSyncFilterUtils.
             var syncFilterResult = new IllumioSyncFilterUtils()
+                .setJobContext(illumioJobId)
                 .getEligibleWorkloadSysIdsByConfig(configSysId, 'inclusion', progress);
 
             if (syncFilterResult.hasFilter) {
@@ -169,7 +178,7 @@ IllumioAutoSyncWithPCE.prototype = {
                 var jobContent = {
                     logs: "Error in MID Server or Critical Label Group Configuration. Please check application logs.",
                     current_operation: "Synchronizing workloads to PCE",
-                    job_status: "failed",
+                    job_status: JOB_STATUS_FAILED,
                     job_completed: new GlideDateTime(),
                 };
                 utils.updateJobRecord(illumioJobId, jobContent);
@@ -263,7 +272,7 @@ IllumioAutoSyncWithPCE.prototype = {
                 illumioScheduledJobsGr.logs +=
                     "\n" + thresholdLimitLog;
 
-                illumioScheduledJobsGr.job_status = "cancelled_threshold_limit_exceeded";
+                illumioScheduledJobsGr.job_status = JOB_STATUS_CANCELLED_THRESHOLD;
                 illumioScheduledJobsGr.job_completed = new GlideDateTime();
                 if (!illumioScheduledJobsGr.update()) {
                     this.logger.error("Error while updating process monitor.");
@@ -317,7 +326,7 @@ IllumioAutoSyncWithPCE.prototype = {
                 illumioScheduledJobsGr.current_operation =
                     "Synchronization with PCE completed";
 
-                illumioScheduledJobsGr.job_status = partial_success == "true" ? "partial_success" : "completed";
+                illumioScheduledJobsGr.job_status = partial_success == "true" ? JOB_STATUS_PARTIAL_SUCCESS : JOB_STATUS_COMPLETED;
                 illumioScheduledJobsGr.job_completed = new GlideDateTime();
                 illumioScheduledJobsGr.update();
                 return;
@@ -358,7 +367,7 @@ IllumioAutoSyncWithPCE.prototype = {
                     illumioScheduledJobsGr.logs += "\nSynchronization with PCE completed" + '\n -------------------------------------\nTotal workloads: ' + skippedWorkloads + '\n Created unknown workloads: ' + this.createdCount + '\n Updated workloads: ' + this.updatedCount + '\n Skipped workloads: ' + skippedWorkloads;
                     illumioScheduledJobsGr.current_operation =
                         "Synchronization with PCE completed";
-                    illumioScheduledJobsGr.job_status = partial_success == "true" ? "partial_success" : "completed";
+                    illumioScheduledJobsGr.job_status = partial_success == "true" ? JOB_STATUS_PARTIAL_SUCCESS : JOB_STATUS_COMPLETED;
                     illumioScheduledJobsGr.job_completed = new GlideDateTime();
                     illumioScheduledJobsGr.update();
                     return;
@@ -415,7 +424,7 @@ IllumioAutoSyncWithPCE.prototype = {
                 // never do, and leaving 10k of them behind would both litter the table and let a
                 // later run pick them up. Same call the threshold cancellation already uses.
                 // ===================================================================
-                if (gs.getProperty('x_illu2_illumio.abort_before_mid_handoff', 'false') == 'true') {
+                if (gs.getProperty(PROP_ABORT_BEFORE_MID_HANDOFF, 'false') == 'true') {
                     var abortedRows = repo.deletePayloadRowsForJob(
                         syncUtils.AUTOSYNC_PAYLOAD_TABLE, illumioJobId);
 
@@ -429,7 +438,7 @@ IllumioAutoSyncWithPCE.prototype = {
                         abortedRows + " payload record(s) withdrawn. Nothing was sent to the PCE." +
                         "\nSet the property to false to let the sync complete normally.";
                     illumioScheduledJobsGr.current_operation = "Aborted before MID Server handoff";
-                    illumioScheduledJobsGr.job_status = "failed";
+                    illumioScheduledJobsGr.job_status = JOB_STATUS_FAILED;
                     illumioScheduledJobsGr.job_completed = new GlideDateTime();
                     illumioScheduledJobsGr.update();
 
@@ -476,7 +485,7 @@ IllumioAutoSyncWithPCE.prototype = {
                         "stack trace. Payload rows for this job, if any were written, were not " +
                         "sent to the MID Server.",
                     current_operation: "Synchronizing workloads to PCE",
-                    job_status: "failed",
+                    job_status: JOB_STATUS_FAILED,
                     job_completed: new GlideDateTime()
                 });
             } catch (finalizeEx) {
@@ -646,14 +655,14 @@ IllumioAutoSyncWithPCE.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-10-01 06:20:45</sys_created_on>
         <sys_id>f14ad3f6db34274033c1a026ca96192e</sys_id>
-        <sys_mod_count>366</sys_mod_count>
+        <sys_mod_count>368</sys_mod_count>
         <sys_name>IllumioAutoSyncWithPCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_f14ad3f6db34274033c1a026ca96192e</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:58:01</sys_updated_on>
+        <sys_updated_on>2026-09-30 12:00:43</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>f14ad3f6db34274033c1a026ca96192e</id>

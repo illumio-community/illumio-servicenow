@@ -110,6 +110,31 @@ var DEFAULT_RETRY_PARAMS = {
     http_retry_interval_increment: 30,
     http_retry_interval_max: 300
 };
+// Job statuses, centralized so the MID and the instance spell them the same way. The instance
+// half is JOB_STATUS_* in IllumioConstants and the two lists must stay identical -- these values
+// ARE the choice list on x_illu2_illumio_illumio_scheduled_jobs.job_status, and a typo on either
+// side writes a status no query matches rather than failing loudly. That is the failure these
+// replace: a status literal is never validated by anything, so a misspelling is invisible until a
+// job silently stops being found by the guard that was supposed to stop it.
+//
+// Declared ABOVE CANCELLED_JOB_STATUSES on purpose -- that array is built from three of them, and
+// `var` hoisting would leave it holding three `undefined`s if this block came after it.
+var JOB_STATUS_RUNNING = "running";
+var JOB_STATUS_COMPLETED = "completed";
+var JOB_STATUS_COMPLETED_WITH_ERROR = "completed_with_error";
+var JOB_STATUS_PARTIAL_SUCCESS = "partial_success";
+var JOB_STATUS_FAILED = "failed";
+var JOB_STATUS_CANCELLED = "cancelled";
+var JOB_STATUS_CANCELLED_THRESHOLD = "cancelled_threshold_limit_exceeded";
+var JOB_STATUS_INVALIDATED = "invalidated";
+// PCE ASYNC JOBS -- a DIFFERENT table (ASYNC_JOB_TABLE) with its OWN job_status choice list. Two
+// values spell the same as the scheduled-job ones today; they are deliberately not aliased,
+// because they are separate lifecycles and a future change to one must not move the other.
+// `ready_to_map` is the proof the split is real -- it is the discovery-to-mapping handoff and
+// exists only here. Mirrors ASYNC_JOB_STATUS_* in IllumioConstants.
+var ASYNC_JOB_STATUS_COMPLETED = "completed";
+var ASYNC_JOB_STATUS_FAILED = "failed";
+var ASYNC_JOB_STATUS_READY_TO_MAP = "ready_to_map";
 // Job statuses that mean "stop, the instance is no longer expecting this work". The MID checks
 // this set rather than the single value 'cancelled', because a job can be stopped three different
 // ways and only one of them writes that value:
@@ -126,10 +151,16 @@ var DEFAULT_RETRY_PARAMS = {
 // 'completed' while the MID was still working is a different bug and should not be swallowed as
 // an orderly cancellation.
 var CANCELLED_JOB_STATUSES = [
-    "cancelled",
-    "cancelled_threshold_limit_exceeded",
-    "invalidated"
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_CANCELLED_THRESHOLD,
+    JOB_STATUS_INVALIDATED
 ];
+// Chunk size used when `glide.jms.batch_size` / `glide.jms.chunk_size` is missing or unparseable.
+// SHOULD MATCH the default on BATCH_SIZE_STANDARD in IllumioConstants -- a MID script include has
+// no `gs` and cannot read a system property, so the number is duplicated by hand, the same way
+// PAYLOAD_JOB_FIELD is. Divergence is not fatal: it only changes the chunk size on a run whose ECC
+// message was already malformed. Read by IllumioManageAsyncJobs and IllumioUpdateWorkloads.
+var DEFAULT_MID_BATCH_SIZE = 1000;
 // Minimum spacing between consecutive calls to the PCE, in milliseconds. Applies to the PCE
 // client only, never to the client that talks back to the instance. This is what actually stops
 // the 429s: backoff is reactive and only runs after the PCE has already refused a call, and a
@@ -145,7 +176,7 @@ var MIN_PCE_CALL_INTERVAL_MS = 100;]]></script>
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>09d16579873dc550d7a34046cebb3592</sys_id>
-        <sys_mod_count>28</sys_mod_count>
+        <sys_mod_count>29</sys_mod_count>
         <sys_name>IllumioMIDConstants</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -153,6 +184,6 @@ var MIN_PCE_CALL_INTERVAL_MS = 100;]]></script>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_09d16579873dc550d7a34046cebb3592</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

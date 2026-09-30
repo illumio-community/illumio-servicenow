@@ -327,7 +327,7 @@ IllumioGeneratePreviewFile.prototype = {
             var removed = this._deletePayloadRows(payloadSysIds);
 
             this._updateJobRecord({
-                job_status: 'completed',
+                job_status: JOB_STATUS_COMPLETED,
                 current_operation: 'Preview completed',
                 job_completed: this.snowDateFormat.format(new Date()) + "",
                 logs: 'Attached "' + this.fileName + '" (' + compressedBytes +
@@ -592,7 +592,7 @@ IllumioGeneratePreviewFile.prototype = {
         }
 
         var status = '' + response.data.result[0].job_status;
-        return status === 'cancelled' || status === 'failed' || status === 'completed';
+        return status === JOB_STATUS_CANCELLED || status === JOB_STATUS_FAILED || status === JOB_STATUS_COMPLETED;
     },
 
     /**
@@ -603,7 +603,7 @@ IllumioGeneratePreviewFile.prototype = {
     _fail: function(message) {
         this.logger._error('[IllumioGeneratePreviewFile] ' + message);
         this._updateJobRecord({
-            job_status: 'failed',
+            job_status: JOB_STATUS_FAILED,
             current_operation: 'Preview failed',
             job_completed: this.snowDateFormat.format(new Date()) + "",
             logs: message
@@ -637,7 +637,7 @@ IllumioGeneratePreviewFile.prototype = {
 
             // A cancelled or failed job is final. Writing to it would replace a status the user
             // has already been shown with one that contradicts it.
-            if (current.job_status == 'cancelled' || current.job_status == 'failed') {
+            if (current.job_status == JOB_STATUS_CANCELLED || current.job_status == JOB_STATUS_FAILED) {
                 this.logger._info('[IllumioGeneratePreviewFile] Job ' + this.jobSysId + ' is ' +
                     current.job_status + '. Not updating it.');
                 return;
@@ -686,7 +686,7 @@ IllumioGeneratePreviewFile.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>f647d7e8c3638bd050bffa0ed40131b4</sys_id>
-        <sys_mod_count>5</sys_mod_count>
+        <sys_mod_count>6</sys_mod_count>
         <sys_name>IllumioGeneratePreviewFile</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -694,6 +694,6 @@ IllumioGeneratePreviewFile.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_f647d7e8c3638bd050bffa0ed40131b4</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:25:21</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

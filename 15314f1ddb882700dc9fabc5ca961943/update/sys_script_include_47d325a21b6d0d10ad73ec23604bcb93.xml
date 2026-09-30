@@ -9,7 +9,57 @@
         <mobile_callable>false</mobile_callable>
         <name>IllumioConstants</name>
         <sandbox_callable>false</sandbox_callable>
-        <script><![CDATA[var MID_SERVER_UP_STATUS = "Up";
+        <script><![CDATA[// ---------------------------------------------------------------------------------------------
+// System property NAMES.
+//
+// NI-3. Every `x_illu2_illumio.*` property name the app reads, as a constant. The names were bare
+// strings at their call sites, which is how `flow_action_timeout` came to be spelled out four
+// times in IllumioUtils with `|| 30000` beside it four times, and how `maximum_ci_records` came to
+// be read with two different default spellings (`|| 25000` in one place, `|| "25000"` then
+// parseInt in the other). A property name is an instance-side contract: the record exists only in
+// the update set, nothing in this repo declares it (see
+// JIRA/discovery-optimization/system-properties.md), and a typo in one of these strings does not
+// throw -- getProperty just returns the default, so the app runs on silently with the fallback
+// value and the property the customer set has no effect.
+//
+// THE DEFAULTS ARE HERE TOO, for the properties whose default was repeated at more than one call
+// site. The call sites keep their existing SHAPE -- `|| DEFAULT_x` or `getProperty(name, default)`
+// as each had it -- because the two forms differ on a property that is set but BLANK, and changing
+// which form a site uses is a behaviour change, not a tidy-up. Only the literals moved.
+//
+// DECLARED FIRST IN THIS FILE on purpose: the getProperty calls further down (IS_CASE_SENSITIVE,
+// the three batch sizes) read these, and `var` hoisting would leave them `undefined` if this block
+// sat below them -- the names would hoist but the assignments would not have run.
+//
+// NOT AVAILABLE ON THE MID SERVER. A MID script include has no `gs` and so cannot read a property
+// at all; values that have to cross the boundary travel in the ECC message as glide.jms.*
+// parameters. The two MID-side warning strings that NAME x_illu2_illumio.batch_size_standard are
+// user-facing prose telling an admin which property to fix, not lookups.
+var PROP_IS_CASE_SENSITIVE = "x_illu2_illumio.is_case_sensitive";
+var PROP_BATCH_SIZE_STANDARD = "x_illu2_illumio.batch_size_standard";
+var PROP_BATCH_SIZE_MEDIUM = "x_illu2_illumio.batch_size_medium";
+var PROP_BATCH_SIZE_SMALL = "x_illu2_illumio.batch_size_small";
+var PROP_MAXIMUM_CI_RECORDS = "x_illu2_illumio.maximum_ci_records";
+var PROP_FLOW_ACTION_TIMEOUT = "x_illu2_illumio.flow_action_timeout";
+var PROP_DEBUG_LOGGING = "x_illu2_illumio.debug_logging";
+var PROP_INCIDENT_CREATION_FOR_SCHEDULED_JOB =
+    "x_illu2_illumio.incident_creation_for_scheduled_job";
+var PROP_INVALIDATE_RUNNING_JOB_LIMIT = "x_illu2_illumio.invalidate_running_job_limit";
+var PROP_INVALIDATE_AUTHENTICATION_JOB_LIMIT =
+    "x_illu2_illumio.invalidate_authentication_job_limit";
+// DIAGNOSTIC ONLY, and a ship blocker until it is removed -- see the Deferred list in
+// JIRA/sync-optimization/points.MD. Read at IllumioAutoSyncWithPCE:413 to abort a sync just before
+// the MID handoff. Named here so it cannot be missed when that cleanup happens.
+var PROP_ABORT_BEFORE_MID_HANDOFF = "x_illu2_illumio.abort_before_mid_handoff";
+
+// Defaults for the properties read at more than one call site, or whose default was previously
+// written out beside the name every time.
+var DEFAULT_FLOW_ACTION_TIMEOUT = 30000;
+var DEFAULT_MAXIMUM_CI_RECORDS = 25000;
+var DEFAULT_INVALIDATE_RUNNING_JOB_LIMIT = 1800;
+var DEFAULT_INVALIDATE_AUTHENTICATION_JOB_LIMIT = 300;
+
+var MID_SERVER_UP_STATUS = "Up";
 var MID_SERVER_VERSION = gs.getProperty('mid.buildstamp', null);
 var MID_SERVER_USER_ROLE = "mid_server";
 var ILLUMIO_MID_SERVER_ROLE = "x_illu2_illumio.mid_server_user";
@@ -28,7 +78,7 @@ var DEFAULT_HTTP_RETRY_INTERVAL_MAX = 300;
 var HTTP_RETRY_COUNT_MAX = 100;
 var HTTP_RETRY_INTERVAL_INCREMENT_MAX = 600;
 var HTTP_RETRY_INTERVAL_MAX = 600;
-var IS_CASE_SENSITIVE = gs.getProperty("x_illu2_illumio.is_case_sensitive", true);
+var IS_CASE_SENSITIVE = gs.getProperty(PROP_IS_CASE_SENSITIVE, true);
 
 // ---------------------------------------------------------------------------------------------
 // Shared batch sizes.
@@ -64,15 +114,15 @@ var IS_CASE_SENSITIVE = gs.getProperty("x_illu2_illumio.is_case_sensitive", true
 // that reason; where a batch size has to cross the boundary it travels in the ECC message as the
 // glide.jms.batch_size / glide.jms.chunk_size parameter, which is what the call sites below send.
 var BATCH_SIZE_STANDARD =
-    parseInt(gs.getProperty("x_illu2_illumio.batch_size_standard", 1000), 10) || 1000;
+    parseInt(gs.getProperty(PROP_BATCH_SIZE_STANDARD, 1000), 10) || 1000;
 var BATCH_SIZE_MEDIUM =
-    parseInt(gs.getProperty("x_illu2_illumio.batch_size_medium", 500), 10) || 500;
+    parseInt(gs.getProperty(PROP_BATCH_SIZE_MEDIUM, 500), 10) || 500;
 // RESERVED -- no call site reads this yet. Every 100 in the server code today is either a CSS
 // width, the 0-100 retry-count validation bound, or HTTP_RETRY_COUNT_MAX above, and none of those
 // is a batch size. Defined so the three-bucket scheme is complete and a future small batch has
 // somewhere to go rather than arriving as another literal.
 var BATCH_SIZE_SMALL =
-    parseInt(gs.getProperty("x_illu2_illumio.batch_size_small", 100), 10) || 100;
+    parseInt(gs.getProperty(PROP_BATCH_SIZE_SMALL, 100), 10) || 100;
 
 // ---------------------------------------------------------------------------------------------
 // Table names.
@@ -146,19 +196,94 @@ var TABLE_PCE_LABELS_MAPPING_STAGE = "x_illu2_illumio_illumio_pce_labels_mapping
 // have no IllumioSyncUtils in hand. IllumioMIDConstants holds the third copy, by necessity.
 var TABLE_AUTOSYNC_PAYLOAD = "x_illu2_illumio_illumio_autosync_payload";
 var TABLE_DELETION_PAYLOAD = "x_illu2_illumio_illumio_deletion_payload";
-var TABLE_PREVIEW_PAYLOAD = "x_illu2_illumio_illumio_preview_payload";]]></script>
+var TABLE_PREVIEW_PAYLOAD = "x_illu2_illumio_illumio_preview_payload";
+// ---------------------------------------------------------------------------------------------
+// JOB STATUSES AND JOB TYPES
+//
+// These ARE the choice lists on the two job tables. A status or type literal is never validated
+// by anything -- the platform will happily store a misspelled choice value -- so a typo is
+// invisible until a query silently stops matching. `job_status = 'cancelld'` does not throw; it
+// writes a job that no guard will ever stop and no report will ever find. That is the failure
+// these names exist to make impossible.
+//
+// TWO SEPARATE FAMILIES, DELIBERATELY NOT MERGED. `JOB_STATUS_*` is the SCHEDULED JOBS table
+// (TABLE_SCHEDULED_JOBS); `ASYNC_JOB_STATUS_*` is the PCE ASYNC JOBS table
+// (TABLE_PCE_ASYNC_JOBS). Two of the values happen to spell the same today -- "completed" and
+// "failed" -- and it would be tidier to alias one to the other. Do not. They are different choice
+// lists on different tables with different lifecycles, and aliasing them means a future change to
+// one silently changes the other. `ready_to_map` shows the split is real: it is the
+// discovery-to-mapping handoff and exists only on the async table.
+//
+// THE MID HAS ITS OWN COPY. `JOB_STATUS_*` is duplicated in IllumioMIDConstants and the two must
+// stay identical -- a MID script include runs in the MID Server's process and cannot see a scoped
+// Script Include. Change one, change the other. The MID's CANCELLED_JOB_STATUSES is built from
+// its copy, and is the same set as JOB_DEAD_STATUSES below minus the statuses that mean the job
+// finished on its own.
+//
+// THREE SITES CANNOT USE THESE, and are left as literals on purpose: the client halves of the
+// `Sync to PCE`, `Sync Server to PCE` and `Sync selected servers with PCE` UI Actions pass
+// "running" and "data sync" as GlideAjax parameters. Those run in the BROWSER, where `gs.include`
+// does not exist and a scoped Script Include is unreachable. See the note in
+// IllumioManageJobs.createScheduledJob, which is what receives them.
+// ---------------------------------------------------------------------------------------------
+
+// Scheduled jobs -- x_illu2_illumio_illumio_scheduled_jobs.job_status
+var JOB_STATUS_RUNNING = "running";
+var JOB_STATUS_COMPLETED = "completed";
+var JOB_STATUS_COMPLETED_WITH_ERROR = "completed_with_error";
+var JOB_STATUS_PARTIAL_SUCCESS = "partial_success";
+var JOB_STATUS_FAILED = "failed";
+var JOB_STATUS_CANCELLED = "cancelled";
+var JOB_STATUS_CANCELLED_THRESHOLD = "cancelled_threshold_limit_exceeded";
+var JOB_STATUS_INVALIDATED = "invalidated";
+
+// Statuses that mean "this job will do no further work". Used by updateJobRecord to decide
+// whether a log line is still worth writing, and it is the DEAD list rather than the live one for
+// the same reason IllumioSyncRepoUtils.PAYLOAD_JOB_DEAD_STATUSES is: a status missing from here
+// is treated as still live, so the write goes ahead. Wrong in that direction costs a wasted
+// update on a finished job; wrong in the other direction drops the log line that would have
+// explained what happened.
+//
+// NOT the same list as PAYLOAD_JOB_DEAD_STATUSES, which also includes the statuses that mean the
+// job finished normally. A completed job should still be able to have its closing summary
+// written; a cancelled one should not.
+var JOB_DEAD_STATUSES = [
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_CANCELLED_THRESHOLD,
+    JOB_STATUS_INVALIDATED,
+    JOB_STATUS_FAILED
+];
+
+// PCE async jobs -- x_illu2_illumio_illumio_pce_async_jobs.job_status. Separate family; see above.
+var ASYNC_JOB_STATUS_COMPLETED = "completed";
+var ASYNC_JOB_STATUS_FAILED = "failed";
+var ASYNC_JOB_STATUS_READY_TO_MAP = "ready_to_map";
+
+// Job types -- x_illu2_illumio_illumio_scheduled_jobs.job_type.
+//
+// Note the inconsistency preserved here rather than fixed: "data collection" and "data sync" have
+// a SPACE, "deletion", "preview" and "connectivity_check" do not, and "connectivity_check" uses an
+// underscore. These are stored choice values on existing records. Normalising them is a data
+// migration, not an edit -- every job record ever created carries the old value, and every query
+// and report written against them would have to change on the same beat. Left alone on purpose.
+var JOB_TYPE_DATA_COLLECTION = "data collection";
+var JOB_TYPE_DATA_SYNC = "data sync";
+var JOB_TYPE_DELETION = "deletion";
+var JOB_TYPE_PREVIEW = "preview";
+var JOB_TYPE_CONNECTIVITY_CHECK = "connectivity_check";
+]]></script>
         <sys_class_name>sys_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2022-02-11 10:58:35</sys_created_on>
         <sys_id>47d325a21b6d0d10ad73ec23604bcb93</sys_id>
-        <sys_mod_count>11</sys_mod_count>
+        <sys_mod_count>12</sys_mod_count>
         <sys_name>IllumioConstants</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_47d325a21b6d0d10ad73ec23604bcb93</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-24 05:43:11</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>47d325a21b6d0d10ad73ec23604bcb93</id>

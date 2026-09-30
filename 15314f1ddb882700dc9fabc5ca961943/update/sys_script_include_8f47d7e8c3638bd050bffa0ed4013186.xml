@@ -403,7 +403,8 @@ IllumioPreviewUtils.prototype = {
             }
 
             var maxRecords = parseInt(
-                gs.getProperty("x_illu2_illumio.maximum_ci_records") || "25000", 10) || 25000;
+                gs.getProperty(PROP_MAXIMUM_CI_RECORDS) || DEFAULT_MAXIMUM_CI_RECORDS, 10) ||
+                DEFAULT_MAXIMUM_CI_RECORDS;
             var modeLabel = filterMode === "inclusion" ? "Inclusion" : "Exclusion (Legacy)";
 
             this.utils.updateJobRecord(illumioJobId, {
@@ -575,9 +576,18 @@ IllumioPreviewUtils.prototype = {
      * @returns {Object} { success, sysIds, message, emptyMessage }
      */
     _evaluate: function(context, illumioJobId) {
-        // The progress sink is what turns this from a silent multi-minute stretch into a running
-        // commentary -- a line per label term, every 10,000 CMDB CIs, and one per filter.
+        // The progress sink carries the two lines phase 1 puts on the JOB RECORD: the filter
+        // count and the closing summary. The running commentary between them -- per label term,
+        // per drain heartbeat, per filter total -- is syslog only (R35), and reaching it means
+        // giving the evaluator the job id so its lines carry the `[<job>]` prefix the trail is
+        // retrieved by. Without this call they are written under `[-]` and cannot be pulled back
+        // with the run, which is why a deletion preview looked like three silent minutes.
+        //
+        // This docblock used to promise "a line per label term, every 10,000 CMDB CIs" from the
+        // progress sink. That stopped being true when R35 moved those lines to _trace; they were
+        // still emitted, just not here and not correlated.
         var progress = this.utils.jobProgressLogger(illumioJobId);
+        this.filterUtils.setJobContext(illumioJobId);
 
         if (context.type === this.TYPE_FILTER_EXPORT) {
             // skipActiveCheck: a preview is most useful on a filter that is not switched on yet,
@@ -998,7 +1008,7 @@ IllumioPreviewUtils.prototype = {
         this.utils.updateJobRecord(illumioJobId, {
             logs: message,
             current_operation: "Preview completed",
-            job_status: "completed",
+            job_status: JOB_STATUS_COMPLETED,
             job_completed: new GlideDateTime()
         });
     },
@@ -1014,7 +1024,7 @@ IllumioPreviewUtils.prototype = {
         this.utils.updateJobRecord(illumioJobId, {
             logs: message,
             current_operation: "Preview failed",
-            job_status: "failed",
+            job_status: JOB_STATUS_FAILED,
             job_completed: new GlideDateTime()
         });
     },
@@ -1026,13 +1036,13 @@ IllumioPreviewUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-22 17:49:40</sys_created_on>
         <sys_id>8f47d7e8c3638bd050bffa0ed4013186</sys_id>
-        <sys_mod_count>8</sys_mod_count>
+        <sys_mod_count>10</sys_mod_count>
         <sys_name>IllumioPreviewUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_8f47d7e8c3638bd050bffa0ed4013186</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
+        <sys_updated_on>2026-09-30 12:00:44</sys_updated_on>
     </sys_script_include>
 </record_update>

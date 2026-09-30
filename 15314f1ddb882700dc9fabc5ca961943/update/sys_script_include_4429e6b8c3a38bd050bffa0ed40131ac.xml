@@ -49,12 +49,55 @@ IllumioSyncFilterUtils.prototype = {
         this.repo = repo || new IllumioSyncRepoUtils(this.syncUtils);
     },
 
+    /**
+     * Point this evaluator's syslog lines at a job. Chainable onto the constructor.
+     *
+     * WHY THIS EXISTS, and it is the reason phase 1 looked silent. The constructor builds its
+     * logger as `new IllumioLogger(null, ...)`, so every line _trace writes carries the `[-]`
+     * prefix IllumioLogger uses for "no job". The correlated trail for a run is pulled back with
+     *
+     *     message STARTSWITH "[<job sys_id>]"
+     *
+     * -- the filter IllumioUtils.jobTraceLogger documents and the only practical way to read one
+     * run's lines out of syslog_app_scope. `[-]` does not match it. So every per-term line, every
+     * drain heartbeat and every filter total this class writes WAS being written, and none of it
+     * could be retrieved with the run it belonged to. Phase 1 was the one stretch whose
+     * commentary fell outside the trail, which reads exactly like a phase that logs nothing.
+     *
+     * The _progress lines were unaffected, which is what made this hard to see: they reach the
+     * job record through the caller's own job-scoped sink, so the two lines bracketing the
+     * silence showed up while everything between them did not.
+     *
+     * The repo's logger is set here too. This class constructs it, so there is nowhere else that
+     * can, and its queries are inside the same stretch.
+     *
+     * Nil is allowed and is not a mistake: GetLabelGroupsAjax and the save-time filter check run
+     * with no job at all, and their lines correctly stay under `[-]`.
+     *
+     * @param {String} jobSysId sys_id of the scheduled job this evaluation belongs to
+     * @returns {Object} this
+     */
+    setJobContext: function(jobSysId) {
+        this.logger.setContext(jobSysId);
+
+        if (this.repo && this.repo.logger) {
+            this.repo.logger.setContext(jobSysId);
+        }
+
+        return this;
+    },
+
     // Workloads per query when reading rows back out for the CSV. Same value as everywhere else
     // that builds an IN clause; see IllumioSyncUtils.CI_CHUNK_SIZE.
     CSV_BATCH_SIZE: 500,
 
     CSV_HEADERS: ['sys_id', 'hostname', 'source_table', 'known_to_pce', 'conflicts',
         'pce_workload_href', 'servicenow_cmdb_identifier', 'labels'],
+
+    // Wall-clock gap after which a drain loop says it is still alive. Short enough that nobody
+    // watching concludes the job is wedged, long enough that a drain finishing inside it stays
+    // silent and adds nothing to syslog.
+    HEARTBEAT_INTERVAL_MS: 15000,
 
     /**
      * Report progress to whoever is watching, if anyone is.
@@ -102,6 +145,51 @@ IllumioSyncFilterUtils.prototype = {
     },
 
     /**
+     * A throttled "still running" line for a drain loop. Syslog only.
+     *
+     * WHY WALL-CLOCK AND NOT A BATCH COUNTER. _matchCmdbCondition already had a heartbeat --
+     * one line every 20 batches -- and a real deletion preview still ran 193 seconds with
+     * nothing on it. The assumption behind a batch counter is that batches are cheap and cost
+     * about the same, so N of them is a predictable interval. They are not: each batch is a
+     * query whose cost depends on the table, its indexes and how far the extent narrows it, and
+     * at ~5s a batch "every 20" is one line every 100 seconds. Worse, it fails in the wrong
+     * direction -- the slower the batches, the longer the silence, when slow is exactly when
+     * somebody is watching. Wall-clock inverts that: the interval is the interval whatever a
+     * batch costs.
+     *
+     * The other two drains (shape B's extent scan and shape C's label resolve) had no heartbeat
+     * of any kind and were silent for their whole duration however long that was.
+     *
+     * Nothing here reaches the job record. These lines answer "is it alive, and which batch is
+     * it on", which is diagnostic and per-batch -- the caller already puts one line carrying the
+     * same totals on the record when the drain ends.
+     *
+     * @param {String} label Filter label, so the line names what is running
+     * @param {String} noun What `processed` counts -- 'CI(s)', 'workload(s)', 'label match(es)'
+     * @returns {Function} tick(processed, added), called once per batch
+     */
+    _makeHeartbeat: function(label, noun) {
+        var self = this;
+        var startedAt = new Date().getTime();
+        var lastAt = startedAt;
+
+        return function(processed, added) {
+            var now = new Date().getTime();
+
+            // Returns before building any string, so a drain that never trips the interval pays
+            // one subtraction per batch and concatenates nothing.
+            if (now - lastAt < self.HEARTBEAT_INTERVAL_MS) {
+                return;
+            }
+            lastAt = now;
+
+            self._trace(label + ': still running -- ' + processed + ' ' + noun +
+                ' processed, ' + added + ' workload(s) matched so far' +
+                self.syncUtils.since(startedAt));
+        };
+    },
+
+    /**
      * Eligible workload sys_ids for a PCE Configuration, across all its Sync Filters of one type.
      *
      * Multiple active filters are OR'd and globally deduplicated: a workload matched by two of
@@ -131,18 +219,21 @@ IllumioSyncFilterUtils.prototype = {
             // -- sync falls back to every candidate workload, deletion refuses -- and this line
             // used to assert the sync reading on both, so a deletion that stopped here said "all
             // workloads are eligible for sync" immediately before deleting nothing.
-            this._progress(onProgress, 'Active ' + type + ' Sync Filter(s) found: 0.');
+            this._progress(onProgress, 'Found active ' + type + ' Sync Filters: 0');
             return result;
         }
 
         result.hasFilter = true;
 
+        // JOB RECORD LINE 1 OF 2. R35 fixed the job record's phase 1 output at exactly two lines:
+        // this one and the summary evaluateFilters closes with. Everything else phase 1 emits is
+        // syslog. Both are flat in filter count and in workload count.
+        //
         // The type is named here and not in evaluateFilters, which is deliberately scope-blind --
         // it is handed a list and does not know or care whether it came from a configuration, a
         // type, or a single record. Someone reading a deletion job's log needs to see the word
         // "deletion" before the work starts.
-        this._progress(onProgress, 'Active ' + type + ' Sync Filter(s) found: ' + filters.length +
-            '.');
+        this._progress(onProgress, 'Found active ' + type + ' Sync Filters: ' + filters.length);
 
         result.sysIds = this.evaluateFilters(filters, configSysId, onProgress).sysIds;
 
@@ -209,11 +300,22 @@ IllumioSyncFilterUtils.prototype = {
                 filters[index], allSysIds, onProgress,
                 (index + 1) + '/' + filters.length);
 
-            // A filter that cannot be parsed contributes nothing rather than everything. Failing
-            // open here would sync workloads nobody asked for. Reported as well as logged,
-            // because the single-filter preview shows the author this message.
+            // A filter that cannot be evaluated contributes nothing rather than everything, and
+            // the run CONTINUES to the next filter. Failing open here would sync workloads nobody
+            // asked for; aborting the run would let one half-authored filter stop a sync that the
+            // other filters could complete. Skipping is the only option that is both safe and
+            // survivable.
+            //
+            // R35: `_trace`, not `_progress` -- syslog only, deliberately off the scheduled job
+            // record. The reason a filter was skipped is diagnostic detail about one record, not
+            // a statement of what the run decided, and it is addressed to whoever fixes the
+            // filter rather than to whoever is watching the job.
+            //
+            // This does NOT hide it from the author: `outcome.skipped` carries the name and the
+            // errors, and getWorkloadsBySyncFilter turns them into the message the single-filter
+            // preview displays. That path was always the return value, never this log line.
             if (evaluated.errors.length > 0) {
-                this._progress(onProgress, 'Skipping Sync Filter "' + filters[index].name +
+                this._trace('Skipping Sync Filter "' + filters[index].name +
                     '": ' + evaluated.errors.join(' '));
                 outcome.skipped.push({
                     name: filters[index].name,
@@ -232,7 +334,7 @@ IllumioSyncFilterUtils.prototype = {
             if (population === -1) {
                 var countStartedAt = new Date().getTime();
                 population = this.repo.countEligibleWorkloads(configSysId);
-                this._progress(onProgress, 'Total Candidate Workloads - ' + population +
+                this._trace('Total Candidate Workloads - ' + population +
                     this.syncUtils.since(countStartedAt));
             }
 
@@ -240,7 +342,7 @@ IllumioSyncFilterUtils.prototype = {
             // of every matched sys_id once per filter and throw each one away -- a second
             // full-size allocation per iteration, for a comparison two integers answer.
             if (population > 0 && distinct >= population) {
-                this._progress(onProgress, 'Saturated: all ' + population +
+                this._trace('Saturated: all ' + population +
                     ' candidate workload(s) are matched. Skipping the remaining ' +
                     (filters.length - index - 1) + ' Sync Filter(s) -- they are ORed with what ' +
                     'is already matched and cannot add anything.');
@@ -257,7 +359,24 @@ IllumioSyncFilterUtils.prototype = {
             this._trace(considered + ' of ' + filters.length + ' filter(s) evaluated.');
         }
 
-        this._progress(onProgress, 'Eligible Workloads: ' + outcome.sysIds.length +
+        this._trace('Eligible Workloads: ' + outcome.sysIds.length +
+            this.syncUtils.since(phaseStartedAt));
+
+        // JOB RECORD LINE 2 OF 2. The whole of phase 1 in one line, and the only one this method
+        // puts on the record.
+        //
+        // "Eligible" is filters that evaluated and contributed; "Skipped" is filters refused by
+        // the shape rules. On a saturated run the two do not sum to the filter count -- the
+        // remainder was never evaluated because it could not have added anything, and the syslog
+        // line above says so. Not restated here: this line exists to be the same length whatever
+        // the run did.
+        //
+        // The match count is free. outcome.sysIds was already materialised on the line above it
+        // for the return value, so this reads a length rather than doing any counting of its own.
+        this._progress(onProgress, 'Evaluated Sync Filters: ' +
+            (considered - outcome.skipped.length) + ' Eligible. ' +
+            outcome.skipped.length + ' Skipped. ' +
+            outcome.sysIds.length + ' matches' +
             this.syncUtils.since(phaseStartedAt));
 
         return outcome;
@@ -381,7 +500,7 @@ IllumioSyncFilterUtils.prototype = {
         // same number is the redundancy this restructure exists to remove.
         var lastReported = null;
 
-        this._progress(onProgress, 'Evaluating Sync Filter ' + (position || '1/1') + ' - ' +
+        this._trace('Evaluating Sync Filter ' + (position || '1/1') + ' - ' +
             filter.name);
 
         var hasLabelCondition = !this.syncUtils.isConditionEmpty(filter.label_condition);
@@ -392,36 +511,26 @@ IllumioSyncFilterUtils.prototype = {
         var extentList = this.syncUtils.splitExtent(filter.extent);
         var hasExtent = extentList.length > 0;
 
-        // SHAPE A. Empty means all three empty, not just the two conditions. The extent is a
-        // predicate over the workload like any other -- "every unmanaged workload in this
-        // configuration" is a complete, deliberate filter.
-        //
-        // With all three empty it is still SKIP rather than match-everything: a filter with
-        // nothing set at all is far more likely to be half-finished than a deliberate
-        // "sync every workload".
-        if (!hasLabelCondition && !hasCmdbCondition && !hasExtent) {
-            this._progress(onProgress, 'No conditions and no extent set. Matching nothing.');
-            return evaluated;
-        }
-
-        // Run-time enforcement of the deletion extent rules, which until now lived ONLY in the
-        // `Validate Sync Filter Extent` business rule. That rule fires on save, so a filter
-        // arriving by update set, import or setWorkflow(false) never meets it -- and an import is
-        // exactly how a filter reaches a production instance.
+        // Run-time enforcement of the rules that until now lived ONLY in the
+        // `Validate Sync Filter Extent` / `Validate Sync Filter Conditions` business rules. Those
+        // fire on save, so a filter arriving by update set, import or setWorkflow(false) never
+        // meets them -- and an import is exactly how a filter reaches a production instance.
         //
         // What the gap costs: shapes C and D apply the extent by ORing conditions onto a query
         // (IllumioSyncRepoUtils._addExtentConditions), so an empty extentList adds NO conditions
         // at all and the filter silently widens to every non-duplicate workload its conditions
         // matched -- `unknown` ones included. On a deletion run that is workloads nobody selected.
-        // Shape A is unaffected and is deliberately checked above this: all-empty already matches
-        // nothing, so it stays a quiet skip rather than becoming a reported error. Shape B cannot
-        // reach here with an empty extent -- with no conditions it would have been shape A.
         //
         // Errors rather than a throw, unlike the threshold limits. An unresolvable limit cancels
-        // the job because it is a property of the whole run; a misconfigured extent is a property
+        // the job because it is a property of the whole run; a misconfigured filter is a property
         // of ONE filter, and this method already skips a filter it cannot parse (the CMDB
         // condition with no table, below). Skipping contributes nothing, which is the fail-closed
         // direction, and evaluateFilters reports it by name.
+        //
+        // R35: this block moved ABOVE the shape A check, which it used to sit below. The old order
+        // meant an all-empty DELETION filter was caught by shape A and passed over quietly, when
+        // the deletion message below says exactly what is wrong with it. Checking type first gives
+        // each type its own message and leaves shape A as purely the inclusion case.
         if (filter.type === 'deletion') {
             if (!hasExtent) {
                 evaluated.errors.push('Deletion Sync Filters must have at least one Extent value ' +
@@ -446,6 +555,30 @@ IllumioSyncFilterUtils.prototype = {
             }
         }
 
+        // SHAPE A. Empty means all three empty, not just the two conditions. The extent is a
+        // predicate over the workload like any other -- "every unmanaged workload in this
+        // configuration" is a complete, deliberate filter.
+        //
+        // It still contributes NOTHING, exactly as before: a filter with nothing set at all is far
+        // more likely to be half-finished than a deliberate "sync every workload", and matching
+        // everything is the direction that cannot be undone.
+        //
+        // R35: what changed is that it is now REPORTED instead of passed over in a progress line.
+        // This was the one invalid shape that failed quietly, which made "Eligible Workloads: 0"
+        // indistinguishable from a filter nobody finished authoring. evaluateFilters names it in
+        // `skipped`; getWorkloadsBySyncFilter surfaces the message, so the preview an author runs
+        // now says why it matched nothing rather than reporting a confident zero.
+        //
+        // Deletion filters cannot reach here -- the block above returns on !hasExtent -- so this
+        // is the inclusion rule: at least one of Extent, CMDB Condition or Label Condition.
+        if (!hasLabelCondition && !hasCmdbCondition && !hasExtent) {
+            evaluated.errors.push('Inclusion Sync Filters must have at least one of Extent, ' +
+                'CMDB Condition or Label Condition set. This one has none of the three, so there ' +
+                'is nothing to match on. Set a condition, or set the Extent to select every ' +
+                'workload in a given state.');
+            return evaluated;
+        }
+
         // Syslog only now. The job record gets the three condition lines below, which say the
         // same thing with counts attached; this one said it before the work so that a job sitting
         // at "Evaluating filter" showed what it was sitting on, and syslog still serves that.
@@ -459,16 +592,29 @@ IllumioSyncFilterUtils.prototype = {
         if (!hasLabelCondition && !hasCmdbCondition) {
             var extentStartedAt = new Date().getTime();
 
+            // This drain used to emit nothing at all between the "evaluating" line above and the
+            // "Extent: Found" line below. An extent-only DELETION filter is the shape most likely
+            // to sit here -- the extent is mandatory on deletion filters, so a filter with no
+            // conditions lands in shape B by construction -- and that is the preview that ran 193
+            // seconds in silence.
+            var extentBeat = this._makeHeartbeat(label, 'workload(s)');
+            var extentWalked = 0;
+
             var scanned = this.repo.eachWorkloadSysIdInExtent(
                 filter.pce_configuration, extentList, filter.source_table,
                 this.syncUtils.WORKLOAD_CHUNK_SIZE,
                 function(batch) {
                     evaluated.added += self.syncUtils.unionInto(allSysIds, batch);
+
+                    // Counted here rather than read back from `scanned`, which is not assigned
+                    // until the drain returns.
+                    extentWalked += batch.length;
+                    extentBeat(extentWalked, evaluated.added);
                 });
 
-            this._progress(onProgress, 'Label Condition: Not set');
-            this._progress(onProgress, 'CMDB Condition: Not set');
-            this._progress(onProgress, 'Extent: Found (Matched ' + evaluated.added +
+            this._trace('Label Condition: Not set');
+            this._trace('CMDB Condition: Not set');
+            this._trace('Extent: Found (Matched ' + evaluated.added +
                 ' workload(s)' + this._newOf(scanned, evaluated.added) + ')' +
                 this.syncUtils.since(extentStartedAt));
 
@@ -496,10 +642,10 @@ IllumioSyncFilterUtils.prototype = {
             // the post-narrowing number here instead would hide the gap between "the condition
             // selected this many" and "this many survived", which is usually the interesting part.
             lastReported = labelMatches.distinct;
-            this._progress(onProgress, 'Label Condition: Found (Matched ' + lastReported +
+            this._trace('Label Condition: Found (Matched ' + lastReported +
                 ' workload(s))' + this.syncUtils.since(labelStartedAt));
         } else {
-            this._progress(onProgress, 'Label Condition: Not set');
+            this._trace('Label Condition: Not set');
         }
 
         // SHAPE D. The label set stays alive as the guard for the whole drain, which is the
@@ -515,7 +661,7 @@ IllumioSyncFilterUtils.prototype = {
 
             evaluated.added = drained.added;
 
-            this._progress(onProgress, 'CMDB Condition: Found (Matched ' + drained.added +
+            this._trace('CMDB Condition: Found (Matched ' + drained.added +
                 ' workload(s) from ' + drained.ciTotal + ' CI(s) in ' + filter.source_table +
                 ')' + this.syncUtils.since(cmdbStartedAt));
 
@@ -524,7 +670,7 @@ IllumioSyncFilterUtils.prototype = {
             // line above. What is unavailable is a SEPARATE count for it, because there is no
             // point in the shape where the extent has been applied and the CMDB condition has
             // not. Saying "skipping extent" here would describe a run that did not happen.
-            this._progress(onProgress, hasExtent ?
+            this._trace(hasExtent ?
                 'Extent: Applied within the CMDB query (included in the count above)' :
                 'Extent: Not set');
 
@@ -537,7 +683,7 @@ IllumioSyncFilterUtils.prototype = {
         // workload table, so checking it there would be a join on every row of every term -- so
         // the label set has to come back through the workload table once. That pass carries the
         // extent too.
-        this._progress(onProgress, 'CMDB Condition: Not set');
+        this._trace('CMDB Condition: Not set');
 
         var resolveStartedAt = new Date().getTime();
         var resolved = this._resolveLabelMatches(extentList, labelMatches, allSysIds, label);
@@ -554,23 +700,26 @@ IllumioSyncFilterUtils.prototype = {
             // counting it as dropped here would read as the extent rejecting workloads it never
             // saw.
             lastReported = resolved.added;
-            this._progress(onProgress, 'Extent: Found (Matched ' + resolved.added +
+            this._trace('Extent: Found (Matched ' + resolved.added +
                 ' workload(s) of ' + resolved.considered + ' checked)' +
                 this.syncUtils.since(resolveStartedAt));
         } else {
             // Not "Not set and nothing measured": the resolve pass still ran, for
             // `duplicate=false`, and its cost belongs on a line. This is the only one there is.
-            this._progress(onProgress, 'Extent: Not set' +
+            this._trace('Extent: Not set' +
                 this.syncUtils.since(resolveStartedAt));
         }
 
-        this._reportFilterTotal(onProgress, evaluated.added, lastReported);
+        this._reportFilterTotal(evaluated.added, lastReported);
         return evaluated;
     },
 
     /**
      * Close a filter out with its contribution, but only when that number is not already the last
-     * one on the job record.
+     * one emitted.
+     *
+     * R35: syslog, like every other per-filter line. The `onProgress` parameter went with the
+     * move -- nothing in this function reaches the job record any more.
      *
      * Shapes B, C-with-extent and D all end on a condition line that carries the filter's total,
      * and repeating it is exactly the duplication this restructure removes. Shape C without an
@@ -578,16 +727,15 @@ IllumioSyncFilterUtils.prototype = {
      * `duplicate` and the negative guard narrow it. There the closing line is the only place the
      * filter's real contribution appears.
      *
-     * @param {Function} onProgress
      * @param {Number} added The filter's contribution to the run
      * @param {Number|null} lastReported Count on the most recent condition line
      */
-    _reportFilterTotal: function(onProgress, added, lastReported) {
+    _reportFilterTotal: function(added, lastReported) {
         if (lastReported === added) {
             return;
         }
 
-        this._progress(onProgress, 'Matched: ' + added + ' workload(s) added to this run');
+        this._trace('Matched: ' + added + ' workload(s) added to this run');
     },
 
     /**
@@ -682,10 +830,23 @@ IllumioSyncFilterUtils.prototype = {
             this._trace(label + ': matching label term ' + (termIndex + 1) +
                 ' of ' + parsed.terms.length + '.');
 
-            distinct += this.syncUtils.unionInto(
+            // A term is ONE GlideAggregate, so there is no inner loop to put a heartbeat in and
+            // no way to say anything while it runs. Closing each term with its own elapsed is the
+            // most that can be offered: a stall then sits between term N's opening line and its
+            // closing one, which names the term to look at. Without it the only signal was the
+            // opening line of the NEXT term, and the last term had none at all.
+            var termStartedAt = new Date().getTime();
+
+            var termAdded = this.syncUtils.unionInto(
                 workloadSysIdsMatchingLabelConditions,
                 this.repo.aggregateLabelTermWorkloads(filter.pce_configuration,
                     filter.class_mapping, parsed.terms[termIndex]));
+
+            distinct += termAdded;
+
+            this._trace(label + ': label term ' + (termIndex + 1) + ' of ' +
+                parsed.terms.length + ' matched ' + termAdded + ' new workload(s)' +
+                this.syncUtils.since(termStartedAt));
         }
 
         this._trace(label + ': label condition matched ' + distinct +
@@ -723,12 +884,18 @@ IllumioSyncFilterUtils.prototype = {
         var added = 0;
         var considered = 0;
 
+        // Silent for its whole duration before this. One window is one workload query, and a
+        // label condition that matched a large set spends as many of them as it takes -- with
+        // nothing said between the "Label Condition: Found" line and the closing line below.
+        var resolveBeat = this._makeHeartbeat(label || 'Label resolve', 'label match(es)');
+
         this.syncUtils.eachSetWindow(labelMatches.workloadSysIdsMatchingLabelConditions,
             this.syncUtils.WORKLOAD_CHUNK_SIZE, allSysIds,
             function(window) {
                 considered += window.length;
                 added += self.syncUtils.unionInto(
                     allSysIds, self.repo.findSurvivingWorkloads(window, extentList));
+                resolveBeat(considered, added);
             });
 
         this._trace(label + ': ' + added + ' workload(s) added (' + considered +
@@ -774,13 +941,23 @@ IllumioSyncFilterUtils.prototype = {
         var guardSet = labelMatches ?
             labelMatches.workloadSysIdsMatchingLabelConditions : null;
 
-        // Progress inside the drain is deliberately coarse, and syslog only. The CI list has no
-        // useful ceiling -- it is bounded by the size of a CMDB table, not by the workload count
-        // -- so this is the stretch most likely to run long and the one worth being able to watch.
-        // It is not on the job record because the operator gets one "CMDB Condition: Found" line
-        // carrying the same totals; this is here so that "which batch is it stuck on" stays
-        // answerable from the application logs. Every 20 batches is 10,000 CIs.
-        var batches = 0;
+        // Progress inside the drain is syslog only. The CI list has no useful ceiling -- it is
+        // bounded by the size of a CMDB table, not by the workload count -- so this is the stretch
+        // most likely to run long and the one worth being able to watch. It is not on the job
+        // record because the operator gets one "CMDB Condition: Found" line carrying the same
+        // totals; this is here so that "which batch is it stuck on" stays answerable from the
+        // application logs.
+        //
+        // THROTTLE CHANGED from `if (++batches % 20 === 0)` to wall-clock. Every 20 batches is
+        // 10,000 CIs, which was only a useful interval while a batch stayed cheap. Each batch is
+        // a findWorkloadSysIdsBySourceRecords query carrying a 500-member IN clause, the extent
+        // and `duplicate=false`; measured at ~5s a batch that counter is one line every 100
+        // seconds, and a 16,667-CI drain trips it exactly once. See _makeHeartbeat.
+        //
+        // The count it reported was also `batches * CI_CHUNK_SIZE` -- the chunk ceiling, not what
+        // was actually walked, so the last batch always overstated. It counts real rows now.
+        var drainBeat = this._makeHeartbeat(label, 'CI(s) from ' + sourceTable);
+        var ciWalked = 0;
 
         var total = this.repo.eachCmdbCiSysId(sourceTable, filter.cmdb_condition,
             this.syncUtils.CI_CHUNK_SIZE,
@@ -791,12 +968,8 @@ IllumioSyncFilterUtils.prototype = {
                         pceConfigSysId, ciSysIds, sourceTable, extentList),
                     guardSet);
 
-                batches++;
-                if (batches % 20 === 0) {
-                    self._trace(label + ': drained ' +
-                        (batches * self.syncUtils.CI_CHUNK_SIZE) + ' CI(s) from ' + sourceTable +
-                        ', ' + added + ' workload(s) added so far.');
-                }
+                ciWalked += ciSysIds.length;
+                drainBeat(ciWalked, added);
             });
 
         this._trace(label + ': drained ' + total + ' CI(s) from ' + sourceTable +
@@ -977,13 +1150,13 @@ IllumioSyncFilterUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-23 09:06:25</sys_created_on>
         <sys_id>4429e6b8c3a38bd050bffa0ed40131ac</sys_id>
-        <sys_mod_count>4</sys_mod_count>
+        <sys_mod_count>7</sys_mod_count>
         <sys_name>IllumioSyncFilterUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4429e6b8c3a38bd050bffa0ed40131ac</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:56:35</sys_updated_on>
+        <sys_updated_on>2026-09-30 12:00:44</sys_updated_on>
     </sys_script_include>
 </record_update>

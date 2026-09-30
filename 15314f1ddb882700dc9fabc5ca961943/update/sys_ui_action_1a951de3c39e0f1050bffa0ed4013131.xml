@@ -126,8 +126,8 @@ if (typeof window === 'undefined') {
             var refusedGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
             refusedGr.initialize();
             refusedGr.job_owner = gs.getUser().getID();
-            refusedGr.job_type = 'preview';
-            refusedGr.job_status = 'failed';
+            refusedGr.job_type = JOB_TYPE_PREVIEW;
+            refusedGr.job_status = JOB_STATUS_FAILED;
             refusedGr.job_started = new GlideDateTime();
             refusedGr.job_completed = new GlideDateTime();
             refusedGr.current_operation = 'Preview refused';
@@ -143,8 +143,8 @@ if (typeof window === 'undefined') {
             var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
             jobGr.initialize();
             jobGr.job_owner = gs.getUser().getID();
-            jobGr.job_type = 'preview';
-            jobGr.job_status = 'running';
+            jobGr.job_type = JOB_TYPE_PREVIEW;
+            jobGr.job_status = JOB_STATUS_RUNNING;
             jobGr.job_started = new GlideDateTime();
             jobGr.current_operation = 'Preparing preview';
             jobGr.illumio_pce_configuration = configSysId;
@@ -197,7 +197,7 @@ if (typeof window === 'undefined') {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>1a951de3c39e0f1050bffa0ed4013131</sys_id>
-        <sys_mod_count>14</sys_mod_count>
+        <sys_mod_count>15</sys_mod_count>
         <sys_name>Preview Workload Deletion</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -205,7 +205,7 @@ if (typeof window === 'undefined') {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_1a951de3c39e0f1050bffa0ed4013131</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:20:22</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:05</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_conf</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

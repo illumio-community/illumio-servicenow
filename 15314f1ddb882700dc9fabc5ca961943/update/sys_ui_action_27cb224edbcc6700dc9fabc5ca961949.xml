@@ -166,6 +166,12 @@
                 var createJob = new GlideAjax("IllumioManageJobs");
                 createJob.addParam("sysparm_name", "createScheduledJob");
                 createJob.addParam("sysparm_config_sys_id", configSysId);
+                // LITERALS ON PURPOSE. Everywhere else these are JOB_STATUS_RUNNING and
+                // JOB_TYPE_DATA_SYNC from IllumioConstants -- see the JOB STATUSES block there.
+                // This is the CLIENT half of the UI Action: it runs in the browser, where
+                // gs.include does not exist and a scoped Script Include is unreachable. The
+                // values are validated on arrival by IllumioManageJobs.createScheduledJob, which
+                // is the server side of this GlideAjax call.
                 createJob.addParam("sysparm_job_status", "running");
                 createJob.addParam("sysparm_type_flag", "true");
                 createJob.addParam(
@@ -226,7 +232,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>27cb224edbcc6700dc9fabc5ca961949</sys_id>
-        <sys_mod_count>256</sys_mod_count>
+        <sys_mod_count>257</sys_mod_count>
         <sys_name>Sync Server to PCE</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -234,7 +240,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_27cb224edbcc6700dc9fabc5ca961949</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:45</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:05</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_workload</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>true</ui16_compatible>

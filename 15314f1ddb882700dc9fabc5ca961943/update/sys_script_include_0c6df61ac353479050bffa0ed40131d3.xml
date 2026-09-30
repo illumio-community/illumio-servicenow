@@ -41,7 +41,7 @@ IllumioDiscoveryRepository.prototype = {
     // ---- job & configuration ----
 
     getMaxCiRecords: function() {
-        return gs.getProperty("x_illu2_illumio.maximum_ci_records") || 25000;
+        return gs.getProperty(PROP_MAXIMUM_CI_RECORDS) || DEFAULT_MAXIMUM_CI_RECORDS;
     },
 
     getConfigurationId: function(jobId) {
@@ -95,7 +95,7 @@ IllumioDiscoveryRepository.prototype = {
         this.utils.updateJobRecord(jobId, {
             logs: message,
             current_operation: "Mapping Discovery",
-            job_status: "failed",
+            job_status: JOB_STATUS_FAILED,
             job_completed: new GlideDateTime(),
         });
     },
@@ -109,7 +109,7 @@ IllumioDiscoveryRepository.prototype = {
         this.utils.updateJobRecord(jobId, {
             logs: message,
             current_operation: message,
-            job_status: "completed",
+            job_status: JOB_STATUS_COMPLETED,
             job_completed: new GlideDateTime(),
         });
     },
@@ -828,13 +828,13 @@ IllumioDiscoveryRepository.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>0c6df61ac353479050bffa0ed40131d3</sys_id>
-        <sys_mod_count>18</sys_mod_count>
+        <sys_mod_count>19</sys_mod_count>
         <sys_name>IllumioDiscoveryRepository</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0c6df61ac353479050bffa0ed40131d3</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:56:35</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
     </sys_script_include>
 </record_update>

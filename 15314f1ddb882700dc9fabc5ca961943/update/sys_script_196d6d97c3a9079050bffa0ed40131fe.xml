@@ -31,7 +31,8 @@
         <rest_service_text/>
         <rest_variables/>
         <role_conditions/>
-        <script><![CDATA[// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
+        <script><![CDATA[gs.include("IllumioConstants");
+// W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
 // the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
 var illumioLogger = new IllumioLogger(null, 'Illumio Trigger Post Sync Discovery');
 
@@ -40,7 +41,7 @@ var illumioLogger = new IllumioLogger(null, 'Illumio Trigger Post Sync Discovery
     // current IS the sync job, so this rule's lines correlate with the rest of that job's run.
     illumioLogger.setContext(current.getUniqueValue());
 
-    var terminalStatuses = ['completed', 'partial_success', 'completed_with_error', 'failed'];
+    var terminalStatuses = [JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_COMPLETED_WITH_ERROR, JOB_STATUS_FAILED];
     var currentStatus = current.getValue('job_status');
 
     if (terminalStatuses.indexOf(currentStatus) === -1) {
@@ -67,7 +68,7 @@ var illumioLogger = new IllumioLogger(null, 'Illumio Trigger Post Sync Discovery
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>196d6d97c3a9079050bffa0ed40131fe</sys_id>
-        <sys_mod_count>5</sys_mod_count>
+        <sys_mod_count>6</sys_mod_count>
         <sys_name>Illumio Trigger Post Sync Discovery</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -75,7 +76,7 @@ var illumioLogger = new IllumioLogger(null, 'Illumio Trigger Post Sync Discovery
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_196d6d97c3a9079050bffa0ed40131fe</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:43</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:04</sys_updated_on>
         <template/>
         <when>after</when>
     </sys_script>

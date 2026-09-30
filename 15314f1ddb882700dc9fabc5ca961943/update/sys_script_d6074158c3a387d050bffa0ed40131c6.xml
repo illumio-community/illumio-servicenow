@@ -50,7 +50,13 @@
  *   - ^OR may not be applied to the dimension field itself
  *
  * What stays here is everything that is a property of the RECORD rather than of the condition
- * text: the zero-terms check, and the class_mapping pairing.
+ * text: the zero-terms check, the class_mapping pairing, and the "an inclusion filter must have
+ * at least one of Extent / CMDB Condition / Label Condition" rule (R35).
+ *
+ * The deletion-side extent rules are NOT here -- they are in `Validate Sync Filter Extent`. All
+ * of them, on both sides, are now ALSO enforced at run time in
+ * IllumioSyncFilterUtils.evaluateSyncFilter, because a business rule fires on save and a filter
+ * arriving by update set or import never passes through one.
  *
  * The readable rendering of the condition is NOT done here and is not stored on the record. It is
  * computed on demand for display only -- see IllumioUtilsAJAX.describeLabelCondition and the
@@ -76,6 +82,35 @@
     }
 
     var cmdbCondition = current.getValue('cmdb_condition');
+
+    // R35. An inclusion filter needs at least one of the three things it could match on. With all
+    // three empty there is no predicate at all, and the run-time evaluator treats that as shape A
+    // -- it contributes nothing. That is the safe direction, but it is indistinguishable from a
+    // filter that legitimately matched zero workloads, so the author gets a confident "0" and no
+    // reason for it. Caught here on save, where the field to fix is in front of them.
+    //
+    // Deletion filters are deliberately NOT checked here: `Validate Sync Filter Extent` already
+    // requires an extent on them, which is a strictly stronger rule, and two rules reporting the
+    // same defect in different words is worse than one.
+    //
+    // splitExtent, not gs.nil, because that is what IllumioSyncFilterUtils.evaluateSyncFilter uses
+    // to decide hasExtent. Save-time and run-time must agree on what "empty" means.
+    //
+    // The early return cannot swallow a pending labelErrors entry: this branch requires the Label
+    // Condition to be empty, and the block above only populates labelErrors for a NON-empty one.
+    if (current.getValue('type') === 'inclusion' &&
+        syncUtils.isConditionEmpty(current.getValue('label_condition')) &&
+        syncUtils.isConditionEmpty(cmdbCondition) &&
+        syncUtils.splitExtent(current.getValue('extent')).length === 0) {
+
+        gs.addErrorMessage('Inclusion Sync Filters must have at least one of Extent, CMDB ' +
+            'Condition or Label Condition set. With all three empty there is nothing to match ' +
+            'on and the filter will contribute no workloads.');
+        current.extent.setError('Set an Extent, a CMDB Condition or a Label Condition.');
+        current.setAbortAction(true);
+        return;
+    }
+
     if (!syncUtils.isConditionEmpty(cmdbCondition) && gs.nil(current.getValue('class_mapping'))) {
         // A Class Mapping is what names the CMDB table. Without one there is nothing to run the
         // condition against. Note the converse is deliberately legal: a Label Condition with no
@@ -113,7 +148,7 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>d6074158c3a387d050bffa0ed40131c6</sys_id>
-        <sys_mod_count>3</sys_mod_count>
+        <sys_mod_count>4</sys_mod_count>
         <sys_name>Validate Sync Filter Conditions</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -121,7 +156,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_d6074158c3a387d050bffa0ed40131c6</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-22 15:51:04</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:04</sys_updated_on>
         <template/>
         <when>before</when>
     </sys_script>

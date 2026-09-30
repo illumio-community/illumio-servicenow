@@ -309,8 +309,20 @@ IllumioSyncBuildUtils.prototype = {
                 var createLabelCount = 0;
 
                 if (!params.skipLabelData) {
-                    workloadObject.label_data = labelDataByWorkload[workloadObject.sys_id];
-                    var split = syncUtils.splitLabelsForSync(workloadObject.label_data, hrefByPair);
+                    // R34: a local, not a property on workloadObject. It used to be hung on the
+                    // object, which put it in the payload row and shipped it to the MID Server --
+                    // where nothing read it. splitLabelsForSync below is its only consumer, and
+                    // what the MID actually needs is that function's OUTPUT: `labels` (hrefs the
+                    // PCE already has) and `createlabels` (what it must make). label_data is the
+                    // superset those two are derived from, so carrying it as well sent every
+                    // dimension/value pair twice.
+                    //
+                    // Worth ~8 key/value pairs per workload off every payload row, on both sides
+                    // of the handoff. Note the split drops pairs with an empty value, so
+                    // label_data is NOT reconstructable from labels + createlabels -- if anything
+                    // downstream ever needs it, add it back deliberately rather than deriving it.
+                    var labelData = labelDataByWorkload[workloadObject.sys_id];
+                    var split = syncUtils.splitLabelsForSync(labelData, hrefByPair);
                     workloadObject.labels = split.labels;
                     workloadObject.createlabels = split.createlabels;
                     createLabelCount = split.createlabels.length;
@@ -411,13 +423,13 @@ IllumioSyncBuildUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-23 16:41:10</sys_created_on>
         <sys_id>15319801c3a34fd050bffa0ed4013133</sys_id>
-        <sys_mod_count>2</sys_mod_count>
+        <sys_mod_count>3</sys_mod_count>
         <sys_name>IllumioSyncBuildUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_15319801c3a34fd050bffa0ed4013133</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
     </sys_script_include>
 </record_update>

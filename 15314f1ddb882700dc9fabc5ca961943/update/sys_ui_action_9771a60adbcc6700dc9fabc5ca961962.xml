@@ -37,54 +37,80 @@
 // the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
 var illumioLogger = new IllumioLogger(null, 'Illumio Data Collection');
 
+// ND-3. This used to be `while (configClassGr.next())` with a `break` in every branch, which is
+// the same defect IllumioStartDiscovery.process had and is fixed there: only the FIRST active
+// class mapping was ever checked for a host_name mapping, and with no orderBy "first" was
+// whatever row order the database happened to return. A configuration with three source tables
+// had two of them unchecked, so discovery started over a table it could not derive a hostname
+// for and the resulting workloads were dropped at the far end by the MID Server -- which
+// discards PCE workloads with no hostname by design, so it surfaced as a short sync, not an error.
+//
+// BOTH HALVES ARE KEPT. process() performs the same three checks and writes a failed job record;
+// this one runs in the user's transaction and is the only place that can put a red banner on the
+// form and setAbortAction. Neither can do the other's job, so they check the same things and must
+// agree -- a change to one belongs in both.
 var configClassGr = new GlideRecordSecure(TABLE_CONFIG_CLASS_MAPPING);
 configClassGr.addActiveQuery();
 configClassGr.addQuery('illumio_pce_configuration', current.getUniqueValue());
+configClassGr.orderBy('source_table');
 configClassGr.query();
-if (configClassGr.hasNext()) {
-    while (configClassGr.next()) {
-        var fieldMappingGr = new GlideRecordSecure(TABLE_CLASS_FIELD_MAPPING);
-        fieldMappingGr.addQuery('type', 'host_name');
-		fieldMappingGr.addQuery('illumio_config_class_mapping',configClassGr.getUniqueValue());
-        fieldMappingGr.addActiveQuery();
-        fieldMappingGr.setLimit(1);
-        fieldMappingGr.query();
-        if (!fieldMappingGr.hasNext()) {
-            gs.addErrorMessage('Can not start the discovery as there is no PCE field mapping for Host Name configured.');
-            illumioLogger.error('Can not start the discovery as there is no PCE field mapping for Host Name configured.');
-            current.setAbortAction(true);
-			break;
-        } else {
 
-            var midGr = current.mid_server;
-            var utils = new IllumioUtils();
-            if (utils.canStartJob(current, midGr)) {
-                var runningJobsCount = new GlideAggregate(TABLE_SCHEDULED_JOBS);
-                runningJobsCount.addQuery('illumio_pce_configuration', current.getUniqueValue());
-                runningJobsCount.addQuery('job_status', 'running');
-                runningJobsCount.addAggregate('COUNT');
-                runningJobsCount.query();
-                if (runningJobsCount.next()) {
-                    if (runningJobsCount.getAggregate('COUNT') > 0) {
-                        gs.addErrorMessage('Can not start discovery as there is already one job in running status for this Illumio PCE Configuration.');
-                        illumioLogger.info('Can not start discovery as there is already one job in running status for this Illumio PCE Configuration.');
-						break;
-                    } else {
-                        gs.addInfoMessage("The Discovery process may take a few minutes to complete.");
-                        current.update();
-                        var startDiscovery = new IllumioStartDiscovery();
-                        startDiscovery.process(current.getUniqueValue());
-						break;
-                    }
-                }
-            }
-        }
+// Names only, and a configuration has a handful of class mappings rather than a workload-sized
+// number of them, so this is bounded by configuration size and not by n.
+var mappedTables = [];
+var tablesMissingHostName = [];
+
+while (configClassGr.next()) {
+    var sourceTable = configClassGr.getValue('source_table') || configClassGr.getUniqueValue();
+    mappedTables.push(sourceTable);
+
+    var fieldMappingGr = new GlideRecordSecure(TABLE_CLASS_FIELD_MAPPING);
+    fieldMappingGr.addQuery('type', 'host_name');
+    fieldMappingGr.addQuery('illumio_config_class_mapping', configClassGr.getUniqueValue());
+    fieldMappingGr.addActiveQuery();
+    fieldMappingGr.setLimit(1);
+    fieldMappingGr.query();
+    if (!fieldMappingGr.hasNext()) {
+        tablesMissingHostName.push(sourceTable);
     }
-} else {
+}
+
+if (mappedTables.length === 0) {
     gs.addErrorMessage('Can not start the discovery as there is no active Config Class mapping configured.');
     illumioLogger.error('Can not start the discovery as there is no active Config Class mapping configured.');
     current.setAbortAction(true);
-}]]></script>
+} else if (tablesMissingHostName.length > 0) {
+    // Message stem kept verbatim -- it is what users have seen and what anyone searching the log
+    // for this failure will search for. The list of tables is appended, because being able to say
+    // WHICH mapping is wrong is the whole point of checking all of them.
+    var hostNameError = 'Can not start the discovery as there is no PCE field mapping for Host ' +
+        'Name configured for: ' + tablesMissingHostName.join(', ');
+    gs.addErrorMessage(hostNameError);
+    illumioLogger.error(hostNameError);
+    current.setAbortAction(true);
+} else {
+    var midGr = current.mid_server;
+    var utils = new IllumioUtils();
+    if (utils.canStartJob(current, midGr)) {
+        var runningJobsCount = new GlideAggregate(TABLE_SCHEDULED_JOBS);
+        runningJobsCount.addQuery('illumio_pce_configuration', current.getUniqueValue());
+        runningJobsCount.addQuery('job_status', JOB_STATUS_RUNNING);
+        runningJobsCount.addAggregate('COUNT');
+        runningJobsCount.query();
+        if (runningJobsCount.next()) {
+            if (runningJobsCount.getAggregate('COUNT') > 0) {
+                gs.addErrorMessage('Can not start discovery as there is already one job in running status for this Illumio PCE Configuration.');
+                illumioLogger.info('Can not start discovery as there is already one job in running status for this Illumio PCE Configuration.');
+            } else {
+                gs.addInfoMessage("The Discovery process may take a few minutes to complete.");
+                current.update();
+                var startDiscovery = new IllumioStartDiscovery();
+                startDiscovery.process(current.getUniqueValue());
+            }
+        }
+    }
+}
+]]></script>
         <show_form_icon_only>false</show_form_icon_only>
         <show_insert>false</show_insert>
         <show_list_icon_only>false</show_list_icon_only>
@@ -97,7 +123,7 @@ if (configClassGr.hasNext()) {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>9771a60adbcc6700dc9fabc5ca961962</sys_id>
-        <sys_mod_count>39</sys_mod_count>
+        <sys_mod_count>40</sys_mod_count>
         <sys_name>Illumio Data Collection</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -105,7 +131,7 @@ if (configClassGr.hasNext()) {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ui_action_9771a60adbcc6700dc9fabc5ca961962</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:45</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
         <table>x_illu2_illumio_illumio_pce_conf</table>
         <ui11_compatible>true</ui11_compatible>
         <ui16_compatible>false</ui16_compatible>

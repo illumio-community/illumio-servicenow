@@ -20,15 +20,20 @@ IllumioManageJobs.prototype = Object.extendsObject(global.AbstractAjaxProcessor,
     createScheduledJob: function() {
         var configSysId = this.getParameter("sysparm_config_sys_id");
         var userName = gs.getUser().getID();
+        // `typeFlag`, not `job_type`. This local was called job_type and held
+        // `sysparm_type_flag` -- a "did the caller send a critical-label-group count" boolean, not
+        // a job type at all. It read as a third comparison against the job_type CHOICE LIST
+        // (`job_type == 'true'` below), which is why it looked like a bug on every pass over this
+        // file. The real job_type is read straight into the record above and never touched here.
         var count = 0,
             logs = '',
-            job_type = '';
+            typeFlag = '';
         var scheduledJobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
         scheduledJobGr.initialize();
 
         /* Check if any job (data collection, data sync, or deletion) is already running for this config */
         var runningJobsCount = new GlideAggregate(TABLE_SCHEDULED_JOBS);
-        runningJobsCount.addQuery("job_status", "running");
+        runningJobsCount.addQuery("job_status", JOB_STATUS_RUNNING);
         runningJobsCount.addAggregate('COUNT');
         runningJobsCount.addQuery("illumio_pce_configuration", configSysId);
         runningJobsCount.query();
@@ -43,8 +48,8 @@ IllumioManageJobs.prototype = Object.extendsObject(global.AbstractAjaxProcessor,
                 scheduledJobGr.job_status = this.getParameter('sysparm_job_status');
                 scheduledJobGr.current_operation = this.getParameter('sysparm_current_operation');
                 scheduledJobGr.illumio_pce_configuration = configSysId;
-                job_type = this.getParameter('sysparm_type_flag');
-                if (job_type == 'true') {
+                typeFlag = this.getParameter('sysparm_type_flag');
+                if (typeFlag == 'true') {
                     count = this.getParameter('sysparm_count');
                     logs += 'Total critical label groups fetched : ' + parseInt(count) + '\n';
                 }
@@ -71,14 +76,14 @@ IllumioManageJobs.prototype = Object.extendsObject(global.AbstractAjaxProcessor,
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-02-21 05:28:20</sys_created_on>
         <sys_id>c454535edb83045015543cae7c9619aa</sys_id>
-        <sys_mod_count>61</sys_mod_count>
+        <sys_mod_count>62</sys_mod_count>
         <sys_name>IllumioManageJobs</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_c454535edb83045015543cae7c9619aa</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:42</sys_updated_on>
+        <sys_updated_on>2026-09-30 10:41:03</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>c454535edb83045015543cae7c9619aa</id>

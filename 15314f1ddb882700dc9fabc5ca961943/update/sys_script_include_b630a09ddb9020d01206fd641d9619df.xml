@@ -90,10 +90,28 @@ IllumioUtils.prototype = {
 
         if (jobGr.get(jobId)) {
 
-            if (jobGr.job_status == "cancelled") return;
+            // One test against one named list, replacing three statements that disagreed with
+            // each other. Before this the code read: return on `cancelled`, skip the write on
+            // `failed`, comment above it saying "not invalidated", and the log line in the `else`
+            // saying "is invalidated" -- while `'invalidated'` was never actually tested. Three
+            // different answers to "which statuses stop a log write", and the one the code gave
+            // was the one nobody had written down.
+            //
+            // JOB_DEAD_STATUSES is the set they should all have agreed on, and is the instance
+            // half of the MID's CANCELLED_JOB_STATUSES. Two statuses now stop the write that did
+            // not before -- `invalidated` and `cancelled_threshold_limit_exceeded`. Neither loses
+            // a line: every path that sets them writes the status AND its final log in the SAME
+            // call, while the record is still `running`, so the guard is passed on the way in and
+            // only later writes are refused. The threshold paths are
+            // IllumioStartWorkloadDeletion (one updateJobRecord carrying both) and
+            // IllumioAutoSyncWithPCE (a direct GlideRecord update that never comes through here),
+            // and both return immediately afterwards.
+            //
+            // finalizeCancelledJob below is unaffected -- it is the deliberate bypass and writes
+            // its own GlideRecord.
+            var deadStatus = String(jobGr.getValue('job_status'));
 
-            // Update only if job is not invalidated
-            if (jobGr.job_status != 'failed') {
+            if (JOB_DEAD_STATUSES.indexOf(deadStatus) === -1) {
                 for (var key in jobContent) {
                     if (jobContent.hasOwnProperty(key)) {
                         if (key != "logs") {
@@ -122,10 +140,17 @@ IllumioUtils.prototype = {
                 }
                 jobGr.update();
             } else {
-                this.logger.info('[_updateJobRecord] Given job is invalidated. Aborting further actions');
+                // Names the status rather than asserting one. The old line said "is invalidated"
+                // whatever the status actually was, which is how a `failed` job came to be
+                // reported as invalidated in the log for as long as this has existed. The line
+                // goes to syslog only -- the job record is precisely what this branch has decided
+                // not to write to.
+                this.logger.info('[updateJobRecord] Job is ' + deadStatus +
+                    '. No further log lines will be written to the job record. ' +
+                    'Dropped line: ' + String(jobContent.logs || '(no log line)'));
             }
         } else {
-            this.logger.error('[_updateJobRecord] Scheduled job record for given sys_id (' + jobId + ') does not exist.');
+            this.logger.error('[updateJobRecord] Scheduled job record for given sys_id (' + jobId + ') does not exist.');
         }
     },
 
@@ -263,7 +288,7 @@ IllumioUtils.prototype = {
                 inputs['pce_configuration'] = pceConfig; // GlideRecord of table: x_illu2_illumio_illumio_pce_conf
                 inputs['query_parameters'] = "";
 
-                var actionTimeout = gs.getProperty('x_illu2_illumio.flow_action_timeout') || 30000;
+                var actionTimeout = gs.getProperty(PROP_FLOW_ACTION_TIMEOUT) || DEFAULT_FLOW_ACTION_TIMEOUT;
                 var result = sn_fd.FlowAPI.getRunner().action('x_illu2_illumio.fetch_label_groups').inForeground().withInputs(inputs).timeout(actionTimeout).run();
                 var outputs = result.getOutputs();
 
@@ -757,9 +782,9 @@ IllumioUtils.prototype = {
     handleFailure: function(jobSysId, operation, message) {
         if (this.scheduledJobsGr.get(jobSysId)) {
 
-            if (this.scheduledJobsGr.job_status == "cancelled") return;
+            if (this.scheduledJobsGr.job_status == JOB_STATUS_CANCELLED) return;
 
-            this.scheduledJobsGr.job_status = 'failed';
+            this.scheduledJobsGr.job_status = JOB_STATUS_FAILED;
             this.scheduledJobsGr.logs += '\n' + operation;
             this.scheduledJobsGr.logs += '\nAuthentication failed';
             this.scheduledJobsGr.job_completed = new GlideDateTime();
@@ -898,7 +923,7 @@ IllumioUtils.prototype = {
             inputs['pce_configuration'] = pceConfig; // GlideRecord of table: x_illu2_illumio_illumio_pce_conf 
 
             // Execute Synchronously: Run in foreground. Code snippet has access to outputs.
-            var actionTimeout = gs.getProperty('x_illu2_illumio.flow_action_timeout') || 30000;
+            var actionTimeout = gs.getProperty(PROP_FLOW_ACTION_TIMEOUT) || DEFAULT_FLOW_ACTION_TIMEOUT;
             var result = sn_fd.FlowAPI.getRunner().action('x_illu2_illumio.fetch_label_dimensions').inForeground().withInputs(inputs).timeout(actionTimeout).run();
             var outputs = result.getOutputs();
 
@@ -1089,7 +1114,7 @@ IllumioUtils.prototype = {
                 inputs['request_body'] = JSON.stringify(requestBody); // JSON 
 
                 // Execute Synchronously: Run in foreground. Code snippet has access to outputs.
-                var actionTimeout = gs.getProperty('x_illu2_illumio.flow_action_timeout') || 30000;
+                var actionTimeout = gs.getProperty(PROP_FLOW_ACTION_TIMEOUT) || DEFAULT_FLOW_ACTION_TIMEOUT;
                 var result = sn_fd.FlowAPI.getRunner().action('x_illu2_illumio.create_label_dimensions').inForeground().withInputs(inputs).timeout(actionTimeout).run();
                 var outputs = result.getOutputs();
 
@@ -1143,7 +1168,7 @@ IllumioUtils.prototype = {
                 inputs['request_body'] = JSON.stringify(body); // JSON 
 
                 // Execute Synchronously: Run in foreground. Code snippet has access to outputs.
-                var actionTimeout = gs.getProperty('x_illu2_illumio.flow_action_timeout') || 30000;
+                var actionTimeout = gs.getProperty(PROP_FLOW_ACTION_TIMEOUT) || DEFAULT_FLOW_ACTION_TIMEOUT;
                 var result = sn_fd.FlowAPI.getRunner().action('x_illu2_illumio.update_label_dimensions').inForeground().withInputs(inputs).timeout(actionTimeout).run();
                 var outputs = result.getOutputs();
 
@@ -1458,7 +1483,7 @@ IllumioUtils.prototype = {
          */
         var scheduledJobGr = new GlideRecord(TABLE_SCHEDULED_JOBS);
         if (scheduledJobGr.get(jobSysId)) {
-            return scheduledJobGr.getValue('job_status') == 'cancelled';
+            return scheduledJobGr.getValue('job_status') == JOB_STATUS_CANCELLED;
         }
 
         return false;
@@ -1508,7 +1533,7 @@ IllumioUtils.prototype = {
         var scoped = !gs.nil(configSysId);
 
         var jobGr = new GlideRecord(TABLE_SCHEDULED_JOBS);
-        jobGr.addQuery('job_status', 'running');
+        jobGr.addQuery('job_status', JOB_STATUS_RUNNING);
 
         if (scoped) {
             jobGr.addQuery('illumio_pce_configuration', configSysId);
@@ -2275,7 +2300,10 @@ IllumioUtils.prototype = {
             // N" denominator and the Summary. See jobTraceLogger.
             var trace = this.jobTraceLogger(jobSysId);
 
+            // setJobContext, or phase 1's per-term and per-drain lines land under `[-]` and fall
+            // out of `message STARTSWITH "[<job sys_id>]"` -- see IllumioSyncFilterUtils.
             var syncFilterResult = new IllumioSyncFilterUtils()
+                .setJobContext(jobSysId)
                 .getEligibleWorkloadSysIdsByConfig(configSysId, 'deletion', progress);
 
             if (!syncFilterResult.hasFilter) {
@@ -2533,6 +2561,29 @@ IllumioUtils.prototype = {
         };
     },
 
+    /**
+     * The manual deletion path's payload, built from an explicit list of workload sys_ids.
+     *
+     * Eligibility is decided by _buildDeletionShell, the SAME function the filter-driven path
+     * uses. NI-4: the four rules (known_to_pce must be managed or unmanaged, pce_workload_href
+     * must be present, managed means unpair-not-delete, managed with no ven_href is skipped
+     * BEFORE it consumes threshold budget) used to be spelled out a second time in the loop
+     * below. Two copies of a predicate that decides whether a workload is deleted or left alone
+     * is two places for the rules to drift, and the pre-R14 threshold bug this comment's
+     * counterpart describes is exactly what drift looks like here.
+     *
+     * What this path does that the filter path does not, and why the loop is still its own:
+     *
+     *  - It DEDUPLICATES by pce_workload_href (`hasOwnProperty` below). The filter path cannot
+     *    reach a duplicate at all -- it queries `duplicate=false` -- but this one takes whatever
+     *    sys_ids the UI Action selected, and two records can share an href.
+     *  - It returns the whole payload in memory rather than flushing MID-sized rows as it goes.
+     *    writeDeletionPayloadRows does the cutting afterwards, because the caller
+     *    (IllumioDeletionHandler) needs the counts before it decides to create a job at all.
+     *
+     * @param {Array} sysIds Workload sys_ids to build a deletion payload for
+     * @returns {Object} { success, message, retiredWorkloads, vensToUnpair, counts }
+     */
     buildDeletionPayloadFromSysIds: function(sysIds) {
         var result = {
             success: false,
@@ -2557,35 +2608,32 @@ IllumioUtils.prototype = {
                 gr.query();
 
                 while (gr.next()) {
-                    var knownToPce = gr.getValue('known_to_pce');
-                    var pceHref = gr.getValue('pce_workload_href');
-
-                    if (knownToPce !== 'managed' && knownToPce !== 'unmanaged') {
-                        result.skippedCount++;
+                    // null means ineligible, and the shell builder has already counted it
+                    // against result.skippedCount -- it takes the tally as its second argument
+                    // for exactly this reason. Every `continue` the old inline copy had is now
+                    // this one line.
+                    var shell = this._buildDeletionShell(gr, result);
+                    if (shell === null) {
                         continue;
                     }
 
-                    if (gs.nil(pceHref)) {
-                        result.skippedCount++;
-                        continue;
-                    }
-
-                    if (knownToPce === 'managed') {
-                        var venHref = gr.getValue('ven_href');
-                        if (!gs.nil(venHref)) {
-                            result.vensToUnpair.push(venHref);
-                            result.unpairCount++;
-                        } else {
-                            result.skippedCount++;
-                        }
-                    } else {
-                        if (!result.retiredWorkloads.hasOwnProperty(pceHref)) {
-                            // A placeholder, for the reason given in prepareDeletionPayload's
-                            // appendRow: this is a set of hrefs, and the sys_id that used to sit
-                            // here was read by nothing.
-                            result.retiredWorkloads[pceHref] = 1;
-                            result.deletionCount++;
-                        }
+                    // Same branch as prepareDeletionPayload's appendRow, on the same field, and
+                    // it is safe to push ven_href unchecked for the same reason there: a managed
+                    // workload with no ven_href never gets a shell back.
+                    if (shell.known_to_pce === 'managed') {
+                        result.vensToUnpair.push(shell.ven_href);
+                        result.unpairCount++;
+                    } else if (!result.retiredWorkloads.hasOwnProperty(shell.pce_workload_href)) {
+                        // A placeholder, for the reason given in prepareDeletionPayload's
+                        // appendRow: this is a set of hrefs, and the sys_id that used to sit
+                        // here was read by nothing.
+                        //
+                        // The hasOwnProperty guard is this path's alone -- see the note on the
+                        // function. A second record with the same href is not counted twice and
+                        // is not counted as skipped either, which is the pre-existing behaviour
+                        // and is kept: it is neither an error nor a deletion of its own.
+                        result.retiredWorkloads[shell.pce_workload_href] = 1;
+                        result.deletionCount++;
                     }
                 }
             }
@@ -2698,14 +2746,14 @@ IllumioUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-11-04 13:11:02</sys_created_on>
         <sys_id>b630a09ddb9020d01206fd641d9619df</sys_id>
-        <sys_mod_count>481</sys_mod_count>
+        <sys_mod_count>483</sys_mod_count>
         <sys_name>IllumioUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_b630a09ddb9020d01206fd641d9619df</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:58:02</sys_updated_on>
+        <sys_updated_on>2026-09-30 12:00:45</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>b630a09ddb9020d01206fd641d9619df</id>
