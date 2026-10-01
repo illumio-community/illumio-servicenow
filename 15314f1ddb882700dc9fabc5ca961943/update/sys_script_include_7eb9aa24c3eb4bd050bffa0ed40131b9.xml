@@ -39,6 +39,11 @@ IllumioStartWorkloadDeletion.prototype = {
      * @param {String} illumioJobId sys_id of the deletion scheduled job, from event.parm1
      */
     process: function(illumioJobId) {
+        // NI8, R37's defect. Set before the nil guard below on purpose: a nil id degrades to [-],
+        // which is the honest prefix for "no job sys_id supplied". Everything after this --
+        // process, _withdraw and _fail -- inherits it, because setContext mutates the instance.
+        this.logger.setContext(illumioJobId);
+
         try {
             if (gs.nil(illumioJobId)) {
                 this.logger.error('[IllumioStartWorkloadDeletion] No job sys_id supplied');
@@ -110,7 +115,7 @@ IllumioStartWorkloadDeletion.prototype = {
                 });
             }
 
-            var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+            var pceConfig = new IllumioGetPCEConfiguration(illumioJobId).getConfiguration(configSysId);
 
             var parameters = {
                 jobSysId: illumioJobId,
@@ -196,13 +201,13 @@ IllumioStartWorkloadDeletion.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-22 14:30:35</sys_created_on>
         <sys_id>7eb9aa24c3eb4bd050bffa0ed40131b9</sys_id>
-        <sys_mod_count>4</sys_mod_count>
+        <sys_mod_count>5</sys_mod_count>
         <sys_name>IllumioStartWorkloadDeletion</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_7eb9aa24c3eb4bd050bffa0ed40131b9</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:01</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:09</sys_updated_on>
     </sys_script_include>
 </record_update>

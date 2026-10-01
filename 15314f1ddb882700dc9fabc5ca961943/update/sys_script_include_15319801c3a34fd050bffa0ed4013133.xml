@@ -199,7 +199,8 @@ IllumioSyncBuildUtils.prototype = {
         // Only the default shell builder needs the field mappings; a caller supplying its own
         // builder would be paying for a configuration read it never consults.
         var mappedFields = params.buildShell ?
-            null : new IllumioGetPCEConfiguration().getLabelDimensionsBySourceTable(configSysId);
+            null : new IllumioGetPCEConfiguration(params.jobSysId)
+            .getLabelDimensionsBySourceTable(configSysId);
         var criticalLabels = params.skipCriticalLabels ? utils.getCriticalLabelsForPceConfig(configSysId) : {};
         // Resolved only when the thresholds are going to be consulted. A run with
         // applyThreshold off has no business reading limits, and certainly no business being
@@ -207,7 +208,8 @@ IllumioSyncBuildUtils.prototype = {
         var wlLimitObject = params.wlLimitObject || null;
         if (!wlLimitObject && params.applyThreshold) {
             try {
-                wlLimitObject = new IllumioThresholdLimit().getThresholdLimit(configSysId);
+                wlLimitObject = new IllumioThresholdLimit(params.jobSysId)
+                    .getThresholdLimit(configSysId);
             } catch (limitEx) {
                 // Unresolvable limits are not "no limits". Carrying on would push an unbounded
                 // number of changes to the PCE under a threshold nobody could read, so the run
@@ -423,13 +425,13 @@ IllumioSyncBuildUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-23 16:41:10</sys_created_on>
         <sys_id>15319801c3a34fd050bffa0ed4013133</sys_id>
-        <sys_mod_count>3</sys_mod_count>
+        <sys_mod_count>4</sys_mod_count>
         <sys_name>IllumioSyncBuildUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_15319801c3a34fd050bffa0ed4013133</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:10</sys_updated_on>
     </sys_script_include>
 </record_update>

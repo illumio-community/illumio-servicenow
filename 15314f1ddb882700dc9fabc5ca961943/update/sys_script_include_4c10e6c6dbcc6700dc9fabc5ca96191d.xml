@@ -180,7 +180,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             // announced a batch whose completion never appears -- the reader is left waiting for
             // a "Batch 1 done" that was deliberately moved out. In the correlated trail it sits
             // directly above the window lines it introduces.
-            this.logger.setContext(this.illumioJobId).info("Starting processing of Batch 1");
+            this.logger.info("Starting processing of Batch 1");
         }
 
         ctx.windowStartTime = Date.now();
@@ -315,7 +315,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         // the phase-end summary, which is the figure worth reading anyway.
         var skipLog = this.discoveryUtils.formatUnknownSkipLog(counts);
         if (skipLog) {
-            this.logger.setContext(this.illumioJobId).info(skipLog);
+            this.logger.info(skipLog);
         }
 
         // W2: per-window, so syslog rather than the job record. A large CMDB is hundreds of
@@ -323,7 +323,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         // totals. The skip line above stays on the record because it is conditional -- it only
         // appears when a window actually refused a creation, which is something to see on the
         // form rather than go looking for.
-        this.logger.setContext(this.illumioJobId).info(this.discoveryUtils.formatBatchLog(
+        this.logger.info(this.discoveryUtils.formatBatchLog(
             windowNumber, ctx.processedTotal, ctx.totalRecords, ctx.table,
             ctx.windowStartTime, counts));
 
@@ -423,6 +423,17 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      */
     process: function(illumioJobId) {
         this.illumioJobId = illumioJobId;
+        // NI8, and this class was the worst shape of R37's defect. The five lines below -- the
+        // post-sync marker, both configuration failures and both stale-data lines -- used to run
+        // before the first setContext, which sat at _processSourceTable and was CONDITIONAL on
+        // the run getting that far. So whether a given line was correlated depended on how far
+        // the run got, and two runs of the same code produced different trails.
+        //
+        // Here, immediately after the id is known and before anything logs, it is unconditional.
+        // setContext mutates the instance, so this covers all 16 calls. The three per-line
+        // setContext calls in _processSourceTable and _flushWindow are redundant now and have
+        // been reduced to plain .info(); both methods are reachable only through this one.
+        this.logger.setContext(illumioJobId);
         this.pceConfigId = this.repo.getConfigurationId(illumioJobId);
 
         // Detect post-sync discovery from the job's initial log marker.
@@ -980,14 +991,14 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:26:01</sys_created_on>
         <sys_id>4c10e6c6dbcc6700dc9fabc5ca96191d</sys_id>
-        <sys_mod_count>441</sys_mod_count>
+        <sys_mod_count>444</sys_mod_count>
         <sys_name>IllumioDiscoverAndMapCMDBServers</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4c10e6c6dbcc6700dc9fabc5ca96191d</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:03</sys_updated_on>
+        <sys_updated_on>2026-10-01 07:09:14</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>4c10e6c6dbcc6700dc9fabc5ca96191d</id>

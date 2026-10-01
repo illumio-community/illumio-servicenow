@@ -35,7 +35,12 @@ IllumioStartDiscovery.prototype = {
      * @returns {Boolean} Always false, so callers can `return this._refuse(...)`
      */
     _refuse: function(configSysId, operation, message) {
-        this.logger.error(message);
+        // NI8. The log line moved BELOW the insert so it can carry the sys_id of the refusal
+        // record it is explaining. A refusal still writes a job row, and that row is the only
+        // thing the user has to look at -- logging the reason under [-] put the explanation
+        // outside the trail of the record it explains. If the insert is refused by an ACL it
+        // returns null, setContext renders [-], and this behaves exactly as it did before.
+        //
         // initialize() on every path. The original called it only on the already-running branch,
         // so the field-mapping branch inserted on a GlideRecordSecure that had never been
         // initialized -- which works, but skips dictionary defaults and silently carries over
@@ -50,7 +55,8 @@ IllumioStartDiscovery.prototype = {
         this.scheduledJobsGr.job_type = JOB_TYPE_DATA_COLLECTION;
         this.scheduledJobsGr.job_completed = new GlideDateTime();
         this.scheduledJobsGr.logs = message;
-        this.scheduledJobsGr.insert();
+        var refusedJobSysId = this.scheduledJobsGr.insert();
+        this.logger.setContext(refusedJobSysId).error(message);
         return false;
     },
 
@@ -196,6 +202,12 @@ IllumioStartDiscovery.prototype = {
             '\nPHASE - START: Fetch & Store PCE Data';
         this.scheduledJobsGr.job_type = JOB_TYPE_DATA_COLLECTION;
         var jobSysId = this.scheduledJobsGr.insert();
+        // NI8. The job id first exists here, so this is where the context goes. The two lines
+        // above it -- 'Initiating Discovery' and the already-running message -- stay on [-]
+        // correctly: there is no job yet, and in the second case there deliberately never
+        // will be. createAsyncJobs' two lines inherit this, setContext having mutated the
+        // instance logger.
+        this.logger.setContext(jobSysId);
 
         var discoveryStartStatus = this.createAsyncJobs(jobSysId, configSysId);
         if (!discoveryStartStatus) {
@@ -245,7 +257,7 @@ IllumioStartDiscovery.prototype = {
      */
     createAsyncJobs: function(jobSysId, configSysId) {
         this.logger.info('Creating async jobs on PCE');
-        var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+        var pceConfig = new IllumioGetPCEConfiguration(jobSysId).getConfiguration(configSysId);
         var types = ['workload', 'label'];
 
         if (pceConfig) {
@@ -341,14 +353,14 @@ IllumioStartDiscovery.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:20:29</sys_created_on>
         <sys_id>641f9e82dbcc6700dc9fabc5ca9619ce</sys_id>
-        <sys_mod_count>132</sys_mod_count>
+        <sys_mod_count>133</sys_mod_count>
         <sys_name>IllumioStartDiscovery</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_641f9e82dbcc6700dc9fabc5ca9619ce</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:03</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:09</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>641f9e82dbcc6700dc9fabc5ca9619ce</id>

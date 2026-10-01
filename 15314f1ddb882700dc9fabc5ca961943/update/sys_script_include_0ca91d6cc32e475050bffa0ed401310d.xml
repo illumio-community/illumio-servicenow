@@ -87,6 +87,11 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
             }
             scheduledJobGr.logs = logs;
             var jobSysId = scheduledJobGr.insert();
+            // NI8. Everything above this is pre-flight validation that returns a message to the
+            // browser and creates no job, so it has nothing to correlate to and stays on [-].
+            // From here the job exists, and the catch below -- the one line that reports a
+            // manual deletion blowing up -- belongs in its trail.
+            this.logger.setContext(jobSysId);
 
             if (gs.nil(jobSysId)) {
                 result.message = 'Failed to create scheduled job for deletion.';
@@ -112,7 +117,7 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 return JSON.stringify(result);
             }
 
-            var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+            var pceConfig = new IllumioGetPCEConfiguration(jobSysId).getConfiguration(configSysId);
 
             var parameters = {
                 jobSysId: jobSysId,
@@ -207,14 +212,14 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-08-03 15:39:42</sys_created_on>
         <sys_id>0ca91d6cc32e475050bffa0ed401310d</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>10</sys_mod_count>
         <sys_name>IllumioDeletionHandler</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0ca91d6cc32e475050bffa0ed401310d</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>0ca91d6cc32e475050bffa0ed401310d</id>

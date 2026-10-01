@@ -783,6 +783,17 @@ IllumioSyncRepoUtils.prototype = {
      * @returns {Number} Rows deleted, -1 when the call was refused
      */
     deletePayloadRowsForJob: function(payloadTable, jobSysId) {
+        // NI8. Set here rather than in initialize because this class has no job of its own -- it
+        // is constructed in eleven places, most of which never pass one. Both methods that log
+        // are handed the job id as an argument, which makes a per-method setContext exact and a
+        // constructor argument unnecessary. R37's cascade from IllumioSyncFilterUtils only ever
+        // covered the repo IT builds; phase 2 (IllumioSyncBuildUtils) and the two withdrawal
+        // paths build their own, and those were still writing under [-].
+        //
+        // Deliberately before the nil guard: a nil id renders [-], which is the right prefix for
+        // a refusal that has no job to attribute itself to.
+        this.logger.setContext(jobSysId);
+
         if (gs.nil(jobSysId)) {
             this.logger.error("[IllumioSyncRepoUtils] Refusing to delete payload rows on " + payloadTable +
                 " with no job sys_id: the query would match every row in the table.");
@@ -940,6 +951,11 @@ IllumioSyncRepoUtils.prototype = {
      * @returns {Number} Rows deleted, or -1 if the sweep was refused
      */
     deleteStalePayloadRows: function(payloadTable, currentJobSysId, onProgress) {
+        // NI8, same reasoning as deletePayloadRowsForJob. The sweeping job is the one this
+        // sweep's four lines belong to -- including the "Swept n stale payload row(s)" warning,
+        // which is the only record that another run's rows were destroyed.
+        this.logger.setContext(currentJobSysId);
+
         var report = typeof onProgress === 'function' ? onProgress : function() {};
 
         if (gs.nil(currentJobSysId)) {
@@ -1024,13 +1040,13 @@ IllumioSyncRepoUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-21 12:40:54</sys_created_on>
         <sys_id>16070598c36387d050bffa0ed40131aa</sys_id>
-        <sys_mod_count>12</sys_mod_count>
+        <sys_mod_count>13</sys_mod_count>
         <sys_name>IllumioSyncRepoUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_16070598c36387d050bffa0ed40131aa</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:09</sys_updated_on>
     </sys_script_include>
 </record_update>

@@ -12,8 +12,21 @@
         <script><![CDATA[gs.include("IllumioConstants");
 var IllumioGetPCEConfiguration = Class.create();
 IllumioGetPCEConfiguration.prototype = {
-    initialize: function() {
-        this.logger = new IllumioLogger(null, 'IllumioGetPCEConfiguration');
+    /**
+     * NI8. This class has no job of its own, so the job id has to arrive from the caller or its
+     * two log lines -- "No configuration found." and the getFieldMapping exception, which are
+     * exactly what somebody reading a failed run is looking for -- land under [-] and fall
+     * outside `message STARTSWITH "[<job sys_id>]"`.
+     *
+     * Optional on purpose. Three callers legitimately run BEFORE any job record exists
+     * (IllumioUtils.getWorkloadData and GetLabelGroupsAjax, both the UI Action's pre-flight limit
+     * check, and IllumioPrepareWorkload) and must keep constructing with no argument. Nil degrades
+     * to [-], which is the correct answer for them.
+     *
+     * @param {String} [jobSysId] sys_id of the scheduled job this read belongs to, if there is one
+     */
+    initialize: function(jobSysId) {
+        this.logger = new IllumioLogger(jobSysId, 'IllumioGetPCEConfiguration');
     },
 
     /**
@@ -181,14 +194,14 @@ IllumioGetPCEConfiguration.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:18:42</sys_created_on>
         <sys_id>61eeda82dbcc6700dc9fabc5ca9619ab</sys_id>
-        <sys_mod_count>77</sys_mod_count>
+        <sys_mod_count>78</sys_mod_count>
         <sys_name>IllumioGetPCEConfiguration</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_61eeda82dbcc6700dc9fabc5ca9619ab</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>61eeda82dbcc6700dc9fabc5ca9619ab</id>

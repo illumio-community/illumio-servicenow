@@ -26,8 +26,22 @@
  */
 var IllumioThresholdLimit = Class.create();
 IllumioThresholdLimit.prototype = {
-    initialize: function() {
-        this.logger = new IllumioLogger(null, 'IllumioThresholdLimit');
+    /**
+     * NI8. Same shape as IllumioGetPCEConfiguration: no job of its own, so the id comes from the
+     * caller. The one line this class writes is the unresolvable-limit error that goes on to
+     * cancel the job, so it is the single most important line it could lose from the trail.
+     *
+     * Optional. GetLabelGroupsAjax and IllumioUtils.getWorkloadData consult the limits from the
+     * UI Action's pre-flight check, before a job record exists, and correctly stay on [-].
+     *
+     * @param {String} [jobSysId] sys_id of the scheduled job these limits are resolved for
+     */
+    initialize: function(jobSysId) {
+        this.logger = new IllumioLogger(jobSysId, 'IllumioThresholdLimit');
+        // Held so _buildLimitObject can forward it to IllumioGetPCEConfiguration. A configuration
+        // this class could not read is a limit it could not resolve, and that read's own
+        // "No configuration found." belongs in the same trail as the cancellation it causes.
+        this.jobSysId = jobSysId;
     },
 
     /**
@@ -58,7 +72,7 @@ IllumioThresholdLimit.prototype = {
      * @return {Object} Limit object.
      */
     _buildLimitObject: function(configSysId) {
-        var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+        var pceConfig = new IllumioGetPCEConfiguration(this.jobSysId).getConfiguration(configSysId);
         if (!pceConfig) {
             throw new Error("PCE configuration record does not exist or is not readable");
         }
@@ -159,13 +173,13 @@ IllumioThresholdLimit.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-11-24 12:30:31</sys_created_on>
         <sys_id>5ff69b63dbacac901206fd641d961959</sys_id>
-        <sys_mod_count>55</sys_mod_count>
+        <sys_mod_count>56</sys_mod_count>
         <sys_name>IllumioThresholdLimit</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_5ff69b63dbacac901206fd641d961959</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
     </sys_script_include>
 </record_update>

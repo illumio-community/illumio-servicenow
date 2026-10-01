@@ -16,7 +16,11 @@ IllumioUpdatePCE.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
     // On the prototype rather than built in initialize. AbstractAjaxProcessor's own initialize
     // takes (request, responseXML, gc) and does real work with them; overriding it here to add
     // one line means forwarding three arguments correctly in five separate files for no gain.
-    // Nothing calls setContext on it, so there is no shared state to get wrong.
+    //
+    // NI8 made this one mutable: action() now calls setContext on it. That is safe here and
+    // nowhere by accident -- a GlideAjax transaction dispatches exactly one method on one
+    // instance of this class, so there is no second caller to inherit a context it did not set.
+    // Do not copy the pattern into a class that is constructed more than once per transaction.
     logger: new IllumioLogger(null, 'IllumioUpdatePCE'),
 
     /**
@@ -24,13 +28,18 @@ IllumioUpdatePCE.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
      **/
     action: function() {
         var configSysId = this.getParameter("sysparm_config_sys_id");
+        // NI8. Read before the configuration lookups rather than with the other parameters below,
+        // so the context is set before anything can log -- getConfiguration's own
+        // "No configuration found." is one of the lines this was meant to catch.
+        var jobSysId = this.getParameter('sysparm_jobSysId');
+        this.logger.setContext(jobSysId);
 
-        var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
-        var mappingOfFields = new IllumioGetPCEConfiguration().getLabelDimensionsBySourceTable(configSysId);
+        var configUtil = new IllumioGetPCEConfiguration(jobSysId);
+        var pceConfig = configUtil.getConfiguration(configSysId);
+        var mappingOfFields = configUtil.getLabelDimensionsBySourceTable(configSysId);
         mappingOfFields = JSON.stringify(mappingOfFields.fields);
         var payload = this.getParameter('sysparm_payload');
         var operation = this.getParameter('sysparm_operation');
-        var jobSysId = this.getParameter('sysparm_jobSysId');
         var partialSucc = this.getParameter('sysparm_partial');
         var count = this.getParameter('sysparm_count');
         var sys_id = this.getParameter('sysparm_custom_record_sys_id');
@@ -96,14 +105,14 @@ IllumioUpdatePCE.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:19:56</sys_created_on>
         <sys_id>df3f12c6dbcc6700dc9fabc5ca96195a</sys_id>
-        <sys_mod_count>47</sys_mod_count>
+        <sys_mod_count>48</sys_mod_count>
         <sys_name>IllumioUpdatePCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_df3f12c6dbcc6700dc9fabc5ca96195a</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:03</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>df3f12c6dbcc6700dc9fabc5ca96195a</id>

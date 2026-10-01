@@ -175,6 +175,12 @@ IllumioPreviewUtils.prototype = {
      *                 preview needs to say which filter.
      */
     process: function(illumioJobId, contextJson) {
+        // NI8. Covers this method and everything it calls -- _parseContext, _writePayloadRows,
+        // _dispatch, _deleteExistingPreview, _withdraw, _complete and _fail all log through the
+        // same instance logger, and setContext mutates it. Only one of the twelve calls in this
+        // class was correlated before; the rest went to syslog_app_scope under [-].
+        this.logger.setContext(illumioJobId);
+
         var context = null;
 
         try {
@@ -330,6 +336,9 @@ IllumioPreviewUtils.prototype = {
      * @param {String} contextJson JSON from event.parm2 -- { type, table, sysId }
      */
     processFilterModePreview: function(illumioJobId, contextJson) {
+        // NI8. The second entry point, so it needs its own -- nothing routes through process().
+        this.logger.setContext(illumioJobId);
+
         try {
             if (gs.nil(illumioJobId)) {
                 this.logger.error("[IllumioPreviewUtils] No job sys_id supplied for the filter mode " +
@@ -467,7 +476,10 @@ IllumioPreviewUtils.prototype = {
                         // is hundreds of windows, and the "Scan complete" line below carries the
                         // totals they add up to. This is also one fewer job-record write per
                         // window -- the read-modify-write that W1 made cheap is still a write.
-                        self.logger.setContext(illumioJobId).info(
+                        // setContext dropped (NI8): processFilterModePreview sets it on entry and
+                        // it persists on the instance, so this was the one correlated line in the
+                        // class and is now simply one of them.
+                        self.logger.info(
                             "Window " + windowNumber + ": " + windowCount +
                             " record(s) scanned, " + (lines.length - 1) + " kept" +
                             self.syncUtils.since(windowStartedAt));
@@ -792,7 +804,7 @@ IllumioPreviewUtils.prototype = {
             };
         }
 
-        var pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+        var pceConfig = new IllumioGetPCEConfiguration(illumioJobId).getConfiguration(configSysId);
         if (!pceConfig || gs.nil(pceConfig.midServer)) {
             return {
                 success: false,
@@ -1036,13 +1048,13 @@ IllumioPreviewUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-22 17:49:40</sys_created_on>
         <sys_id>8f47d7e8c3638bd050bffa0ed4013186</sys_id>
-        <sys_mod_count>10</sys_mod_count>
+        <sys_mod_count>11</sys_mod_count>
         <sys_name>IllumioPreviewUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_8f47d7e8c3638bd050bffa0ed4013186</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 12:00:44</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:10</sys_updated_on>
     </sys_script_include>
 </record_update>

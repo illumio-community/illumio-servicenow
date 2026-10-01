@@ -76,6 +76,13 @@ IllumioAutoSyncWithPCE.prototype = {
      * @params {string} illumioJobId Job Id of the scheduled job
      **/
     process: function(illumioJobId) {
+        // NI8. One line, first statement, covering every logger call this class makes for the
+        // rest of the run -- setContext mutates the instance and persists. Before it, all 15 of
+        // them went to syslog_app_scope under [-] and did not match
+        // `message STARTSWITH "[<job sys_id>]"`, which is how the sync orchestrator managed to
+        // leave no trace in the trail of the sync it was orchestrating. Same defect as R37.
+        this.logger.setContext(illumioJobId);
+
         var utils = new IllumioUtils(),
             syncUtils = new IllumioSyncUtils(),
             repo = new IllumioSyncRepoUtils(syncUtils),
@@ -125,7 +132,7 @@ IllumioAutoSyncWithPCE.prototype = {
             }
 
             var userName = userGr.first_name + " " + userGr.last_name,
-                pceConfig = new IllumioGetPCEConfiguration().getConfiguration(configSysId);
+                pceConfig = new IllumioGetPCEConfiguration(illumioJobId).getConfiguration(configSysId);
 
             // ---------------------------------------------------------------------------
             // Phase 1 -- WHICH workloads this run acts on.
@@ -655,14 +662,14 @@ IllumioAutoSyncWithPCE.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-10-01 06:20:45</sys_created_on>
         <sys_id>f14ad3f6db34274033c1a026ca96192e</sys_id>
-        <sys_mod_count>368</sys_mod_count>
+        <sys_mod_count>369</sys_mod_count>
         <sys_name>IllumioAutoSyncWithPCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_f14ad3f6db34274033c1a026ca96192e</sys_update_name>
         <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 12:00:43</sys_updated_on>
+        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>f14ad3f6db34274033c1a026ca96192e</id>
