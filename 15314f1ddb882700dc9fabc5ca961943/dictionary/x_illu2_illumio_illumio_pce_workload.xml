@@ -4,7 +4,7 @@
         <element label="OS ID" max_length="40" name="os_id" type="string"/>
         <element attributes="readonly_clickthrough=true" label="ServiceNow CMDB Identifier" max_length="32" name="servicenow_cmdb_identifier" reference="cmdb_ci" type="reference"/>
         <element label="Duplicate" max_length="40" name="duplicate" type="boolean"/>
-        <element display="true" label="Hostname" max_length="100" name="hostname" type="string"/>
+        <element display="true" label="Hostname" max_length="255" name="hostname" type="string"/>
         <element label="Source Table" max_length="80" name="source_table" type="string"/>
         <element attributes="readonly_clickthrough=true" label="Illumio PCE Configuration" mandatory="true" max_length="32" name="illumio_pce_configuration" read_only="true" read_only_option="client_script_modifiable" reference="x_illu2_illumio_illumio_pce_conf" reference_cascade_rule="delete" type="reference"/>
         <element label="Enforcement Mode" max_length="40" name="enforcement_mode" type="string"/>
@@ -20,6 +20,7 @@
         <element attributes="readonly_clickthrough=true" label="Primary Workload" max_length="32" name="duplicate_of" reference="x_illu2_illumio_illumio_pce_workload" type="reference"/>
         <element label="PCE Public IP Address" max_length="80" name="public_ip_address" type="string"/>
         <element label="Href" max_length="2048" name="pce_workload_href" type="string"/>
+        <element label="Hostname Part" max_length="255" name="hostname_part" type="string"/>
         <element attributes="readonly_clickthrough=true" label="Incident" max_length="32" name="incident" read_only="true" read_only_option="client_script_modifiable" reference="incident" type="reference"/>
         <element label="Conflicts" max_length="40" name="conflicts" type="boolean"/>
         <element label="VEN Href" max_length="100" name="ven_href" type="string"/>
@@ -35,6 +36,10 @@
         </index>
         <index name="index4">
             <element name="servicenow_cmdb_identifier"/>
+        </index>
+        <index name="index5">
+            <element name="hostname_part"/>
+            <element name="illumio_pce_configuration"/>
         </index>
     </element>
 </database>

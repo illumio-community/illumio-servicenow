@@ -50,6 +50,22 @@ IllumioManageAsyncJobs.prototype = {
         this.SimpleDF = Packages.java.text.SimpleDateFormat;
         this.TimeZone = Packages.java.util.TimeZone;
 
+        // R48. The async job result is streamed to disk and then walked one element at a time,
+        // so neither the response body nor the parsed graph is ever held whole.
+        this.File = Packages.java.io.File;
+        // Jackson, from the MID Server's own agent/lib -- jackson-core and jackson-databind are
+        // both there. Confirmed on the MID host 2026-10-06; this is not a bundled dependency of
+        // this app and nothing here ships it.
+        //
+        // IT SPLITS THE ARRAY, IT DOES NOT CONVERT THE RECORDS. Each element is handed back as
+        // JSON text and parsed by the engine's own JSON.parse, so the conversion below operates
+        // on exactly the kind of object it always did. Walking Jackson's JsonNode API instead
+        // would mean rewriting every `typeof x == 'object'` and `x[key].length` in this file
+        // against different semantics, which is a correctness risk taken for nothing.
+        this.JsonFactory = Packages.com.fasterxml.jackson.core.JsonFactory;
+        this.ObjectMapper = Packages.com.fasterxml.jackson.databind.ObjectMapper;
+        this.TEMP_FILE_PREFIX = 'illumio-asyncresult-';
+
         this.snowDateFormat = this.SimpleDF("yyyy-MM-dd HH:mm:ss");
         this.illumioDateFormat = this.SimpleDF("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
 
@@ -256,11 +272,85 @@ IllumioManageAsyncJobs.prototype = {
     },
 
     /**
+     * Walk the top-level array in a JSON file, one element at a time.
+     *
+     * Jackson's streaming parser reads the file incrementally: `readValueAsTree` consumes exactly
+     * one array element and advances, so the live set is one record regardless of how many the
+     * PCE returned. The element is re-serialised and handed to the engine's own JSON.parse -- see
+     * the note in initialize on why the conversion is NOT done against JsonNode.
+     *
+     * WHY A LIBRARY AND NOT A HAND-ROLLED SPLITTER. Finding array element boundaries in a byte
+     * stream means getting escaped quotes, backslash-escaped backslashes, structural characters
+     * inside string values, UTF-8 sequences straddling a read boundary and split surrogate pairs
+     * all correct, and getting any of them wrong corrupts a record rather than failing. Jackson
+     * has seen every one of those. The only thing written here is the loop.
+     *
+     * TRUNCATION IS AN ERROR, NOT A SHORT READ. If the download was cut off, `nextToken` returns
+     * null before END_ARRAY and this throws. That matters more than it looks: a truncated result
+     * that returned 31,000 of 50,000 workloads would be indistinguishable from a successful run,
+     * and discovery would mark the missing ones unknown and sync would then create duplicates on
+     * the PCE. An exception is recoverable; a silently short result is not.
+     *
+     * @param {java.io.File} file File holding a JSON array
+     * @param {Function} onElement Called with each parsed element; return false to stop
+     * @returns {Number} Elements walked
+     */
+    _eachResultElement: function(file, onElement) {
+        var factory = new this.JsonFactory();
+        // The codec is what makes readValueAsTree available; jackson-core alone cannot build a
+        // tree. Both jars are on the MID.
+        factory.setCodec(new this.ObjectMapper());
+
+        var parser = factory.createParser(file);
+        var walked = 0;
+
+        try {
+            // Enum identity is compared through its name rather than with ==. Rhino can wrap the
+            // same Java enum constant in a new host object per access, which makes reference
+            // equality an unreliable thing to branch on; the name is stable.
+            var first = parser.nextToken();
+            if (!first || String(first) !== 'START_ARRAY') {
+                throw 'Expected a JSON array at the top level of the async job result, found ' +
+                    (first ? String(first) : 'an empty body');
+            }
+
+            while (true) {
+                var token = parser.nextToken();
+
+                if (!token) {
+                    throw 'Async job result ended after ' + walked + ' element(s) without closing ' +
+                        'its array. The download was truncated -- treating this as a failure ' +
+                        'rather than a short result.';
+                }
+                if (String(token) === 'END_ARRAY') {
+                    break;
+                }
+
+                // One element, as text, then parsed by the engine. Scoped to this iteration so
+                // both forms are collectable as soon as onElement returns.
+                var elementText = String(parser.readValueAsTree().toString());
+                walked++;
+
+                if (onElement(JSON.parse(elementText)) === false) {
+                    break;
+                }
+            }
+        } finally {
+            try { parser.close(); } catch (ignored) {}
+        }
+
+        return walked;
+    },
+
+    /**
      * Get results of async jobs from result location
      * @param {String} resultsLocation location of the result.
      * @return {Boolean} whether request was successful or not.
      */
     getAsyncJobResults: function(resultsLocation, configSysId) {
+
+        // Declared out here so the finally can delete it whichever way the body leaves.
+        var resultFile = null;
 
         try {
 
@@ -269,18 +359,8 @@ IllumioManageAsyncJobs.prototype = {
                 return;
             }
 
-            this.logger._info('IllumioManageAsyncJobs - Getting async job results');
-
-            var fetchStartTime = new Date().getTime();
-            var response = this.pceHttpClient.get('/api/v2' + resultsLocation, '');
-
-            if (response.hasError) {
-                this.logger._error('No results received from PCE for current async job, Response status: ' + response.status);
-                this.handleException('No results received from PCE for current async job, Please check MID server logs for more details.');
-                return false;
-            }
-
-            // Required keys
+            // Required keys. Read BEFORE the download now -- a missing probe parameter fails the
+            // job either way, and there is no reason to spend a 100 MB transfer discovering it.
             var resultTable = probe.getParameter('glide.jms.result_table_name');
             var job_identifier = probe.getParameter('glide.jms.job_identifier');
             var keysToMap = JSON.parse(probe.getParameter('glide.jms.keys_to_map'));
@@ -293,23 +373,100 @@ IllumioManageAsyncJobs.prototype = {
                 return false;
             }
 
-            if (!Array.isArray(response.data)) {
-                this.logger._error('IllumioManageAsyncJobs - Invalid data.');
-                this.handleException('Invalid data format received. Setting job status to failed');
+            // MOVED UP from just above the 'Fetched:' line, where it used to be built. The lines
+            // between here and there -- "Available. Started fetching.", the download size, any
+            // failure -- all want it, and without it they read as the other async job's.
+            var tag = (job_identifier + "").charAt(0).toUpperCase() + (job_identifier + "").slice(1);
+
+            // The PCE has finished preparing the result and handed back a location; this is the
+            // moment the transfer actually starts. Polling can sit on "Checking fetch status" for
+            // minutes, so the line that says waiting is over is worth its own entry.
+            //
+            // _milestone, NOT _info. _info is ms.log only -- it reaches agent0.log on the MID host
+            // and never the instance, so as _info this line was invisible to the only person who
+            // needed it. This is W6's case exactly: a handoff boundary whose ABSENCE localizes the
+            // break. "Checking fetch status" then nothing means the PCE never said done; this line
+            // then nothing means the download itself is where it died. One push per async job, so
+            // it is bounded by job count and cannot flood the wire.
+            this.logger._milestone('[' + tag + '] Available. Started fetching.');
+
+            var fetchStartTime = new Date().getTime();
+
+            // R48. Straight to disk. The old `pceHttpClient.get` built the whole body as a byte[],
+            // copied it to a UTF-16 String and then parsed the lot into one object graph -- three
+            // full-size forms inside one try block, which is what threw OutOfMemoryError against
+            // 50,000 workloads on 2026-10-06.
+            resultFile = this.File.createTempFile(
+                this.TEMP_FILE_PREFIX + this.illumio_jobId + '-', '.json');
+
+            var response = this.pceHttpClient.getToFile('/api/v2' + resultsLocation, '', resultFile);
+
+            if (response.hasError) {
+                this.logger._error('No results received from PCE for current async job, Response status: ' + response.status);
+                this.handleException('No results received from PCE for current async job, Please check MID server logs for more details.');
                 return false;
             }
-            // Data will be array of objects
+
+            // Syslog, not the job record. _updateJobRecord costs a GET plus a PUT against the
+            // Table API and the existing two lines below already carry the run totals; this one
+            // is here so "it downloaded but died converting" stays distinguishable from "it never
+            // downloaded", which the job record alone cannot tell you.
+            //
+            // _milestone for the same reason as the line above: that distinction is drawn by
+            // someone reading syslog_app_scope, and _info never gets there. The comment above
+            // said "Syslog" while the call said agent0.log -- it was wrong, not just quiet.
+            // Tagged now too; untagged it read as whichever async job the reader assumed.
+            this.logger._milestone('[' + tag + '] Downloaded ' + resultFile.length() +
+                ' byte(s) to ' + resultFile.getAbsolutePath());
 
             var resultData = [];
             // Records PCE returned that carry no primary key. They are dropped on purpose --
             // see the log line below -- but the drop is invisible without a count.
             var missingPrimaryKey = 0;
-            response.data = JSON.parse(JSON.stringify(response.data));
-            response.data.map(function(resultObj) {
+
+            // R48, and R27's rule -- "nothing may duplicate a structure the size of the result" --
+            // finally applied to the MID side, which that audit never reached.
+            //
+            // THREE THINGS THAT USED TO STAND BETWEEN HERE AND A RECORD ARE GONE:
+            //
+            //   1. `pceHttpClient.get(...)`, which built the body as a byte[], copied it to a
+            //      UTF-16 String and parsed the lot into one graph. Replaced by getToFile above.
+            //   2. `if (!Array.isArray(response.data))`, the shape guard. _eachResultElement
+            //      enforces the same thing harder -- it throws unless the first token is
+            //      START_ARRAY -- so the check moved rather than disappeared.
+            //   3. `response.data = JSON.parse(JSON.stringify(response.data));`
+            //
+            // The third was a deep clone of the entire result and the single largest allocation
+            // in the run: the old graph, a complete JSON string built from it, and a new graph,
+            // all live across one statement. It bought nothing -- the array was already freshly
+            // parsed and privately owned, and nothing below mutates it. It was also the only line
+            // in this method carrying no explanation, which is what flagged it. Kept here as a
+            // record because it was removed deliberately, not lost in the rewrite.
+            //
+            // response.data = JSON.parse(JSON.stringify(response.data));
+
+            var self = this;
+            // `tag` is built above, before the download, so the lines either side of it can use
+            // it. Not redeclared here -- ES5 var hoisting would make a second declaration a
+            // silent no-op that reads as if it were doing something.
+            var stagingElapsedMs = 0;
+            var batchCount = 0;
+            var stagingFailed = false;
+            var cancelled = false;
+
+            // THE WALK AND THE STAGING ARE NOW ONE PASS. Previously the whole result was converted
+            // into `resultData` and only then drained in batches, so the converted form of every
+            // record was live at once. Here a batch is POSTed as soon as it fills and the array is
+            // emptied, which makes `batchSize` -- not the PCE's workload count -- the ceiling on
+            // everything this method holds.
+            var resultLength = this._eachResultElement(resultFile, function(resultObj) {
 
                 if (resultObj[primaryKey]) {
                     var requredDataObj = {};
-                    keysToMap.map(function(key) {
+                    // WAS keysToMap.map(...), used as a forEach -- a throwaway array per record,
+                    // so one per element across the whole walk.
+                    for (var k = 0; k < keysToMap.length; k++) {
+                        var key = keysToMap[k];
                         if (key == 'agent') {
                             var agent = resultObj[key];
                             if (agent['href'])
@@ -330,17 +487,62 @@ IllumioManageAsyncJobs.prototype = {
                         } else {
                             requredDataObj[key] = typeof resultObj[key] == 'object' ? JSON.stringify(resultObj[key]) : resultObj[key] + "";
                         }
-                    });
+                    }
                     resultData.push(requredDataObj);
                 } else {
                     missingPrimaryKey++;
                 }
+
+                if (resultData.length < self.batchSize) {
+                    return true;
+                }
+
+                // Checked at a batch boundary, which is the same cadence the old code used --
+                // once before staging began. It is now checked repeatedly, so a cancel during a
+                // long walk is noticed rather than waited out.
+                if (self.utils.checkCancelledJobStatus(self.illumio_jobId)) {
+                    cancelled = true;
+                    return false;
+                }
+
+                var stagedAt = new Date().getTime();
+                var ok = self._stageBatch(resultTable, configSysId, resultData, job_identifier, batchCount);
+                stagingElapsedMs += (new Date().getTime() - stagedAt);
+
+                if (!ok) {
+                    stagingFailed = true;
+                    return false;
+                }
+                batchCount++;
+                return true;
             });
 
-            var resultLength = resultData.length;
-            var fetchElapsed = ((new Date().getTime() - fetchStartTime) / 1000).toFixed(2);
-            var tag = (job_identifier + "").charAt(0).toUpperCase() + (job_identifier + "").slice(1);
-            this.logger._debug('IllumioManageAsyncJobs - Total records : ' + resultLength + ", will be broken down into batches of " + this.batchSize);
+            if (cancelled) {
+                return;
+            }
+            if (stagingFailed) {
+                this.handleException(
+                    'Exception occurred while posting results to SNOW, Please check MID server logs for more details.'
+                );
+                return false;
+            }
+
+            // The remainder, which is every run whose count is not an exact multiple of batchSize.
+            if (resultData.length > 0) {
+                var lastStagedAt = new Date().getTime();
+                if (!this._stageBatch(resultTable, configSysId, resultData, job_identifier, batchCount)) {
+                    this.handleException(
+                        'Exception occurred while posting results to SNOW, Please check MID server logs for more details.'
+                    );
+                    return false;
+                }
+                stagingElapsedMs += (new Date().getTime() - lastStagedAt);
+                batchCount++;
+            }
+
+            var convertedLength = resultLength - missingPrimaryKey;
+            var fetchElapsed = ((new Date().getTime() - fetchStartTime - stagingElapsedMs) / 1000).toFixed(2);
+            this.logger._debug('IllumioManageAsyncJobs - Total records : ' + convertedLength + ", broken down into batches of " + this.batchSize);
 
             // The primary key is the only field discovery can match on -- 'hostname' for
             // workloads, 'value' for labels -- so a record without one cannot be mapped and is
@@ -351,7 +553,13 @@ IllumioManageAsyncJobs.prototype = {
             // Worth knowing when this is non-zero for workloads: PCE workloads created through
             // the PCE UI have Name set but Hostname null, so they never reach the mapping table
             // and the CMDB CI that should have matched one classifies as unknown instead.
-            var fetchLog = '[' + tag + '] Fetched: ' + resultLength + ' (' + fetchElapsed + 's)';
+            //
+            // BOTH LINES KEEP THEIR EXACT WORDING AND ORDER. They are the two run totals the job
+            // record carries for this phase and anything reading the job record -- a human or the
+            // regression pass -- matches on their shape. Only the timings underneath changed:
+            // fetch now excludes the staging it is interleaved with, so the two still add up to
+            // the phase rather than double-counting it.
+            var fetchLog = '[' + tag + '] Fetched: ' + convertedLength + ' (' + fetchElapsed + 's)';
             if (missingPrimaryKey > 0) {
                 fetchLog += '; skipped ' + missingPrimaryKey + ' with no ' + primaryKey;
             }
@@ -360,36 +568,7 @@ IllumioManageAsyncJobs.prototype = {
                 logs: fetchLog
             });
 
-            if (this.utils.checkCancelledJobStatus(this.illumio_jobId)) {
-                return;
-            }
-            // add 1 more iteration count in case the 'resultLength' is exactly divisible by 'batchSize'
-            var iterations = (resultLength / this.batchSize) + 1;
-
-            var stagingStartTime = new Date().getTime();
-            var batchCount = 0;
-            // extra check on 'resultData' length as it gets shorter everytime the chunked payload is sent
-            for (var iter = 0; iter < iterations && resultData.length != 0; iter++) {
-                var payload = {
-                    illumio_pce_configuration: configSysId,
-                    json_data: JSON.stringify(resultData.splice(0, this.batchSize)),
-                    // splice would update the source array, hence we always start from 0
-                };
-                this.logger._debug("Proceeding to write the payload of " + job_identifier + " from index " + (iter * this.batchSize) + " to " + ((iter + 1) * this.batchSize));
-                var endpoint = TABLE_API + resultTable;
-                var resp = this.snHttpClient.post(endpoint, '', null, payload);
-                if (resp.hasError) {
-                    this.logger._error('Cannot insert the data in staging table');
-                    this.handleException(
-                        'Exception occurred while posting results to SNOW, Please check MID server logs for more details.'
-                    );
-                    return false;
-                }
-                batchCount++;
-                this.logger._debug("Pending " + job_identifier + " to be written:" + resultData.length);
-            }
-
-            var stagingElapsed = ((new Date().getTime() - stagingStartTime) / 1000).toFixed(2);
+            var stagingElapsed = (stagingElapsedMs / 1000).toFixed(2);
             this._updateJobRecord(scheduled_job_id, {
                 logs: '[' + tag + '] Staged: ' + batchCount + ' batch(s) (Size: ' + this.batchSize + ') (' + stagingElapsed + 's)'
             });
@@ -401,7 +580,56 @@ IllumioManageAsyncJobs.prototype = {
             this.logger._except('IllumioManageAsyncJobs - Exception occurred while getting async job results. Exception: ' + exception);
             this.handleException('Exception occurred while getting async job results. Exception: ' + exception);
             return false;
+        } finally {
+            // Deleted on every path, including the cancel and the truncation throw. A MID Server
+            // temp directory is not somewhere a 100 MB async result should accumulate, and unlike
+            // the preview file this one has no sweep behind it -- nothing else knows the name.
+            if (resultFile) {
+                try {
+                    if (!resultFile['delete']()) {
+                        this.logger._warning('IllumioManageAsyncJobs - Could not delete temp file ' +
+                            resultFile.getAbsolutePath() + '. It will have to be removed by hand.');
+                    }
+                } catch (cleanupException) {
+                    this.logger._warning('IllumioManageAsyncJobs - Temp file cleanup failed: ' + cleanupException);
+                }
+            }
         }
+    },
+
+    /**
+     * POST one converted batch to its staging table and empty the array.
+     *
+     * Split out of the old staging loop because the walk now calls it mid-stream rather than
+     * after everything is converted. `resultData` is emptied here, not by the caller, so that a
+     * batch is never both POSTed and still held.
+     *
+     * @param {String} resultTable Staging table name
+     * @param {String} configSysId PCE Configuration sys_id
+     * @param {Array} resultData Converted records; emptied on success
+     * @param {String} jobIdentifier 'workloads' or 'labels', for the log line
+     * @param {Number} batchIndex Zero-based batch number, for the log line
+     * @returns {Boolean} whether the POST succeeded
+     */
+    _stageBatch: function(resultTable, configSysId, resultData, jobIdentifier, batchIndex) {
+        var payload = {
+            illumio_pce_configuration: configSysId,
+            json_data: JSON.stringify(resultData)
+        };
+
+        this.logger._debug('Proceeding to write the payload of ' + jobIdentifier + ' batch ' +
+            batchIndex + ' (' + resultData.length + ' record(s))');
+
+        var resp = this.snHttpClient.post(TABLE_API + resultTable, '', null, payload);
+        if (resp.hasError) {
+            this.logger._error('Cannot insert the data in staging table');
+            return false;
+        }
+
+        // Emptied in place rather than reassigned -- the caller holds this same array across
+        // every batch, so a new one here would leave it filling the old.
+        resultData.length = 0;
+        return true;
     },
 
     /**
@@ -517,14 +745,14 @@ IllumioManageAsyncJobs.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>63973142db8c6700dc9fabc5ca961947</sys_id>
-        <sys_mod_count>97</sys_mod_count>
+        <sys_mod_count>100</sys_mod_count>
         <sys_name>IllumioManageAsyncJobs</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_63973142db8c6700dc9fabc5ca961947</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 16:09:51</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

@@ -629,35 +629,72 @@ IllumioSyncFilterUtils.prototype = {
 
         var labelStartedAt = new Date().getTime();
 
-        var labelMatches = hasLabelCondition ?
-            this._matchLabelCondition(filter, evaluated.errors, label) : null;
+        // SHAPES C AND D-with-label, as ONE streaming pass. R50.
+        //
+        // The label side now drives and the CMDB condition rides on the per-window query, which is
+        // the reverse of what this function used to do. Both shapes end here; only the shape with
+        // a CMDB condition and NO label condition falls through to the drain below.
+        //
+        // Three result-sized structures became one. The term array and the label set are gone --
+        // the walk streams into windows of WORKLOAD_CHUNK_SIZE and `allSysIds` is the only thing
+        // that grows with the answer.
+        if (hasLabelCondition) {
+            var streamed = this._streamLabelCondition(
+                filter, extentList, allSysIds, evaluated.errors, label);
 
-        if (evaluated.errors.length > 0) {
+            if (evaluated.errors.length > 0 || !streamed) {
+                return evaluated;
+            }
+
+            evaluated.added = streamed.added;
+
+            // The label condition's OWN result, before `duplicate`, the extent and the CMDB
+            // condition narrow it and before the negative guard drops what the run already has.
+            // Reporting the post-narrowing number here instead would hide the gap between "the
+            // condition selected this many" and "this many survived".
+            //
+            // ACROSS TERMS THIS COUNTS EMISSIONS, NOT DISTINCT WORKLOADS. Terms are OR'd and the
+            // walk no longer holds a set to deduplicate against, so a workload satisfying two
+            // terms is counted twice here. It is still only resolved and added once -- the
+            // negative guard sees it in `allSysIds` the second time. The term count is printed so
+            // the number is readable rather than merely wrong-looking; with one term, which is
+            // the common shape, it is exactly the old figure.
+            lastReported = streamed.emitted;
+            this._trace('Label Condition: Found (Matched ' + lastReported +
+                ' workload(s)' + (streamed.terms > 1 ?
+                    ' across ' + streamed.terms + ' term(s), emissions not distinct' : '') +
+                ')' + this.syncUtils.since(labelStartedAt));
+
+            this._trace(hasCmdbCondition ?
+                'CMDB Condition: Applied within the label window query (included below)' :
+                'CMDB Condition: Not set');
+
+            // Same reasoning as the old shape D: there is no point in the run where the extent has
+            // been applied and the rest has not, so it gets no separate count.
+            this._trace(hasExtent ?
+                'Extent: Applied within the label window query (included below)' :
+                'Extent: Not set');
+
+            this._trace(label + ': ' + streamed.added + ' workload(s) added (' +
+                streamed.considered + ' of ' + streamed.emitted +
+                ' reached a window query, the rest the run already had).');
+
+            this._reportFilterTotal(evaluated.added, lastReported);
             return evaluated;
         }
 
-        if (hasLabelCondition) {
-            // The label condition's OWN result, before `duplicate` and the extent narrow it and
-            // before the negative guard drops what an earlier filter already matched. Reporting
-            // the post-narrowing number here instead would hide the gap between "the condition
-            // selected this many" and "this many survived", which is usually the interesting part.
-            lastReported = labelMatches.distinct;
-            this._trace('Label Condition: Found (Matched ' + lastReported +
-                ' workload(s))' + this.syncUtils.since(labelStartedAt));
-        } else {
-            this._trace('Label Condition: Not set');
-        }
+        this._trace('Label Condition: Not set');
 
-        // SHAPE D. The label set stays alive as the guard for the whole drain, which is the
-        // reason the CMDB side is the streamed one and not the other way round. No explicit
-        // release afterwards any more: the set is handed to exactly one consumer and this
-        // function returns the moment that consumer does, so there is no stretch where it is
-        // dead but still reachable.
+        // SHAPE D WITHOUT A LABEL CONDITION. Nothing to stream from, so the CI drain stays as it
+        // was -- and it was always one result-sized structure, so nothing is lost by leaving it.
         if (hasCmdbCondition) {
             var cmdbStartedAt = new Date().getTime();
 
+            // null guard, not a label set: this branch is only reached when there is NO label
+            // condition, so there is nothing to guard against. _matchCmdbCondition already treats
+            // a nil guardSet as "admit everything" -- see unionIntoGuarded.
             var drained = this._matchCmdbCondition(
-                filter, extentList, labelMatches, allSysIds, label);
+                filter, extentList, null, allSysIds, label);
 
             evaluated.added = drained.added;
 
@@ -679,40 +716,45 @@ IllumioSyncFilterUtils.prototype = {
             return evaluated;
         }
 
-        // SHAPE C. The label aggregate deliberately leaves `duplicate` out -- it lives on the
-        // workload table, so checking it there would be a join on every row of every term -- so
-        // the label set has to come back through the workload table once. That pass carries the
-        // extent too.
-        this._trace('CMDB Condition: Not set');
-
-        var resolveStartedAt = new Date().getTime();
-        var resolved = this._resolveLabelMatches(extentList, labelMatches, allSysIds, label);
-
-        evaluated.added = resolved.added;
-
-        if (hasExtent) {
-            // Same query as the duplicate check, so this count is "survived both", not "survived
-            // the extent". Named for the extent because that is the only predicate the filter's
-            // author set; `duplicate=false` is applied on every shape and is not theirs to tune.
-            //
-            // `considered` and not labelMatches.distinct as the "of": the difference between
-            // those two is what the negative guard skipped, which the run already has, and
-            // counting it as dropped here would read as the extent rejecting workloads it never
-            // saw.
-            lastReported = resolved.added;
-            this._trace('Extent: Found (Matched ' + resolved.added +
-                ' workload(s) of ' + resolved.considered + ' checked)' +
-                this.syncUtils.since(resolveStartedAt));
-        } else {
-            // Not "Not set and nothing measured": the resolve pass still ran, for
-            // `duplicate=false`, and its cost belongs on a line. This is the only one there is.
-            this._trace('Extent: Not set' +
-                this.syncUtils.since(resolveStartedAt));
-        }
-
-        this._reportFilterTotal(evaluated.added, lastReported);
+        // UNREACHABLE. Every shape now returns above: B at the extent-only branch, C and
+        // D-with-label through _streamLabelCondition, D-without-label through the drain. What is
+        // left is !hasLabelCondition && !hasCmdbCondition, which the extent-only branch already
+        // took -- and the all-three-empty case errors out before any of them.
+        //
+        // Kept as a guard rather than deleted: falling off the end of this function would return
+        // `evaluated` with added = 0 and no error, which is the silent-zero shape this whole
+        // decision record is about.
+        this.logger.error('[IllumioSyncFilterUtils] ' + label + ': reached the end of ' +
+            'evaluateSyncFilter without matching a shape. hasLabel=' + hasLabelCondition +
+            ' hasCmdb=' + hasCmdbCondition + ' hasExtent=' + hasExtent +
+            '. This is a routing defect, not a filter problem.');
+        evaluated.errors.push('Internal: this Sync Filter matched no evaluation shape. ' +
+            'See the syslog entry from IllumioSyncFilterUtils for its condition flags.');
         return evaluated;
     },
+
+    // R13. SHAPE C's old tail, replaced by _streamLabelCondition. It ran AFTER the label set was
+    // fully materialised, walking that set 500 at a time to apply `duplicate` and the extent --
+    // which is the pass the streaming walk now does inline, without the set existing.
+    //
+    // this._trace('CMDB Condition: Not set');
+    //
+    // var resolveStartedAt = new Date().getTime();
+    // var resolved = this._resolveLabelMatches(extentList, labelMatches, allSysIds, label);
+    //
+    // evaluated.added = resolved.added;
+    //
+    // if (hasExtent) {
+    //     lastReported = resolved.added;
+    //     this._trace('Extent: Found (Matched ' + resolved.added +
+    //         ' workload(s) of ' + resolved.considered + ' checked)' +
+    //         this.syncUtils.since(resolveStartedAt));
+    // } else {
+    //     this._trace('Extent: Not set' + this.syncUtils.since(resolveStartedAt));
+    // }
+    //
+    // this._reportFilterTotal(evaluated.added, lastReported);
+    // return evaluated;
 
     /**
      * Close a filter out with its contribution, but only when that number is not already the last
@@ -799,112 +841,277 @@ IllumioSyncFilterUtils.prototype = {
      *   other way to get it back is Object.keys, which at 2M members is a full-size array built
      *   to be measured and dropped.
      */
-    _matchLabelCondition: function(filter, errors, label) {
+    /**
+     * SHAPES C AND D-with-label, as one streaming pass. R50.
+     *
+     * Replaces _matchLabelCondition + _resolveLabelMatches, and replaces the label guard set that
+     * _matchCmdbCondition used to hold for the length of the CMDB drain.
+     *
+     * THE INVERSION. The CMDB side used to drive and the label side was a materialised lookup;
+     * now the label side drives -- streamed -- and the CMDB condition is a per-window query. That
+     * is only possible because row iteration is uncapped where grouped iteration is not, which is
+     * the same measurement that fixed the correctness defect.
+     *
+     * Workloads are buffered to WORKLOAD_CHUNK_SIZE and resolved a window at a time, so the only
+     * structure that grows with the result is `allSysIds` -- R27's one sanctioned exception. The
+     * old shape held three: the term's array, the label set, and `allSysIds`.
+     *
+     * THE NEGATIVE GUARD IS WHY TERMS DO NOT DUPLICATE WORK. Terms are OR'd, so a workload matched
+     * by term 1 is already in `allSysIds` when term 2 reaches it and never costs a second window
+     * query. It is also what keeps a workload an earlier FILTER matched out of this one's queries,
+     * which is the behaviour eachSetWindow had.
+     *
+     * @param {Object} filter Sync Filter record fields
+     * @param {Array} extentList Extent entries from IllumioSyncUtils.splitExtent
+     * @param {Object} allSysIds The run's result set. Grown in place, and read as the guard.
+     * @param {Array} errors Parse errors are pushed here; a non-empty array means fail closed
+     * @param {String} label Filter label for the trace lines
+     * @returns {Object} { emitted, added, considered, terms }
+     */
+    /**
+     * Reject a label condition naming a Label Dimension this configuration cannot use.
+     *
+     * THE ONE IMPLEMENTATION, called from both the save-time rule and the evaluator. The
+     * `Validate Sync Filter Conditions` business rule states the contract this upholds: the label
+     * rules live in one place so that "what is rejected on save and what is refused at run time
+     * cannot drift apart". This rule needs a query, and IllumioSyncUtils is deliberately the
+     * gs-free, DB-free half, so it could not go in the parser itself -- this method is where the
+     * pure half and the repository half are joined instead.
+     *
+     * WHY IT EXISTS AT ALL. The Label Condition is a condition builder over the workload field
+     * value table, and a reference qualifier cannot filter a picker there: an advanced qualifier
+     * needs `current`, and a condition builder has no record of the target table. So the Label
+     * Dimension picker offers every dimension on the instance, from every PCE Configuration, and
+     * nothing stops the author choosing one that cannot match. It is caught here instead.
+     *
+     * @param {String} pceConfigSysId The filter's PCE Configuration
+     * @param {Object} parsed Result of parseLabelCondition -- pass the SAME parse, not a re-parse
+     * @param {Array} errors Messages are appended here; a non-empty array means refuse
+     * @returns {Number} how many unusable dimensions were found
+     */
+    validateLabelDimensions: function(pceConfigSysId, parsed, errors) {
+        if (gs.nil(pceConfigSysId) || !parsed || !parsed.terms || parsed.terms.length === 0) {
+            return 0;
+        }
+
+        var unusable = this.repo.findUnusableLabelDimensions(
+            pceConfigSysId, this.syncUtils.labelDimensionSysIds(parsed));
+
+        for (var index = 0; index < unusable.length; index++) {
+            var entry = unusable[index];
+
+            if (entry.reason === "missing") {
+                errors.push("The Label Condition names a Label Dimension that no longer exists (" +
+                    entry.sysId + "). It was probably deleted after this filter was written. " +
+                    "Remove that condition or choose a current dimension.");
+                continue;
+            }
+
+            errors.push("The Label Condition uses the Label Dimension '" + entry.name +
+                "', which belongs to PCE Configuration '" + entry.configName +
+                "' and not to this filter's. It can never match a workload, so the filter would " +
+                "sync nothing. Choose a dimension from this filter's PCE Configuration.");
+        }
+
+        return unusable.length;
+    },
+
+    _streamLabelCondition: function(filter, extentList, allSysIds, errors, label) {
+        var self = this;
         var parsed = this.syncUtils.parseLabelCondition(filter.label_condition);
 
-        // Fail closed. A mis-parsed condition that silently syncs the wrong workloads is worse
-        // than one that syncs none, and the save-time business rule reports these same strings
-        // from this same call, so validation and evaluation cannot drift apart.
+        // Fail closed, exactly as before. A mis-parsed condition that silently syncs the wrong
+        // workloads is worse than one that syncs none.
         if (parsed.errors.length > 0) {
-            for (var errorIndex = 0; errorIndex < parsed.errors.length; errorIndex++) {
-                errors.push(parsed.errors[errorIndex]);
+            for (var e = 0; e < parsed.errors.length; e++) {
+                errors.push(parsed.errors[e]);
             }
             return null;
         }
 
-        var workloadSysIdsMatchingLabelConditions = {};
+        // Run time as well as save time, for the same reason evaluateSyncFilter re-checks the
+        // extent rules: a business rule fires on save, and a filter arriving by update set or
+        // import never passes through one. Same parse object, so the two cannot disagree about
+        // which dimensions the condition names.
+        if (this.validateLabelDimensions(filter.pce_configuration, parsed, errors) > 0) {
+            return null;
+        }
 
-        // Counted as we go, from unionInto's return value. The progress line used to call
-        // setToArray(...).length on this, which builds a full array of every matched sys_id and
-        // throws it away one expression later -- a second full-size allocation for a log line.
-        var distinct = 0;
+        var hasCmdb = !this.syncUtils.isConditionEmpty(filter.cmdb_condition);
+        var windowSize = this.syncUtils.WORKLOAD_CHUNK_SIZE;
+
+        var emitted = 0;      // qualified by the label condition, before any narrowing
+        var considered = 0;   // actually reached a window query, i.e. survived the negative guard
+        var added = 0;        // joined the run because of this filter
+        var buffer = [];
+
+        var beat = this._makeHeartbeat(label, 'label match(es)');
+
+        var resolveWindow = function() {
+            if (buffer.length === 0) {
+                return;
+            }
+
+            // Shape D applies the CMDB condition in the same pass; shape C has none to apply and
+            // takes the query it has always taken. Both carry `duplicate` and the extent.
+            var survivors = hasCmdb ?
+                self.repo.findSurvivingWorkloadsMatchingCmdb(
+                    buffer, extentList, filter.source_table, filter.cmdb_condition) :
+                self.repo.findSurvivingWorkloads(buffer, extentList);
+
+            added += self.syncUtils.unionInto(allSysIds, survivors);
+            buffer = [];
+            beat(considered, added);
+        };
 
         for (var termIndex = 0; termIndex < parsed.terms.length; termIndex++) {
-            // Per term, because one GlideAggregate over a large label table is the single
-            // longest-running query in phase 1. A filter with four OR'd terms spends four of
-            // these back to back, and without a line each the whole stretch looks like one hang.
-            //
-            // Syslog, not the job record: the caller now prints one "Label Condition: Found"
-            // line with the total, and a filter authored with several terms used to put that many
-            // near-identical lines in front of it naming the same filter.
-            this._trace(label + ': matching label term ' + (termIndex + 1) +
-                ' of ' + parsed.terms.length + '.');
-
-            // A term is ONE GlideAggregate, so there is no inner loop to put a heartbeat in and
-            // no way to say anything while it runs. Closing each term with its own elapsed is the
-            // most that can be offered: a stall then sits between term N's opening line and its
-            // closing one, which names the term to look at. Without it the only signal was the
-            // opening line of the NEXT term, and the last term had none at all.
             var termStartedAt = new Date().getTime();
 
-            var termAdded = this.syncUtils.unionInto(
-                workloadSysIdsMatchingLabelConditions,
-                this.repo.aggregateLabelTermWorkloads(filter.pce_configuration,
-                    filter.class_mapping, parsed.terms[termIndex]));
+            var termEmitted = this.repo.eachLabelTermWorkload(
+                filter.pce_configuration, filter.class_mapping, parsed.terms[termIndex],
+                function(workloadSysId) {
+                    emitted++;
 
-            distinct += termAdded;
+                    // Already in the run -- from an earlier term or an earlier filter -- so the
+                    // answer cannot change and the window query would only re-derive it.
+                    if (allSysIds[workloadSysId]) {
+                        return true;
+                    }
+
+                    considered++;
+                    buffer.push(workloadSysId);
+
+                    if (buffer.length >= windowSize) {
+                        resolveWindow();
+                    }
+                    return true;
+                });
 
             this._trace(label + ': label term ' + (termIndex + 1) + ' of ' +
-                parsed.terms.length + ' matched ' + termAdded + ' new workload(s)' +
+                parsed.terms.length + ' qualified ' + termEmitted + ' workload(s)' +
                 this.syncUtils.since(termStartedAt));
         }
 
-        this._trace(label + ': label condition matched ' + distinct +
-            ' workload(s) across ' + parsed.terms.length + ' term(s).');
+        // The remainder, which is every run whose count is not an exact multiple of the window.
+        resolveWindow();
 
         return {
-            workloadSysIdsMatchingLabelConditions: workloadSysIdsMatchingLabelConditions,
-            distinct: distinct
+            emitted: emitted,
+            considered: considered,
+            added: added,
+            terms: parsed.terms.length
         };
     },
 
-    /**
-     * SHAPE C. Narrow a label-only filter's matches to the non-duplicates inside the extent, and
-     * add the survivors to the run's set.
-     *
-     * The label set is walked directly, a 500-member window at a time. setToArray on it would
-     * build an array the size of the set purely to be iterated in order and dropped -- and at the
-     * peak of a label-only filter the set is the largest thing in the run.
-     *
-     * NEGATIVE GUARD. Members already in allSysIds never reach a query. Filters are ORed, so a
-     * workload an earlier filter already matched is in the result whatever this one decides; the
-     * workload query would only re-derive an answer that is already recorded. At the far end of a
-     * run this can be most of the set.
-     *
-     * @param {Array} extentList Extent entries from IllumioSyncUtils.splitExtent
-     * @param {Object} labelMatches Result of _matchLabelCondition
-     * @param {Object} allSysIds The run's result set. Grown in place, and read as the guard.
-     * @param {String} [label] Filter label for the trace lines
-     * @returns {Object} { added: Number, considered: Number } -- workloads added to the run, and
-     *   how many label matches reached a query at all. The caller needs both: `added` is the
-     *   filter's contribution and the gap between them is what the negative guard skipped.
-     */
-    _resolveLabelMatches: function(extentList, labelMatches, allSysIds, label) {
-        var self = this;
-        var added = 0;
-        var considered = 0;
-
-        // Silent for its whole duration before this. One window is one workload query, and a
-        // label condition that matched a large set spends as many of them as it takes -- with
-        // nothing said between the "Label Condition: Found" line and the closing line below.
-        var resolveBeat = this._makeHeartbeat(label || 'Label resolve', 'label match(es)');
-
-        this.syncUtils.eachSetWindow(labelMatches.workloadSysIdsMatchingLabelConditions,
-            this.syncUtils.WORKLOAD_CHUNK_SIZE, allSysIds,
-            function(window) {
-                considered += window.length;
-                added += self.syncUtils.unionInto(
-                    allSysIds, self.repo.findSurvivingWorkloads(window, extentList));
-                resolveBeat(considered, added);
-            });
-
-        this._trace(label + ': ' + added + ' workload(s) added (' + considered +
-            ' of ' + labelMatches.distinct + ' label match(es) checked for duplicate and ' +
-            'extent, ' + (labelMatches.distinct - considered) +
-            ' already matched by an earlier filter).');
-
-        return { added: added, considered: considered };
-    },
+    // R13. _matchLabelCondition, replaced by _streamLabelCondition above. It built the whole label
+    // set before anything else ran, which is what made the CMDB side the streamed one and forced
+    // the set to stay alive as a guard for the length of that drain.
+    // _matchLabelCondition: function(filter, errors, label) {
+    // var parsed = this.syncUtils.parseLabelCondition(filter.label_condition);
+    //
+    // // Fail closed. A mis-parsed condition that silently syncs the wrong workloads is worse
+    // // than one that syncs none, and the save-time business rule reports these same strings
+    // // from this same call, so validation and evaluation cannot drift apart.
+    // if (parsed.errors.length > 0) {
+    // for (var errorIndex = 0; errorIndex < parsed.errors.length; errorIndex++) {
+    // errors.push(parsed.errors[errorIndex]);
+    // }
+    // return null;
+    // }
+    //
+    // var workloadSysIdsMatchingLabelConditions = {};
+    //
+    // // Counted as we go, from unionInto's return value. The progress line used to call
+    // // setToArray(...).length on this, which builds a full array of every matched sys_id and
+    // // throws it away one expression later -- a second full-size allocation for a log line.
+    // var distinct = 0;
+    //
+    // for (var termIndex = 0; termIndex < parsed.terms.length; termIndex++) {
+    // // Per term, because one GlideAggregate over a large label table is the single
+    // // longest-running query in phase 1. A filter with four OR'd terms spends four of
+    // // these back to back, and without a line each the whole stretch looks like one hang.
+    // //
+    // // Syslog, not the job record: the caller now prints one "Label Condition: Found"
+    // // line with the total, and a filter authored with several terms used to put that many
+    // // near-identical lines in front of it naming the same filter.
+    // this._trace(label + ': matching label term ' + (termIndex + 1) +
+    // ' of ' + parsed.terms.length + '.');
+    //
+    // // A term is ONE GlideAggregate, so there is no inner loop to put a heartbeat in and
+    // // no way to say anything while it runs. Closing each term with its own elapsed is the
+    // // most that can be offered: a stall then sits between term N's opening line and its
+    // // closing one, which names the term to look at. Without it the only signal was the
+    // // opening line of the NEXT term, and the last term had none at all.
+    // var termStartedAt = new Date().getTime();
+    //
+    // var termAdded = this.syncUtils.unionInto(
+    // workloadSysIdsMatchingLabelConditions,
+    // this.repo.aggregateLabelTermWorkloads(filter.pce_configuration,
+    // filter.class_mapping, parsed.terms[termIndex]));
+    //
+    // distinct += termAdded;
+    //
+    // this._trace(label + ': label term ' + (termIndex + 1) + ' of ' +
+    // parsed.terms.length + ' matched ' + termAdded + ' new workload(s)' +
+    // this.syncUtils.since(termStartedAt));
+    // }
+    //
+    // this._trace(label + ': label condition matched ' + distinct +
+    // ' workload(s) across ' + parsed.terms.length + ' term(s).');
+    //
+    // return {
+    // workloadSysIdsMatchingLabelConditions: workloadSysIdsMatchingLabelConditions,
+    // distinct: distinct
+    // };
+    // },
+    //
+    // /**
+    // * SHAPE C. Narrow a label-only filter's matches to the non-duplicates inside the extent, and
+    // * add the survivors to the run's set.
+    // *
+    // * The label set is walked directly, a 500-member window at a time. setToArray on it would
+    // * build an array the size of the set purely to be iterated in order and dropped -- and at the
+    // * peak of a label-only filter the set is the largest thing in the run.
+    // *
+    // * NEGATIVE GUARD. Members already in allSysIds never reach a query. Filters are ORed, so a
+    // * workload an earlier filter already matched is in the result whatever this one decides; the
+    // * workload query would only re-derive an answer that is already recorded. At the far end of a
+    // * run this can be most of the set.
+    // *
+    // * @param {Array} extentList Extent entries from IllumioSyncUtils.splitExtent
+    // * @param {Object} labelMatches Result of _matchLabelCondition
+    // * @param {Object} allSysIds The run's result set. Grown in place, and read as the guard.
+    // * @param {String} [label] Filter label for the trace lines
+    // * @returns {Object} { added: Number, considered: Number } -- workloads added to the run, and
+    // *   how many label matches reached a query at all. The caller needs both: `added` is the
+    // *   filter's contribution and the gap between them is what the negative guard skipped.
+    // */
+    // _resolveLabelMatches: function(extentList, labelMatches, allSysIds, label) {
+    // var self = this;
+    // var added = 0;
+    // var considered = 0;
+    //
+    // // Silent for its whole duration before this. One window is one workload query, and a
+    // // label condition that matched a large set spends as many of them as it takes -- with
+    // // nothing said between the "Label Condition: Found" line and the closing line below.
+    // var resolveBeat = this._makeHeartbeat(label || 'Label resolve', 'label match(es)');
+    //
+    // this.syncUtils.eachSetWindow(labelMatches.workloadSysIdsMatchingLabelConditions,
+    // this.syncUtils.WORKLOAD_CHUNK_SIZE, allSysIds,
+    // function(window) {
+    // considered += window.length;
+    // added += self.syncUtils.unionInto(
+    // allSysIds, self.repo.findSurvivingWorkloads(window, extentList));
+    // resolveBeat(considered, added);
+    // });
+    //
+    // this._trace(label + ': ' + added + ' workload(s) added (' + considered +
+    // ' of ' + labelMatches.distinct + ' label match(es) checked for duplicate and ' +
+    // 'extent, ' + (labelMatches.distinct - considered) +
+    // ' already matched by an earlier filter).');
+    //
+    // return { added: added, considered: considered };
+    // },
 
     /**
      * SHAPE D. Workloads matching a filter's CMDB condition, guarded by the label result, added
@@ -1150,13 +1357,13 @@ IllumioSyncFilterUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-23 09:06:25</sys_created_on>
         <sys_id>4429e6b8c3a38bd050bffa0ed40131ac</sys_id>
-        <sys_mod_count>7</sys_mod_count>
+        <sys_mod_count>9</sys_mod_count>
         <sys_name>IllumioSyncFilterUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4429e6b8c3a38bd050bffa0ed40131ac</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 12:00:44</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-08 14:51:28</sys_updated_on>
     </sys_script_include>
 </record_update>

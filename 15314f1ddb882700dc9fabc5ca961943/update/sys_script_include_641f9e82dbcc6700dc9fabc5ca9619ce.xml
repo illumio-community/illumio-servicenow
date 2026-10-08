@@ -257,7 +257,61 @@ IllumioStartDiscovery.prototype = {
      */
     createAsyncJobs: function(jobSysId, configSysId) {
         this.logger.info('Creating async jobs on PCE');
-        var pceConfig = new IllumioGetPCEConfiguration(jobSysId).getConfiguration(configSysId);
+
+        // F18 GUARD -- twin of the one in IllumioStartAuthentication.startAuthetication. A change
+        // to one belongs in both; they are the only two synchronous entry points in the app.
+        //
+        // process() is called directly by the `Illumio Data Collection` UI Action rather than
+        // through gs.eventQueueScheduled, so everything below runs in the clicking user's
+        // transaction under the clicking user's ACLs. The preview, export, sync and deletion paths
+        // all queue an event and execute as `system`, which is why they survive a caller who holds
+        // no platform role and this does not.
+        //
+        // The `if (pceConfig)` below was already correctly ordered -- unlike its twin, nothing
+        // dereferenced pceConfig before the check -- but it only catches getConfiguration()
+        // RETURNING null. It does not catch getConfiguration() THROWING, and two things in there
+        // throw for a non-platform-admin: the `String(pceConfig.mid_server.name)` dot-walk into
+        // ecc_agent (governed by the global `mid_server` role) and the two getDecryptedValue()
+        // calls. The try/catch at :253 sits inside the `if`, so it never saw them either.
+        //
+        // process() inserted the job at JOB_STATUS_RUNNING before calling this and guards only on
+        // the return value, so an escaping throw left the job `running` until
+        // x_illu2_illumio.invalidate_running_job_limit (7200s) force-cancelled it. Measured
+        // 2026-10-05: Data Collection hung indefinitely for a user holding all four
+        // x_illu2_illumio roles but not the global mid_server role.
+        var pceConfig = null;
+        try {
+            pceConfig = new IllumioGetPCEConfiguration(jobSysId).getConfiguration(configSysId);
+        } catch (ex) {
+            this.utils.handleFailure(
+                jobSysId,
+                'PCE Configuration unreadable',
+                'Could not read PCE Configuration ' + configSysId + '. Exception: ' + ex +
+                '. If the MID Server field appears empty, the user who started this job is ' +
+                'missing the global mid_server role, which governs read access to ecc_agent.',
+                configSysId
+            );
+            return false;
+        }
+
+        // The same check IllumioPreviewUtils:797 already applies on the preview path. Without it a
+        // readable configuration with an unreadable MID Server reaches IllumioAddToECCQueue at
+        // :293 with pceConfig.midServer empty, which queues to agent 'mid.server.' -- a row no MID
+        // Server will ever claim. The insert succeeds, so the existing `if (!addToECCQueue)` at
+        // :300 does not fire, and the job hangs rather than failing.
+        if (pceConfig && gs.nil(pceConfig.midServer)) {
+            this.utils.handleFailure(
+                jobSysId,
+                'No MID Server',
+                'PCE Configuration ' + configSysId + ' resolved no MID Server, so discovery ' +
+                'cannot be started. Either the MID Server field is unset on the configuration, ' +
+                'or the user who started this job cannot read it -- that read requires the ' +
+                'global mid_server role.',
+                configSysId
+            );
+            return false;
+        }
+
         var types = ['workload', 'label'];
 
         if (pceConfig) {
@@ -318,7 +372,13 @@ IllumioStartDiscovery.prototype = {
                         );
                         return false;
                     }
-                    this.logger.info('Started async job to fetch PCE ' + type + 's');
+                    // Tagged '[Labels]' / '[Workloads]' to match the poll lines in
+                    // IllumioPollAsyncJobStatus and the MID's own lines in
+                    // IllumioManageAsyncJobs. The two async jobs run concurrently and interleave
+                    // in syslog, so an untagged line forces the reader to work out which one it
+                    // belongs to from its position.
+                    this.logger.info('[' + type.charAt(0).toUpperCase() + type.slice(1) +
+                        's] Requested fetch from PCE');
                 }
 
 
@@ -353,14 +413,14 @@ IllumioStartDiscovery.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:20:29</sys_created_on>
         <sys_id>641f9e82dbcc6700dc9fabc5ca9619ce</sys_id>
-        <sys_mod_count>133</sys_mod_count>
+        <sys_mod_count>135</sys_mod_count>
         <sys_name>IllumioStartDiscovery</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_641f9e82dbcc6700dc9fabc5ca9619ce</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 04:58:09</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 15:36:19</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>641f9e82dbcc6700dc9fabc5ca9619ce</id>

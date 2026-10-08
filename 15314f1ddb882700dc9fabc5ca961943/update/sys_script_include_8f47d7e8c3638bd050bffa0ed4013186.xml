@@ -393,6 +393,46 @@ IllumioPreviewUtils.prototype = {
             var hostnameField = isAdvancedHostname ?
                 null : hostFieldGr["ci_field"].getDisplayValue();
 
+            // PRE-FLIGHT, BEFORE THE SCAN. D15.
+            //
+            // This preview now ends at the MID, so it needs a PCE Configuration and a MID Server
+            // where it previously needed neither -- its entire input is a CMDB table. _dispatch
+            // checks the same two things, but it runs AFTER the scan: a missing MID would throw
+            // away a walk of up to `maximum_ci_records` rows before saying so. One query here
+            // turns "fails three minutes in" into "fails immediately".
+            //
+            // Deliberately NOT a fallback to the old inline GlideSysAttachment.write. A second
+            // code path kept for what is really a misconfiguration would also quietly preserve
+            // the unbounded accumulator this change exists to remove.
+            var configSysId = this._configSysIdFor(context);
+            if (gs.nil(configSysId)) {
+                this._fail(illumioJobId, "No PCE Configuration is set on " + context.table + "/" +
+                    context.sysId + ", so there is no MID Server to assemble the preview on. " +
+                    "Nothing was scanned.");
+                return;
+            }
+            var preflightConfig = new IllumioGetPCEConfiguration(illumioJobId)
+                .getConfiguration(configSysId);
+            if (!preflightConfig || gs.nil(preflightConfig.midServer)) {
+                this._fail(illumioJobId, "PCE Configuration " + configSysId + " has no MID " +
+                    "Server, so the preview file cannot be assembled. Nothing was scanned.");
+                return;
+            }
+
+            // Sweep before anything else, same as `process`. D15 put this preview on the shared
+            // PREVIEW_PAYLOAD_TABLE, so it inherits the contract that goes with it: rows are NOT
+            // deleted as the MID consumes them -- a MID failure part way through would otherwise
+            // destroy the only copy -- so they outlive the run by design and the next run clears
+            // them. Until this call existed, a failed filter-mode preview left its chunks on the
+            // table until some other preview or an auto-sync happened to sweep.
+            //
+            // Also after the pre-flight above, not before: sweeping on behalf of a run that is
+            // about to refuse for want of a MID Server would delete another run's evidence for
+            // nothing.
+            this.repo.deleteStalePayloadRows(
+                this.syncUtils.PREVIEW_PAYLOAD_TABLE, illumioJobId,
+                this.utils.jobProgressLogger(illumioJobId));
+
             // Same rule, same reason as `process`: the record holds the most recent run's preview
             // and nothing else, and it is cleared NOW rather than when the new file lands. A
             // stale CSV sitting on the record while this runs downloads without complaint and
@@ -425,7 +465,19 @@ IllumioPreviewUtils.prototype = {
             var repo = new IllumioDiscoveryRepository();
             var discoverHelper = new IllumioDiscoverAndMapCMDBServers();
             var headers = ["sys_id", "name", "sys_class_name", "ip_address", "hostname"];
-            var lines = [headers.join(",")];
+
+            // D15. WAS `var lines = [headers.join(",")]` with one push per matching record and a
+            // closing `lines.join("\n")` -- the array and the joined string both live at the
+            // write, bounded only by `maximum_ci_records`. That property moved 200,000 ->
+            // 30,000,000 on 2026-10-07, which took the ceiling from ~50 MB to ~7 GB and made this
+            // the only path in the app whose memory scaled with CI COUNT rather than match count.
+            //
+            // The writer holds one ~1 MB chunk. The header is pushed as ordinary text with zero
+            // units, exactly as generateWorkloadCsv emits it, so the MID's concatenation needs no
+            // special case for the first chunk.
+            var writer = this._makePayloadWriter(illumioJobId, context, 'CMDB record(s)', 0);
+            var writeFailed = false;
+            writer.push(headers.join(",") + "\n", 0);
 
             var self = this;
             var cancelled = false;
@@ -435,7 +487,10 @@ IllumioPreviewUtils.prototype = {
             var result = repo.iterateFilteredCMDBRecords(
                 sourceTable, filterMode, condition, maxRecords,
                 function(previewGr) {
-                    if (cancelled) {
+                    // writeFailed stops the walk the same way cancellation does. A failed payload
+                    // insert means the CSV is already incomplete, so continuing the scan would
+                    // spend the rest of the run building a file that cannot be assembled.
+                    if (cancelled || writeFailed) {
                         return false;
                     }
 
@@ -455,7 +510,10 @@ IllumioPreviewUtils.prototype = {
                         }
                         row.push(val);
                     }
-                    lines.push(row.join(","));
+                    if (!writer.push(row.join(",") + "\n", 1)) {
+                        writeFailed = true;
+                        return false;
+                    }
                 },
                 {
                     // Per window rather than per record: the cancel check is a query, and the
@@ -481,7 +539,8 @@ IllumioPreviewUtils.prototype = {
                         // class and is now simply one of them.
                         self.logger.info(
                             "Window " + windowNumber + ": " + windowCount +
-                            " record(s) scanned, " + (lines.length - 1) + " kept" +
+                            " record(s) scanned, " + writer.state.chunkCount +
+                            " payload chunk(s) written so far" +
                             self.syncUtils.since(windowStartedAt));
                         windowStartedAt = new Date().getTime();
                     }
@@ -489,8 +548,16 @@ IllumioPreviewUtils.prototype = {
             );
 
             if (cancelled) {
+                // Withdraw first. A cancelled scan can already have written chunks, and they are
+                // no longer reachable by anything -- the MID is never dispatched, so nothing will
+                // consume or clean them. deleteStalePayloadRows would sweep them eventually by job
+                // liveness, but leaving up to `maximum_ci_records` worth of 1 MB rows on the table
+                // until it runs is not a cleanup strategy.
+                this._withdraw(writer.state.payloadSysIds);
                 this.utils.finalizeCancelledJob(illumioJobId,
-                    "Preview cancelled while scanning the CMDB. No attachment was written.");
+                    "Preview cancelled while scanning the CMDB. " +
+                    writer.state.chunkCount + " payload chunk(s) were withdrawn and no " +
+                    "attachment was written.");
                 return;
             }
 
@@ -512,26 +579,44 @@ IllumioPreviewUtils.prototype = {
                 current_operation: "Writing CSV"
             });
 
-            var writeStartedAt = new Date().getTime();
-            var csvContent = lines.join("\n");
-            var fileName = this.fileName(context);
-
-            var attachmentSysId = new GlideSysAttachment().write(
-                mappingGr, fileName, "text/csv", csvContent);
-
-            if (gs.nil(attachmentSysId)) {
-                this._fail(illumioJobId, "GlideSysAttachment.write returned nothing for " +
-                    fileName + " (" + csvContent.length + " characters of CSV), so the preview " +
-                    "was not attached.");
+            // The remainder, which is every run whose byte total is not an exact multiple of the
+            // 1 MB budget.
+            if (writeFailed || !writer.finish()) {
+                this._withdraw(writer.state.payloadSysIds);
+                this._fail(illumioJobId, writer.state.message ||
+                    "A preview payload row could not be written, so the CSV is incomplete and " +
+                    "was not assembled.");
                 return;
             }
 
-            this._complete(illumioJobId, "Preview attached as " + fileName + ": " +
-                result.fetchedCount + " CMDB record(s) will be processed by discovery in " +
-                modeLabel + " mode" +
-                (result.excludedCount > 0 ?
-                    ", " + result.excludedCount + " excluded" : "") +
-                this.syncUtils.since(writeStartedAt));
+            this.utils.updateJobRecord(illumioJobId, {
+                logs: "Wrote " + writer.state.chunkCount + " payload chunk(s), " +
+                    writer.state.totalBytes + " byte(s) of CSV covering " +
+                    result.fetchedCount + " CMDB record(s).",
+                current_operation: "Assembling on the MID Server"
+            });
+
+            // D15. WAS GlideSysAttachment.write of the whole joined string. Now the same
+            // payload-table -> MID -> gzip -> upload path every other preview uses, which is why
+            // `type` already carried a `preview_filter_mode` choice and `prefixForType` already
+            // knew about TYPE_FILTER_MODE: the groundwork was laid and never finished.
+            //
+            // The attachment becomes .csv.gz -- the MID appends the extension because it is the
+            // side that knows whether it compressed. Anything fetching the old .csv by name will
+            // need updating; see the upgrade notes.
+            var dispatched = this._dispatch(illumioJobId, context, writer.state);
+            if (!dispatched.success) {
+                this._withdraw(writer.state.payloadSysIds);
+                this._fail(illumioJobId, dispatched.message);
+                return;
+            }
+
+            this.logger.info("[IllumioPreviewUtils] Dispatched " + context.type +
+                " preview for " + context.table + "/" + context.sysId + ": " +
+                writer.state.chunkCount + " chunk(s), " + result.fetchedCount +
+                " CMDB record(s) in " + modeLabel + " mode" +
+                (result.excludedCount > 0 ? ", " + result.excludedCount + " excluded" : "") +
+                this.syncUtils.since(scanStartedAt));
         } catch (ex) {
             this.logger.error("[IllumioPreviewUtils] Filter mode preview exception: " + ex);
             this._fail(illumioJobId,
@@ -683,7 +768,27 @@ IllumioPreviewUtils.prototype = {
      * @param {Array} sysIds Workload sys_ids, in whatever order phase 1 produced
      * @returns {Object} { success, cancelled, message, payloadSysIds, chunkCount, totalBytes }
      */
-    _writePayloadRows: function(illumioJobId, context, sysIds) {
+    /**
+     * A byte-budgeted writer onto the preview payload table. D15.
+     *
+     * Extracted from _writePayloadRows so the DISCOVERY FILTER preview can use the same code.
+     * That preview used to accumulate every matching CMDB row as a CSV line and then
+     * `lines.join("\n")` the lot -- two full-size structures live at GlideSysAttachment.write,
+     * bounded only by `maximum_ci_records`, which moved from 200,000 to 30,000,000 on 2026-10-07.
+     * It was the only path in the app whose memory scaled with CI count rather than match count.
+     *
+     * Callers push text and say how many UNITS that text represents -- workloads for the sync
+     * preview, CMDB records for the filter preview. The writer owns the 1 MB budget, the row
+     * insert, the sequence number and the progress line; it never holds more than one chunk.
+     *
+     * @param {String} illumioJobId Job to stamp rows with and log against
+     * @param {Object} context { type, table, sysId }
+     * @param {String} unitNoun What `units` counts, for the progress line
+     * @param {Number} totalUnits Expected total, or 0 when unknown -- only used for "N/total"
+     * @returns {Object} { state, push(text, units), finish() } -- push and finish return false
+     *                   on a failed insert, and `state` carries the counts the caller reports
+     */
+    _makePayloadWriter: function(illumioJobId, context, unitNoun, totalUnits) {
         var self = this;
         var state = {
             success: false,
@@ -696,6 +801,8 @@ IllumioPreviewUtils.prototype = {
 
         var buffer = [];
         var bufferBytes = 0;
+        var covered = 0;
+        var startedAt = new Date().getTime();
 
         var flush = function() {
             if (bufferBytes === 0) {
@@ -732,10 +839,55 @@ IllumioPreviewUtils.prototype = {
             state.chunkCount++;
             state.totalBytes += bytes;
 
+            // PROGRESS. A chunk is ~1 MB and was measured at 14-15s to write, so a 250K export is
+            // ~50 of them and used to be ~12 MINUTES of silence. One line per chunk is therefore
+            // already a ~15-second heartbeat -- no throttle needed, and the interval is
+            // self-correcting: a slower chunk reports later rather than later AND less often,
+            // which is the failure mode a batch counter has (see
+            // IllumioSyncFilterUtils._makeHeartbeat).
+            //
+            // W2: syslog, not the job record. This is per-chunk; the caller puts the totals on the
+            // record when the render ends, and ~50 more read-modify-writes on `logs` is ~50 more
+            // chances for the lost-update race to eat one of them.
+            self.logger.info('[IllumioPreviewUtils] Chunk ' + state.chunkCount + ': ' +
+                bytes + ' byte(s) written, ' +
+                (totalUnits ? Math.min(covered, totalUnits) + '/' + totalUnits : covered) +
+                ' ' + unitNoun + ' rendered' + self.syncUtils.since(startedAt));
+
             buffer = [];
             bufferBytes = 0;
             return true;
         };
+
+        return {
+            state: state,
+
+            push: function(text, units) {
+                covered += (units || 0);
+                buffer.push(text);
+                bufferBytes += self.syncUtils.utf8Length(text);
+
+                if (bufferBytes >= self.syncUtils.PREVIEW_CHUNK_BYTES) {
+                    return flush();
+                }
+                return true;
+            },
+
+            // The remainder, which is every run whose byte total is not an exact multiple of the
+            // budget -- i.e. all of them.
+            finish: function() {
+                return flush();
+            }
+        };
+    },
+
+    _writePayloadRows: function(illumioJobId, context, sysIds) {
+        var self = this;
+        var totalWorkloads = sysIds ? sysIds.length : 0;
+        var writer = this._makePayloadWriter(illumioJobId, context, 'workload(s)', totalWorkloads);
+        var state = writer.state;
+        var batchSize = this.filterUtils.CSV_BATCH_SIZE;
+        var emits = 0;
 
         var failed = false;
 
@@ -752,10 +904,12 @@ IllumioPreviewUtils.prototype = {
                     return;
                 }
 
-                buffer.push(text);
-                bufferBytes += self.syncUtils.utf8Length(text);
-
-                if (bufferBytes >= self.syncUtils.PREVIEW_CHUNK_BYTES && !flush()) {
+                // generateWorkloadCsv emits the header FIRST and then one batch per
+                // CSV_BATCH_SIZE window, so the first emit carries no workloads and every other
+                // carries up to a full batch. The writer clamps the running total against
+                // totalWorkloads, which is what makes the last short batch read correctly.
+                emits++;
+                if (!writer.push(text, emits === 1 ? 0 : batchSize)) {
                     failed = true;
                 }
             });
@@ -769,7 +923,7 @@ IllumioPreviewUtils.prototype = {
             return state;
         }
 
-        if (failed || !flush()) {
+        if (failed || !writer.finish()) {
             return state;
         }
 
@@ -1048,13 +1202,13 @@ IllumioPreviewUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-22 17:49:40</sys_created_on>
         <sys_id>8f47d7e8c3638bd050bffa0ed4013186</sys_id>
-        <sys_mod_count>11</sys_mod_count>
+        <sys_mod_count>14</sys_mod_count>
         <sys_name>IllumioPreviewUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_8f47d7e8c3638bd050bffa0ed4013186</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 04:58:10</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-08 14:31:02</sys_updated_on>
     </sys_script_include>
 </record_update>

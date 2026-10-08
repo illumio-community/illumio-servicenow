@@ -17,7 +17,11 @@
 		current.keys_to_map,
 		current.retry_count,
 		current.illumio_job_id,
-		current.job_identifier
+		current.job_identifier,
+		// For the poll line's elapsed figure. Taken from the record this action already holds,
+		// so it costs nothing -- IllumioPollAsyncJobStatus would otherwise have to re-query the
+		// async job once per poll to learn when it started.
+		current.sys_created_on
 	);
 	illumioPollAsyncJobStatus.execute();
 }
@@ -29,14 +33,14 @@ getPCEAsyncJobStatus();]]></script>
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>b3059682dbcc6700dc9fabc5ca961917</sys_id>
-        <sys_mod_count>6</sys_mod_count>
+        <sys_mod_count>7</sys_mod_count>
         <sys_name>IllumioGetPCEAsyncJobStatus</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sysevent_script_action_b3059682dbcc6700dc9fabc5ca961917</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2020-02-25 09:39:48</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 15:36:19</sys_updated_on>
     </sysevent_script_action>
 </record_update>

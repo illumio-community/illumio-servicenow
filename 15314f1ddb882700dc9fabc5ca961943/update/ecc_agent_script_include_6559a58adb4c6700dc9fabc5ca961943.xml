@@ -308,6 +308,143 @@ IllumioHTTPClient.prototype = {
     },
 
     /**
+     * GET a response straight to a file on disk, never holding it in memory.
+     *
+     * The mirror image of postFile, and deliberately not routed through _executeMethod for the
+     * same reason: that one reads the whole body before it does anything else.
+     *
+     *     var responseBody = method.getResponseBody();                 // byte[], the whole body
+     *     responseBody = IOUtils.toString(responseBody, "UTF-8");      // + a UTF-16 copy of it
+     *     data: JSON.parse(responseBody)                               // + the whole object graph
+     *
+     * Three full-size forms of the same payload, live inside one try block. That is what threw
+     * `java.lang.OutOfMemoryError: GC overhead limit exceeded` on 2026-10-06 against a PCE holding
+     * 50,000 workloads -- the first time this path had ever run with data in it. See R48.
+     *
+     * Here `getResponseBodyAsStream` is copied to a temp file by IOUtils, so the peak is one I/O
+     * buffer no matter how large the response is. The caller walks the file.
+     *
+     * STILL RETRIED, unlike postFile. The asymmetry is deliberate and the reason is idempotence:
+     * re-POSTing a preview could leave a second attachment on the record, whereas re-GETting an
+     * async job result cannot do any harm. What changes is the ORDER -- the status code is checked
+     * and the retry decision made BEFORE the body is touched, so a 5xx costs nothing to discard
+     * and a retry never has a half-read stream behind it.
+     *
+     * @param {String} endpoint Endpoint of the API
+     * @param {String} queryString Query to add in the URL
+     * @param {java.io.File} targetFile File to stream the response body into
+     * @param {Number} [retryCount] Attempts remaining; defaults to the configured count
+     * @param {Number} [lastSleepTime] Previous backoff, for the ramp
+     * @returns {JSON} { hasError, status, file, headers }
+     **/
+    getToFile: function(endpoint, queryString, targetFile, retryCount, lastSleepTime) {
+        var getMethod = new GetMethod(this.baseUrl + endpoint);
+        if (queryString) {
+            getMethod.setQueryString(queryString);
+        }
+
+        var input = null;
+        var output = null;
+
+        try {
+            this._pace();
+            this.client.executeMethod(getMethod);
+            this.lastCallFinishedAt = new Date().getTime();
+
+            var responseCode = parseInt(getMethod.getStatusCode());
+
+            var getMethodResponseHeaders = getMethod.getResponseHeaders();
+            var responseHeaders = {};
+            for (var i = 0, len = getMethodResponseHeaders.length; i < len; i++) {
+                responseHeaders[getMethodResponseHeaders[i].getName()] = getMethodResponseHeaders[i].getValue();
+            }
+
+            if (responseCode < 200 || responseCode >= 300) {
+                retryCount = (typeof retryCount == 'undefined') ? this.httpRetryCount : retryCount;
+
+                if (!this.retryEnabled || retryCount <= 0 ||
+                    (RETRY_CODES.indexOf(responseCode) == -1 && responseCode < 500)) {
+                    this.logger._error('Failed: HTTPGET-to-file Call, status: ' + responseCode);
+                    if (!this.retryEnabled && (RETRY_CODES.indexOf(responseCode) != -1 ||
+                            responseCode >= 500)) {
+                        this.logger._error('This status was retryable, but retrying is disabled ' +
+                            'because the PCE Configuration\'s Retry Count, Retry Interval Increment ' +
+                            'and Retry Interval Max are not all greater than zero.');
+                    }
+                    return {
+                        hasError: true,
+                        status: responseCode
+                    };
+                }
+
+                lastSleepTime = lastSleepTime ? lastSleepTime : 0;
+                lastSleepTime = Math.min(this.httpRetryIntervalMax,
+                    lastSleepTime + this.httpRetryIntervalIncrement);
+
+                var retryAfterSeconds = 0;
+                if (responseCode == 429) {
+                    var retryAfterHeader = this._findHeader(responseHeaders, 'retry-after');
+                    if (retryAfterHeader) {
+                        retryAfterSeconds = this.parseRetryAfterHeader(retryAfterHeader);
+                    }
+                }
+                if (retryAfterSeconds > 0) {
+                    lastSleepTime = Math.min(retryAfterSeconds, this.httpRetryIntervalMax);
+                }
+
+                this.logger._warning('HTTP GET-to-file ' + endpoint + ' returned ' + responseCode +
+                    '. Waiting ' + lastSleepTime + ' seconds before retrying (' + retryCount +
+                    ' attempt(s) left).');
+                getMethod.releaseConnection();
+                Packages.java.lang.Thread.sleep(lastSleepTime * 1000);
+                return this.getToFile(endpoint, queryString, targetFile, retryCount - 1, lastSleepTime);
+            }
+
+            // Only now is the body touched, and only as a stream. IOUtils.copy moves it in fixed
+            // buffers; nothing proportional to the response is ever allocated on this side.
+            input = getMethod.getResponseBodyAsStream();
+            if (!input) {
+                this.logger._error('Failed: HTTPGET-to-file Call returned no body, status: ' + responseCode);
+                return {
+                    hasError: true,
+                    status: responseCode
+                };
+            }
+
+            output = new Packages.java.io.FileOutputStream(targetFile);
+            var copied = IOUtils.copyLarge(input, output);
+            output.flush();
+
+            this.logger._debug('HTTP GET-to-file complete, status: ' + responseCode +
+                ', ' + copied + ' byte(s) to ' + targetFile.getAbsolutePath());
+
+            return {
+                hasError: false,
+                status: responseCode,
+                file: targetFile,
+                headers: responseHeaders
+            };
+        } catch (e) {
+            this.logger._error('PCE request failed : Exception ' + e);
+            this.logger._error('Failed: HTTPGET-to-file Call, status: 0');
+            return {
+                hasError: true,
+                status: 0
+            };
+        } finally {
+            // Closed in this order and individually: a failure closing the stream must not leave
+            // the file handle open, and neither must stop releaseConnection from running.
+            if (input) {
+                try { input.close(); } catch (ignored) {}
+            }
+            if (output) {
+                try { output.close(); } catch (ignored) {}
+            }
+            getMethod.releaseConnection();
+        }
+    },
+
+    /**
      * Execute the POST call and retry multiple times if the request fails
      * @param {String} endpoint Endpoint of the API
      * @param {String} queryString Query to add in the URL
@@ -479,14 +616,14 @@ IllumioHTTPClient.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>6559a58adb4c6700dc9fabc5ca961943</sys_id>
-        <sys_mod_count>224</sys_mod_count>
+        <sys_mod_count>225</sys_mod_count>
         <sys_name>IllumioHTTPClient</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_6559a58adb4c6700dc9fabc5ca961943</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:37</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 09:25:59</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

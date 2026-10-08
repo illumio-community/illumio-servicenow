@@ -271,6 +271,53 @@ IllumioSyncUtils.prototype = {
      * @param {String} condition One ^-separated condition, with or without an OR prefix
      * @returns {Object} { field, operator, value } - any of them "" when not present
      */
+    /**
+     * The distinct Label Dimension sys_ids a parsed label condition names.
+     *
+     * Pure, and deliberately so -- this class is the gs-free, DB-free half, and deciding whether
+     * a dimension BELONGS to a configuration needs a query. The split is: this reports which
+     * dimensions were named, IllumioSyncRepoUtils.findUnusableLabelDimensions decides whether
+     * they are usable, and IllumioSyncFilterUtils.validateLabelDimensions joins the two so the
+     * save-time rule and the evaluator run one implementation rather than two.
+     *
+     * Reads sub-predicates rather than the raw condition text so it sees exactly what the
+     * evaluator will query on. By this point parseLabelCondition has already rejected ^OR on the
+     * dimension field, so each sub-predicate names exactly one.
+     *
+     * @param {Object} parsed Result of parseLabelCondition
+     * @returns {Array} distinct dimension sys_ids, in first-seen order
+     */
+    labelDimensionSysIds: function(parsed) {
+        var sysIds = [];
+        var seen = {};
+
+        if (!parsed || !parsed.terms) {
+            return sysIds;
+        }
+
+        for (var termIndex = 0; termIndex < parsed.terms.length; termIndex++) {
+            var subPredicates = parsed.terms[termIndex];
+
+            for (var subIndex = 0; subIndex < subPredicates.length; subIndex++) {
+                var tokens = ("" + subPredicates[subIndex]).split(this.CONDITION_SEPARATOR);
+
+                for (var tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+                    if (!this.isDimensionCondition(tokens[tokenIndex])) {
+                        continue;
+                    }
+
+                    var value = this.splitCondition(tokens[tokenIndex]).value;
+                    if (value && !seen[value]) {
+                        seen[value] = true;
+                        sysIds.push(value);
+                    }
+                }
+            }
+        }
+
+        return sysIds;
+    },
+
     splitCondition: function(condition) {
         var text = this.stripOrPrefix(condition);
         var field = this.conditionField(text);
@@ -1245,13 +1292,13 @@ IllumioSyncUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-21 12:40:52</sys_created_on>
         <sys_id>71074158c3a387d050bffa0ed40131a2</sys_id>
-        <sys_mod_count>7</sys_mod_count>
+        <sys_mod_count>8</sys_mod_count>
         <sys_name>IllumioSyncUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_71074158c3a387d050bffa0ed40131a2</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-24 07:50:49</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-08 14:51:28</sys_updated_on>
     </sys_script_include>
 </record_update>

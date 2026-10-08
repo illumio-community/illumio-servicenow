@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_index">
+    <sys_index action="INSERT_OR_UPDATE">
+        <access_method>btree</access_method>
+        <col_name_string>hostname_part,illumio_pce_configuration</col_name_string>
+        <index_col_name>d3c82b85477f0f108ab8cc02d16d435a,550fccd2475683508ab8cc02d16d43b3</index_col_name>
+        <logical_table_name>x_illu2_illumio_illumio_pce_workload</logical_table_name>
+        <sys_class_name>sys_index</sys_class_name>
+        <sys_created_by>system</sys_created_by>
+        <sys_created_on>2026-10-06 18:42:04</sys_created_on>
+        <sys_id>c3896f09477f0f108ab8cc02d16d4345</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio_illumio_pce_workload</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_index_x_illu2_illumio_illumio_pce_workload_hostname_part_illumio_pce_configuration</sys_update_name>
+        <sys_updated_by>system</sys_updated_by>
+        <sys_updated_on>2026-10-06 18:42:04</sys_updated_on>
+        <table display_value="Illumio PCE Workload" name="x_illu2_illumio_illumio_pce_workload">05d9ae6497700210b7daf896f053af19</table>
+        <unique_index>false</unique_index>
+    </sys_index>
+</record_update>

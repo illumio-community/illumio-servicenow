@@ -55,14 +55,96 @@ IllumioStartAuthentication.prototype = {
         this.logger.setContext(jobSysId);
 
         this.logger.info("Initiating a job to check PCE connectivity.");
-        var pceConfig = new IllumioGetPCEConfiguration(jobSysId).getConfiguration(configSysId);
+
+        // F18 GUARD. This method is reached SYNCHRONOUSLY from the `Check PCE Configuration` UI
+        // Action -- process() is called directly, not through gs.eventQueueScheduled -- so it runs
+        // in the clicking user's transaction and the clicking user's ACLs apply. That is the whole
+        // difference between this path and the preview/export/sync paths, which hand off to a
+        // Script Action and execute as `system` with every privilege. The twin of this guard is in
+        // IllumioStartDiscovery.createAsyncJobs, which is the only other synchronous entry point;
+        // a change to one belongs in both.
+        //
+        // Two things inside getConfiguration() throw for a user who is not a platform admin, and
+        // IllumioGetPCEConfiguration wraps neither:
+        //   - `String(pceConfig.mid_server.name)` dot-walks into ecc_agent, which the GLOBAL
+        //     `mid_server` role governs, not any x_illu2_illumio role;
+        //   - the two getDecryptedValue() calls on username / secret_key.
+        //
+        // process() inserted the job at JOB_STATUS_RUNNING before calling this, and its only
+        // failure handling is `if (!this.startAuthetication(...))` -- which a THROW bypasses
+        // entirely. So an unguarded exception here left the job `running` until
+        // x_illu2_illumio.invalidate_authentication_job_limit (3600s) force-cancelled it, and
+        // because R46 makes a connectivity check hold its configuration while it runs, it blocked
+        // every other job on that configuration for the hour. Measured 2026-10-05: a user holding
+        // all four x_illu2_illumio roles but not the global mid_server role hung here indefinitely.
+        //
+        // Returning false routes into process()'s handleFailure, which is the same path a refused
+        // ECC insert already takes.
+        var pceConfig = null;
+        try {
+            pceConfig = new IllumioGetPCEConfiguration(jobSysId).getConfiguration(configSysId);
+        } catch (ex) {
+            this.utils.handleFailure(
+                jobSysId,
+                'PCE Configuration unreadable',
+                'Could not read PCE Configuration ' + configSysId + '. Exception: ' + ex +
+                '. If the MID Server field appears empty, the user who started this job is ' +
+                'missing the global mid_server role, which governs read access to ecc_agent.',
+                configSysId
+            );
+            return false;
+        }
+
+        // ORDERING FIX (R13 -- the original two lines are kept below, commented, not deleted).
+        // `var org_id = pceConfig.pceOrganizationID;` used to sit immediately after the
+        // getConfiguration() call, ABOVE the `if (pceConfig)` further down. That made the null
+        // branch unreachable: when getConfiguration() returned null -- its documented "No
+        // configuration found." result -- the dereference threw before the check that existed to
+        // catch it ever ran, and the throw escaped process() into the same permanent `running`
+        // state described above. The check now comes first; org_id is read after it.
+        //
+        //     var pceConfig = new IllumioGetPCEConfiguration(jobSysId).getConfiguration(configSysId);
+        //     var org_id = pceConfig.pceOrganizationID;
+        //
+        if (!pceConfig) {
+            this.utils.handleFailure(
+                jobSysId,
+                'PCEConfiguration',
+                'Cannot find PCE configuration ' + configSysId,
+                configSysId
+            );
+            return false;
+        }
+
+        // The same check IllumioPreviewUtils:797 already applies on the preview path, which is why
+        // previews fail cleanly where this hung. An empty midServer means the ecc_agent read
+        // returned nothing -- either the field is genuinely unset on the configuration, or the
+        // caller cannot read it. Queueing to agent 'mid.server.' with no name produces an ECC row
+        // no MID Server will ever claim, which is a hang rather than a failure.
+        if (gs.nil(pceConfig.midServer)) {
+            this.utils.handleFailure(
+                jobSysId,
+                'No MID Server',
+                'PCE Configuration ' + configSysId + ' resolved no MID Server, so the ' +
+                'connectivity check cannot be sent. Either the MID Server field is unset on the ' +
+                'configuration, or the user who started this job cannot read it -- that read ' +
+                'requires the global mid_server role.',
+                configSysId
+            );
+            return false;
+        }
+
         var org_id = pceConfig.pceOrganizationID;
-        var label_dimension_api_endpoint = "/api/v2/orgs/"+org_id+"/label_dimensions"; 
-		
-		
-        if (this.utils.isJobCancelled(jobSysId)) 
+        var label_dimension_api_endpoint = "/api/v2/orgs/"+org_id+"/label_dimensions";
+
+
+        if (this.utils.isJobCancelled(jobSysId))
             return false;
 
+        // Now always true -- the !pceConfig guard above returns before reaching this. Kept per R13
+        // rather than flattened, so the else branch below stays visible as the thing that used to
+        // be unreachable. It is now dead for the opposite reason: nothing can get here with a null
+        // pceConfig. Collapse both in the deliberate deletion pass, not incidentally.
         if (pceConfig) {
             var parameters = {
 				illumio_pce_configuration_id: configSysId,
@@ -95,13 +177,13 @@ IllumioStartAuthentication.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2021-06-01 11:15:40</sys_created_on>
         <sys_id>9e6a94a81be0301046dba9f6624bcb12</sys_id>
-        <sys_mod_count>33</sys_mod_count>
+        <sys_mod_count>34</sys_mod_count>
         <sys_name>IllumioStartAuthentication</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_9e6a94a81be0301046dba9f6624bcb12</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-05 12:01:47</sys_updated_on>
     </sys_script_include>
 </record_update>

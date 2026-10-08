@@ -25,6 +25,22 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         this.logger = new IllumioLogger(null, 'IllumioDiscoverAndMapCMDBServers');
         this.repo = repo || new IllumioDiscoveryRepository();
         this.discoveryUtils = discoveryUtils || new IllumioDiscoveryUtils();
+        // WINDOW-SCOPED since 2026-10-06, not run-global. Re-seeded at the top of every window
+        // by _processWindow from IllumioDiscoveryRepository.findInsertedWorkloadsByHostnamePart,
+        // then added to in place as this window inserts.
+        //
+        // It used to accumulate for the whole run -- one entry per distinct hostname, a ~100-char
+        // key and a 32-char sys_id each, live from the first record to the last. ~31 MB at 115k
+        // CIs and ~540 MB at 2M, inside the transaction already racing the 7,200s cap. The
+        // 1,000-row window bounded windowRecords precisely and then this defeated the point.
+        //
+        // The shape is unchanged, so the two read sites -- _insertObject and
+        // _allowUnknownCreation -- did not have to change. What changed is who fills it.
+        //
+        // IT STILL ANSWERS ACROSS WINDOWS AND ACROSS SOURCE TABLES. The query covers every row
+        // this run has inserted so far, not just this window's, which is what _allowUnknownCreation
+        // at :1093 depends on: a hostname first created in an earlier source table must arrive
+        // here as a duplicate and ride along rather than charging this table's creation limit.
         this.hostnameMap = {
             unmanaged: {},
             managed: {},
@@ -69,9 +85,11 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @param {Object} pceConfig - PCE Configuration object
      **/
     _processTable: function(pceConfig) {
-        // Shared across every source table, so a hostname seen in the first table is
-        // already "processed" when the second table reaches it
-        var processedHosts = {};
+        // R49. `processedHosts` lived here -- one entry per distinct hostname in the SCAN, shared
+        // across every source table, ~400 MB at 2M CIs and the last structure in discovery that
+        // grew with the scan rather than with the window. Removed 2026-10-08; the proof that
+        // _insertObject's duplicate branch already does its job is at the assignment site in
+        // _collectRecord.
         var maxRecords = this.repo.getMaxCiRecords();
 
         for (var table in pceConfig.source) {
@@ -81,7 +99,7 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
                 return;
             }
 
-            this._processSourceTable(pceConfig, table, processedHosts, maxRecords);
+            this._processSourceTable(pceConfig, table, maxRecords);
         }
     },
 
@@ -96,10 +114,9 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      *
      * @param {Object} pceConfig PCE Configuration object
      * @param {String} table Source table name
-     * @param {Object} processedHosts Hostnames already seen, shared across all source tables
      * @param {Number} maxRecords Cap from the maximum_ci_records property
      **/
-    _processSourceTable: function(pceConfig, table, processedHosts, maxRecords) {
+    _processSourceTable: function(pceConfig, table, maxRecords) {
         var self = this;
         var source = pceConfig.source[table];
         var filterMode = source.filter_mode || 'exclusion_legacy';
@@ -111,13 +128,17 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             pceConfig: pceConfig,
             table: table,
             source: source,
-            processedHosts: processedHosts,
             incidentFilter: this.repo.buildConditionFilter(source.incident_condition, "incidentConditionFilter"),
             // Records of the current window, flushed by onWindowComplete. Never more than one window at a time.
             windowRecords: [],
             totalRecords: 0,
             processedTotal: 0,
             windowStartTime: 0,
+            // The batch currently being COLLECTED. The repository supplies the authoritative
+            // number to onWindowComplete, but that is the batch that just ended -- and the
+            // "Starting" line has to be written before any of that window's records exist. Kept
+            // in step by advancing it from _flushWindow, so the two can never drift.
+            windowNumber: 1,
             // Latched at each window boundary, read on the next record. Never unset.
             cancelled: false
         };
@@ -260,13 +281,35 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         tempWorkload["source_table"] = ctx.table;
         tempWorkload["host_name"] = hostname;
 
-        // Only the first CI with a given hostname may raise an incident, across all source tables
-        if (ctx.processedHosts[hostname]) {
-            tempWorkload['create_incident'] = false;
-        } else {
-            tempWorkload['create_incident'] = createIncident;
-            ctx.processedHosts[hostname] = true;
-        }
+        // R49. WAS GUARDED BY `processedHosts`, a run-global map of every distinct hostname --
+        // ~400 MB at 2M CIs, and the last structure in discovery that grew with the scan rather
+        // than with the window. Removed 2026-10-08 after proving it redundant.
+        //
+        // THE PROOF. It existed so that only the first CI with a given hostname could raise an
+        // incident. `_insertObject` already guarantees that, earlier and more strictly:
+        //
+        //   1. A duplicate returns at the `duplicate_of` branch BEFORE reaching getIncident and
+        //      createOrUpdateIncident, so a duplicate CI never creates an incident whatever
+        //      `create_incident` says.
+        //   2. Two CIs with the same hostname always land in the same bucket under the same key.
+        //      `hostNamePart` and `mapKey` are deterministic on the hostname, and `known_to_pce`
+        //      comes from the mapping lookup on that same key against a mapping table that is
+        //      static for the run -- so CI#2 is a duplicate of CI#1 in every bucket CI#1 occupied.
+        //   3. One CI can produce TWO workload rows, managed and unmanaged
+        //      (see addToCustomTable). Both go through _processKnownWorkload -> _insertObject, so
+        //      both are covered by 1 and 2.
+        //   4. `createOrUpdateIncident` has three callers; the other two are the Create Incident
+        //      UI Action and a business rule on the incident mapping table, neither reachable
+        //      from discovery.
+        //
+        // hostnameMap is also the STRICTER key on both axes -- case-insensitive via mapKey, and
+        // on the hostname-part rather than the full name -- so it catches everything
+        // processedHosts did and more.
+        //
+        // THIS DOES NOT FIX "FIRST CI WINS". CI#1 failing the condition followed by CI#2 passing
+        // it still produces no incident, because CI#2 is a duplicate and returns before the
+        // incident block. That defect is independent of the map and is carried separately.
+        tempWorkload['create_incident'] = createIncident;
 
         // Evaluated here rather than at the gate that consumes it, because the gate runs
         // from _processWindow, which only ever sees this plain object -- the GlideRecord is
@@ -277,6 +320,13 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         tempWorkload['unknown_condition_match'] =
             !this.unknownGate || !this.unknownGate.filter ||
             this.unknownGate.filter.match(sourceTableGr, true);
+
+        // The first record to survive collection opens the batch. Logged HERE and not at the top
+        // of the method because a record skipped for a missing hostname has not started anything,
+        // and not from _flushWindow because by then the batch it would announce is already over.
+        if (ctx.windowRecords.length === 0) {
+            this.logger.info("[Batch {0}] Starting", [ctx.windowNumber]);
+        }
 
         ctx.windowRecords.push({
             hostname: hostname,
@@ -300,9 +350,44 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             return;
         }
 
-        var counts = this._processWindow(ctx.windowRecords);
+        // PHASE A, measured here because here is where it ends.
+        //
+        // ctx.windowStartTime is set when the previous window finished, and the repository's
+        // `while (gr.next())` loop runs entirely before onWindowComplete fires -- see
+        // IllumioDiscoveryRepository:484-488. So everything between those two points is Phase A:
+        // the paged SELECT, the exclude filter, and 1,000 x _collectRecord. One subtraction, no
+        // per-record cost, which is why A can be timed without touching the collect path at all.
+        var collectedCount = ctx.windowRecords.length;
+        var phaseA = Date.now() - ctx.windowStartTime;
+
+        // R13. Phase A is still MEASURED -- it is one subtraction -- but no longer logged.
+        // Measured at 0.84s against Phase C's 32.46s on 2026-10-06, i.e. 2.5% of a batch, which
+        // answered the question it was added to ask. Uncomment to get it back; nothing else has
+        // to change, the figures above are still computed.
+        //
+        // this.logger.info("[Batch {0}] Collected {1} record(s) ({2}s)",
+        //     [windowNumber, collectedCount, (phaseA / 1000).toFixed(2)]);
+
+        var counts = this._processWindow(ctx.windowRecords, windowNumber);
         ctx.windowRecords.length = 0;
         ctx.processedTotal += counts.processed;
+
+        // R13. The single end-of-batch summary this replaces. It carried the same figures, but
+        // every one of them arrived only after the batch it described had finished -- which was
+        // the one thing it was added to fix. Kept for one release in case the one-line form turns
+        // out to be what people grep for.
+        //
+        // this.logger.debug(
+        //     "[Batch {0}] A collect {1}s ({2} records) | B keys {3}s, managed {4}s, " +
+        //     "unmanaged {5}s, incidents {6}s | C write {7}s",
+        //     [windowNumber,
+        //         (phaseA / 1000).toFixed(2),
+        //         collectedCount,
+        //         (counts.phaseB.keys / 1000).toFixed(2),
+        //         (counts.phaseB.managed / 1000).toFixed(2),
+        //         (counts.phaseB.unmanaged / 1000).toFixed(2),
+        //         (counts.phaseB.incidents / 1000).toFixed(2),
+        //         (counts.phaseC.total / 1000).toFixed(2)]);
 
         // Before the batch line, so the reason reads ahead of the totals it explains.
         // Empty unless this window actually refused a creation.
@@ -327,6 +412,10 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             windowNumber, ctx.processedTotal, ctx.totalRecords, ctx.table,
             ctx.windowStartTime, counts));
 
+        // Advanced from the repository's own number rather than incremented independently, so a
+        // window the repository skips or merges cannot leave the "Starting" line counting its own
+        // batches on a separate tally.
+        ctx.windowNumber = windowNumber + 1;
         ctx.windowStartTime = Date.now();
     },
 
@@ -337,19 +426,62 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @param {Array} windowRecords Array of { hostname, hostNamePart, workload } for the current window
      * @returns {Object} Counts for this window, as seeded by IllumioDiscoveryUtils.newWindowCounts
      */
-    _processWindow: function(windowRecords) {
+    _processWindow: function(windowRecords, windowNumber) {
         var counts = this.discoveryUtils.newWindowCounts();
+
+        // Seeded BEFORE the empty-window return below, not after the queries. A window where
+        // _collectRecord skipped every record still reaches _flushWindow and still logs its batch
+        // line -- and the debug line reads counts.phaseB.keys unconditionally, so leaving these
+        // undefined on that path turns an empty window into a TypeError.
+        var phaseB = { keys: 0, managed: 0, unmanaged: 0, duplicates: 0, incidents: 0 };
+        counts.phaseB = phaseB;
+        // An object now, not a number: _addWriteTime charges the two kinds of write separately.
+        // `total` stays the wall-clock span of the loop and is NOT workloads + labels -- the loop
+        // also builds every workload row, and that work belongs to neither bucket.
+        counts.phaseC = {
+            workloads: 0, workloadsRows: 0,
+            labels: 0, labelsRows: 0,
+            total: 0
+        };
 
         if (windowRecords.length === 0) {
             return counts;
         }
 
         var index;
+
+        // Phase B timings, carried on `counts` so the caller can log them next to the batch line
+        // without this method needing to know the window number. Measured unconditionally -- six
+        // Date.now() calls against six queries is not worth a branch -- but only ever rendered at
+        // debug. See _flushWindow.
+        //
+        // Per batch, not per record, on purpose: B is six queries whatever the window holds, so a
+        // per-record figure here would be the same number divided by 1000.
+        var stepStart = Date.now();
+
         var keys = this.discoveryUtils.collectWindowKeys(windowRecords);
+        phaseB.keys = Date.now() - stepStart;
 
+        stepStart = Date.now();
         var managedMappings = this.repo.findWorkloadMappings(this.pceConfigId, keys.hostNameParts, true);
-        var unmanagedMappings = this.repo.findWorkloadMappings(this.pceConfigId, keys.hostNameParts, false);
+        phaseB.managed = Date.now() - stepStart;
 
+        stepStart = Date.now();
+        var unmanagedMappings = this.repo.findWorkloadMappings(this.pceConfigId, keys.hostNameParts, false);
+        phaseB.unmanaged = Date.now() - stepStart;
+
+        stepStart = Date.now();
+        // The 7th batched IN, and the one that replaced the run-global hostnameMap. Reassigned,
+        // not merged: last window's entries are exactly what must NOT survive, and anything of
+        // this run's that is still relevant comes back from the query.
+        //
+        // Before phase C and before this.window is opened, because _allowUnknownCreation reads
+        // hostnameMap.unknown during the insert loop.
+        this.hostnameMap = this.repo.findInsertedWorkloadsByHostnamePart(
+            this.pceConfigId, keys.hostNameParts);
+        phaseB.duplicates = Date.now() - stepStart;
+
+        stepStart = Date.now();
         // Assigned last, so a throw inside findIncidentMappings cannot leave a half-built
         // window open. counts is held by reference: _countInsert increments it through
         // this.window, and the object returned below is the same one.
@@ -357,6 +489,37 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             counts: counts,
             incidentMap: this.repo.findIncidentMappings(this.pceConfigId, keys.hostnames)
         };
+        phaseB.incidents = Date.now() - stepStart;
+
+        // No second `counts.phaseB = phaseB` here -- it was assigned above and the four writes
+        // mutate that same object.
+
+        // R13. Phase B is still measured -- six Date.now() calls -- but no longer logged. It came
+        // in at 0.39s of a 33.69s batch on 2026-10-06 (keys 0.01, managed 0.02, unmanaged 0.35,
+        // incidents 0.01), so the six batched IN queries this phase exists to justify are not
+        // where the time goes and the line was reporting a non-problem every batch. Uncomment to
+        // get it back; phaseB is still populated.
+        //
+        // this.logger.info(
+        //     "[Batch {0}] Keyed {1} hostname(s) ({2}s). Query times: managed {3}s, " +
+        //     "unmanaged {4}s, duplicates {5}s, incidents {6}s",
+        //     [windowNumber,
+        //         windowRecords.length,
+        //         ((phaseB.keys + phaseB.managed + phaseB.unmanaged +
+        //             phaseB.duplicates + phaseB.incidents) / 1000).toFixed(2),
+        //         (phaseB.managed / 1000).toFixed(2),
+        //         (phaseB.unmanaged / 1000).toFixed(2),
+        //         (phaseB.duplicates / 1000).toFixed(2),
+        //         (phaseB.incidents / 1000).toFixed(2)]);
+
+        // Phase C: roughly 7,000 writes against B's six reads, and ~95% of a batch. It is now
+        // instrumented two ways -- per-write totals via _addWriteTime, and the progress line
+        // below. Both were previously declined on per-record-cost grounds; a modulo and two
+        // subtractions per record are not measurable against a GlideRecord insert, and the thing
+        // they buy is that a 32-second phase is no longer 32 seconds of silence.
+        var phaseCStart = Date.now();
+        // R13, with the progress line below.
+        // var progressEvery = this.discoveryUtils.DISCOVERY_PROGRESS_EVERY || 250;
 
         try {
             for (index = 0; index < windowRecords.length; index++) {
@@ -368,12 +531,55 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
                     unmanaged: unmanagedMappings[key]
                 });
                 counts.processed++;
+
+                // R13. Intra-phase progress, removed by decision 2026-10-06 after being asked for
+                // and then not wanted. The consequence is accepted and is not a defect: the two
+                // "Written" totals below cannot stream -- the workload and field value writes are
+                // interleaved per record, so neither exists until this loop ends -- so a batch now
+                // logs "Starting", goes quiet for the ~32s this loop takes, and then reports.
+                //
+                // Restoring it is this block plus `progressEvery` above. Nothing else changed.
+                //
+                // if (counts.processed % progressEvery === 0) {
+                //     this.logger.info("[Batch {0}] Writing... {1}/{2} ({3}s)",
+                //         [windowNumber, counts.processed, windowRecords.length,
+                //             ((Date.now() - phaseCStart) / 1000).toFixed(2)]);
+                // }
             }
         } finally {
             // finally, not a trailing assignment: an exception escaping the loop must not
             // leak this window's incident cache into the next batch
+            //
+            // READ counts.phaseC THROUGH `counts`, NEVER through this.window after this point --
+            // _addWriteTime charged the same object, but the handle it used is gone.
             this.window = null;
+
+            // RESET TO EMPTY BUCKETS, never null. _insertObject and _allowUnknownCreation index
+            // into it unguarded, and both are reachable from the UI action, the business rule and
+            // the preview -- callers that never open a window. initialize() gives them the same
+            // three empty objects; this keeps that contract while releasing the window's entries
+            // here rather than holding them until the next window overwrites them.
+            this.hostnameMap = { unmanaged: {}, managed: {}, unknown: {} };
         }
+
+        counts.phaseC.total = Date.now() - phaseCStart;
+
+        // Two lines because they are two different writes against two different tables:
+        //
+        //   workloads    -> x_illu2_illumio_illumio_pce_workload, ONE row per CI
+        //   field values -> the workload field value table, SIX rows per CI, one per dimension
+        //
+        // Both land together at the end. The writes are interleaved per record -- each CI writes
+        // its workload and then its field values -- so neither total exists until the loop ends,
+        // and neither is a span of wall-clock. See _addWriteTime.
+        //
+        // THEY DO NOT SUM TO THE BATCH TIME and are not meant to. The loop also builds each
+        // workload row, resolves duplicates, and creates or updates incidents; that work belongs
+        // to neither bucket. The batch line below carries the total to compare them against.
+        this.logger.info("[Batch {0}] Written {1} workload(s) ({2}s)",
+            [windowNumber, counts.phaseC.workloadsRows, (counts.phaseC.workloads / 1000).toFixed(2)]);
+        this.logger.info("[Batch {0}] Written {1} field value(s) ({2}s)",
+            [windowNumber, counts.phaseC.labelsRows, (counts.phaseC.labels / 1000).toFixed(2)]);
 
         return counts;
     },
@@ -668,7 +874,13 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             sourceTableGr["labelDimesion"], illumioServersGr.getUniqueValue(),
             this.pceConfigId, this.classMappingSysId);
 
+        // Timed separately from the workload insert above it. One workload is one row here but
+        // SIX field value rows -- one per label dimension -- so this is the larger half of the
+        // write phase by row count and the two are worth telling apart. The row count is
+        // accumulated alongside the milliseconds because "4.36s" means nothing without it.
+        var fieldValueStart = Date.now();
         this.repo.insertWorkloadFieldValues(rows);
+        this._addWriteTime('labels', Date.now() - fieldValueStart, rows ? rows.length : 0);
     },
 
     /**
@@ -788,8 +1000,9 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
      * @returns GlideRecord of the Workload
      */
     _insertObject: function(hostNamePart, illumioServersGr, sourceTableGr, interfaceObject) {
-        // Key for this.hostnameMap. Written and read only in this method, so the
-        // mapKey prefix is self-contained -- see IllumioDiscoveryUtils.mapKey
+        // Key for this.hostnameMap -- see IllumioDiscoveryUtils.mapKey. No longer self-contained
+        // to this method: IllumioDiscoveryRepository.findInsertedWorkloadsByHostnamePart seeds
+        // the same map per window and must apply mapKey identically. Change one and change both.
         hostNamePart = this.discoveryUtils.mapKey(hostNamePart);
 
         if (!gs.nil(this.hostnameMap[illumioServersGr.getValue("known_to_pce")][hostNamePart])) {
@@ -797,7 +1010,9 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             illumioServersGr.duplicate = true;
             // buildWorkloadRow already seeded conflicts false, which is the answer for a
             // duplicate -- checkConflict returned false for one before it looked at anything else.
+            var dupStart = Date.now();
             this.repo.insertRecord(illumioServersGr);
+            this._addWriteTime('workloads', Date.now() - dupStart);
             this._countInsert("duplicate");
             return illumioServersGr;
         }
@@ -818,7 +1033,9 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
             sourceTableGr["mappedLabelKeys"],
             interfaceObject));
 
+        var insertStart = Date.now();
         var sysId = this.repo.insertRecord(illumioServersGr);
+        this._addWriteTime('workloads', Date.now() - insertStart);
         this.hostnameMap[illumioServersGr.getValue("known_to_pce")][hostNamePart] = sysId;
         this._countInsert(illumioServersGr.getValue("known_to_pce"));
 
@@ -836,6 +1053,35 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         if (this.window && this.window.counts.hasOwnProperty(category)) {
             this.window.counts[category]++;
         }
+    },
+
+    /**
+     * Accumulate one write's elapsed time against the current window's Phase C buckets.
+     *
+     * Guarded exactly like _countInsert, and for the same reason: _insertObject and
+     * _createWorkloadFieldValue are also reached from post-sync discovery, where this.window is
+     * null and there is no window to charge.
+     *
+     * TWO SUBTRACTIONS PER WRITE, NO LOG LINE. This is what the earlier "Phase C is deliberately
+     * not instrumented" note was guarding against and it is not the same thing -- that note was
+     * about a log line per record, which would put ~7,000 syslog rows in a batch. A Date.now()
+     * pair against a GlideRecord insert is noise against the thing it measures.
+     *
+     * The buckets are INTERLEAVED, not sequential: each record writes its workload and then its
+     * six field values, so neither figure is a span of wall-clock. They are totals of scattered
+     * work, which is why they can only be reported once the window's loop has finished.
+     *
+     * @param {String} bucket 'workloads' or 'labels'
+     * @param {Number} elapsedMs Milliseconds this write took
+     * @param {Number} rows Rows written, defaulting to 1 -- field values go in several at a time
+     */
+    _addWriteTime: function(bucket, elapsedMs, rows) {
+        if (!this.window || !this.window.counts || !this.window.counts.phaseC) {
+            return;
+        }
+        var phaseC = this.window.counts.phaseC;
+        phaseC[bucket] += elapsedMs;
+        phaseC[bucket + 'Rows'] += (rows === undefined ? 1 : rows);
     },
 
     /**
@@ -910,9 +1156,14 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         }
 
         // The same key _insertObject reads to set duplicate_of, checked here so the decision
-        // is made before any record is built. hostnameMap is run-global while gate.created
-        // resets per source table, so a hostname first created in an earlier table arrives
-        // here as a duplicate and rides along rather than charging this table's limit.
+        // is made before any record is built. gate.created resets per source table, so a hostname
+        // first created in an EARLIER table must arrive here as a duplicate and ride along rather
+        // than charging this table's limit.
+        //
+        // hostnameMap is window-scoped since 2026-10-06, and that still holds -- the query that
+        // seeds it covers every row this run has inserted so far, across all windows and all
+        // source tables, not just this window's. That reach is the property this check depends
+        // on; a seed narrowed to the current window would silently re-charge the limit.
         var key = this.discoveryUtils.mapKey(this.discoveryUtils.hostNamePart(hostname));
         if (!gs.nil(this.hostnameMap.unknown[key])) {
             return true;
@@ -991,14 +1242,14 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:26:01</sys_created_on>
         <sys_id>4c10e6c6dbcc6700dc9fabc5ca96191d</sys_id>
-        <sys_mod_count>444</sys_mod_count>
+        <sys_mod_count>450</sys_mod_count>
         <sys_name>IllumioDiscoverAndMapCMDBServers</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4c10e6c6dbcc6700dc9fabc5ca96191d</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 07:09:14</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-08 14:31:02</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>4c10e6c6dbcc6700dc9fabc5ca96191d</id>

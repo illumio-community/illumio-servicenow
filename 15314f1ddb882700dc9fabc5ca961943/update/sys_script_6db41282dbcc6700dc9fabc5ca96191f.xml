@@ -57,76 +57,117 @@ function updateJob(sys_id) {
 
         // If status is ready_to_map, dump data to mapping table from staging table
         if (current.job_status + "" == ASYNC_JOB_STATUS_READY_TO_MAP) {
-            var data = [];
             var configSysId = utils.getConfigurationId(current.illumio_job_id);
             var jobId = current.illumio_job_id + "";
             var identifier = current.job_identifier + "";
             var tag = identifier.charAt(0).toUpperCase() + identifier.slice(1);
             var mappingLabel = identifier === 'workloads' ? 'Workload Mapping Table' : 'Label Mapping Table';
             var stagingLabel = identifier === 'workloads' ? 'Workload Staging Table' : 'Label Staging Table';
+            var stagingTable = current.result_table_name + "";
 
             var mappingTableGr = new GlideRecordSecure(current.mapping_table_name + "");
             mappingTableGr.addQuery('illumio_pce_configuration', configSysId);
             mappingTableGr.query();
-            var stagingTableGr = new GlideRecordSecure(current.result_table_name + "");
-            stagingTableGr.addQuery('illumio_pce_configuration', configSysId);
-            stagingTableGr.query();
 
-            var readStartTime = Date.now();
-            while (stagingTableGr.next()) {
-                var json_data = stagingTableGr.getValue('json_data');
-                var parsed = json_data.trim() == '<see_attachment/>' ?
-                    JSON.parse(utils.downloadAttachmentData(current.result_table_name + "", stagingTableGr.getUniqueValue())) :
-                    JSON.parse(stagingTableGr.json_data + "");
+            // ONE STAGING ROW AT A TIME. This used to read every staging row first, concatenating
+            // all of them into one `data` array, and only then clear and insert. At the MID's
+            // batch size of 1,000 that is 100 staging rows for a 100k PCE -- and every parsed
+            // workload from all 100 of them held simultaneously, live across the entire insert
+            // loop because the loop indexed into the array.
+            //
+            // R48 bounded exactly this shape on the MID, where it had already caused an
+            // OutOfMemoryError. The same structure survived on the instance side of the ECC
+            // handoff: the MID streams 1,000 at a time, and this put them all back together.
+            // R27's rule -- nothing may duplicate a structure the size of the result -- held on
+            // one side of the boundary and not the other. Peak is now one staging row.
+            //
+            // NOTHING WAS LOST BY INTERLEAVING. The accumulate-first shape looked like it bought
+            // failure atomicity -- a bad staging row aborting before the mapping table was
+            // touched -- but it did not, on two counts established 2026-10-06:
+            //
+            //   1. The JSON cannot realistically be bad. The MID parsed every element through
+            //      Jackson, built it with JSON.parse, and re-serialised it with JSON.stringify.
+            //      The string in json_data is machine-generated from a validated structure.
+            //   2. A half-populated mapping table is never read. updateJob() below is what sets
+            //      the async job to completed, and completing both async jobs is the ONLY thing
+            //      that triggers CMDB discovery (see the note at the top of this file). A throw
+            //      skips it, so discovery never starts, and the next Data Collection clears the
+            //      mapping table before writing a row.
+            try {
+                // Unconditional, and FIRST. Both branches of the old code cleared the mapping
+                // table -- the data branch before inserting, the empty branch on its own -- so
+                // hoisting it ahead of the read changes nothing about what ends up in the table.
+                // An empty PCE result still correctly empties the mapping.
+                var deleteStartTime = Date.now();
+                mappingTableGr.deleteMultiple();
+                var deleteElapsed = ((Date.now() - deleteStartTime) / 1000).toFixed(2);
+                utils.updateJobRecord(jobId, {
+                    logs: '[' + tag + '] Cleared ' + mappingLabel + ' (' + deleteElapsed + 's)'
+                });
 
-                // Appended in place. This was `data = data.concat(parsed)`, which builds a WHOLE
-                // NEW array every iteration and copies everything accumulated so far into it --
-                // O(n^2) bytes allocated across the loop, and while the copy runs the old array
-                // and the new one are both resident, so peak is 2x the accumulated dataset
-                // instead of 1x.
-                //
-                // A plain loop and not push.apply(data, parsed): apply passes every element as a
-                // separate argument, and one staging row carries the whole PCE page -- ~100k
-                // workloads in production -- which is past the argument-count ceiling on some
-                // engines. The loop has no ceiling.
-                for (var parsedIndex = 0, parsedLength = parsed.length; parsedIndex < parsedLength; parsedIndex++) {
-                    data.push(parsed[parsedIndex]);
-                }
+                // Counted up front so the progress line below has a denominator. One aggregate
+                // over ~100 rows, not over the workloads inside them.
+                var stagingCountGa = new GlideAggregate(stagingTable);
+                stagingCountGa.addQuery('illumio_pce_configuration', configSysId);
+                stagingCountGa.addAggregate('COUNT');
+                stagingCountGa.query();
+                var stagingTotal = stagingCountGa.next() ? parseInt(stagingCountGa.getAggregate('COUNT'), 10) : 0;
 
-                // Dropped before the next JSON.parse rather than left to the next iteration's
-                // assignment, which happens only after that parse has already allocated. Saves
-                // one chunk at the peak.
-                parsed = null;
-            }
-            var readElapsed = ((Date.now() - readStartTime) / 1000).toFixed(2);
-            utils.updateJobRecord(jobId, {
-                logs: '[' + tag + '] Read from staging: ' + data.length + ' (' + readElapsed + 's)'
-            });
+                var stagingTableGr = new GlideRecordSecure(stagingTable);
+                stagingTableGr.addQuery('illumio_pce_configuration', configSysId);
+                stagingTableGr.query();
 
-            if (data.length) {
-                try {
-                    var deleteStartTime = Date.now();
-                    mappingTableGr.deleteMultiple();
-                    var deleteElapsed = ((Date.now() - deleteStartTime) / 1000).toFixed(2);
-                    utils.updateJobRecord(jobId, {
-                        logs: '[' + tag + '] Cleared ' + mappingLabel + ' (' + deleteElapsed + 's)'
-                    });
+                var keysToMap = JSON.parse(current.keys_to_map + "");
+                // RUN TOTALS. These accumulate across every staging row on purpose -- they feed
+                // the three summary lines after the loop and must not be reset inside it.
+                var insertStartTime = Date.now();
+                var readMs = 0;
+                var written = 0;
+                var stagingRead = 0;
+                var cancelled = false;
 
-                    var insertStartTime = Date.now();
-                    var keysToMap = JSON.parse(current.keys_to_map + "");
-                    for (var index = 0, dataLength = data.length; index < dataLength; index++) {
+                while (stagingTableGr.next()) {
+                    // Per staging row, not per workload: a row is ~1,000 inserts and several
+                    // seconds, which is as close to immediate as is worth a query. The old loop
+                    // had no check at all, so cancelling during the ~290s this takes at 50k did
+                    // nothing until it finished.
+                    if (utils.isJobCancelled(jobId)) {
+                        cancelled = true;
+                        break;
+                    }
+
+                    // PER-ROW, reset every iteration. Separate from the run totals above: the
+                    // progress line below reports what THIS staging row cost, so a slow row is
+                    // visible as a slow row rather than as a larger cumulative number that the
+                    // reader has to subtract the previous line from. Matches the per-batch
+                    // convention in IllumioDiscoverAndMapCMDBServers.
+                    var rowStart = Date.now();
+                    var rowWritten = 0;
+
+                    var parseStart = Date.now();
+                    var json_data = stagingTableGr.getValue('json_data');
+                    var parsed = json_data.trim() == '<see_attachment/>' ?
+                        JSON.parse(utils.downloadAttachmentData(stagingTable, stagingTableGr.getUniqueValue())) :
+                        JSON.parse(stagingTableGr.json_data + "");
+                    readMs += Date.now() - parseStart;
+                    stagingRead++;
+
+                    // Inserted straight out of `parsed` -- the array that was accumulated here
+                    // before is gone. `parsed` is the only copy and it is dropped at the bottom
+                    // of this iteration.
+                    for (var index = 0, dataLength = parsed.length; index < dataLength; index++) {
                         mappingTableGr.initialize();
                         for (var key in keysToMap) {
-							if(keysToMap[key] == 'ven'){
-                                if(data[index][keysToMap[key]] == "null")
+                            if (keysToMap[key] == 'ven') {
+                                if (parsed[index][keysToMap[key]] == "null")
                                     continue;
-                                var ven_data = JSON.parse(data[index][keysToMap[key]]);
+                                var ven_data = JSON.parse(parsed[index][keysToMap[key]]);
                                 mappingTableGr['ven_href'] = ven_data.href;
                                 mappingTableGr['ven_version'] = ven_data.version;
                                 mappingTableGr['ven_status'] = ven_data.status;
                                 continue;
                             }
-                            mappingTableGr[keysToMap[key]] = (data[index][keysToMap[key]]) == "null" ? "" : data[index][keysToMap[key]] + "";
+                            mappingTableGr[keysToMap[key]] = (parsed[index][keysToMap[key]]) == "null" ? "" : parsed[index][keysToMap[key]] + "";
                         }
 
                         // Derived match key for discovery: the PCE hostname up to its first dot.
@@ -136,38 +177,85 @@ function updateJob(sys_id) {
                         // STARTSWITH. Not lower-cased -- the IN compares against raw CMDB
                         // hostnames and relies on the column collation, exactly as hostname does.
                         if (identifier === 'workloads') {
-                            var pceHostname = data[index].hostname == "null" ? "" : data[index].hostname + "";
+                            var pceHostname = parsed[index].hostname == "null" ? "" : parsed[index].hostname + "";
                             mappingTableGr.setValue('hostname_part', pceHostname.split(".")[0]);
                         }
 
                         mappingTableGr.setValue('illumio_pce_configuration', configSysId);
                         mappingTableGr.insert();
+                        written++;
+                        rowWritten++;
                     }
+
+                    // Dropped before the next iteration's JSON.parse allocates, which is the
+                    // whole point of streaming: one staging row's worth live at a time.
+                    parsed = null;
+
+                    // One line per staging row -- 100 for a 100k PCE, not 100,000. Without it the
+                    // longest phase of a Data Collection reports nothing for ~10 minutes.
+                    //
+                    // W2: SYSLOG, NOT THE JOB RECORD. This is a per-batch line, and per-batch
+                    // lines go to syslog_app_scope -- the job record carries run totals only.
+                    // The four utils.updateJobRecord calls around this one are those totals and
+                    // stay where they are. Putting 100 progress lines on the record would also
+                    // be 100 more chances for the lost-update race W2 warns about to eat one of
+                    // the totals that actually matter.
+                    illumioLogger.info('[{0}] Mapping {1}/{2}: {3} row(s) ({4}s)',
+                        [tag, stagingRead, stagingTotal, rowWritten,
+                            ((Date.now() - rowStart) / 1000).toFixed(2)]);
+                }
+
+                utils.updateJobRecord(jobId, {
+                    logs: '[' + tag + '] Read from staging: ' + written + ' in ' + stagingRead +
+                        ' row(s) (' + (readMs / 1000).toFixed(2) + 's)'
+                });
+
+                if (cancelled) {
+                    // No updateJob: a cancelled run must not advance the async job and trigger
+                    // discovery. The staging rows are deliberately LEFT -- the next run clears
+                    // them, and leaving them is what makes a cancellation inspectable.
+                    illumioLogger.warn('[{0}] Cancelled after {1} of {2} staging row(s). ' +
+                        'Mapping table is partially populated and will be rebuilt on the next run.',
+                        [tag, stagingRead, stagingTotal]);
+                } else {
+                    // WORDING AND ORDER UNCHANGED. R40 uses this exact line as the in-house
+                    // control for instance write throughput, and STATUS quotes its shape.
                     var insertElapsed = ((Date.now() - insertStartTime) / 1000).toFixed(2);
                     utils.updateJobRecord(jobId, {
-                        logs: '[' + tag + '] Populated ' + mappingLabel + ': ' + dataLength + ' (' + insertElapsed + 's)'
+                        logs: '[' + tag + '] Populated ' + mappingLabel + ': ' + written + ' (' + insertElapsed + 's)'
                     });
 
+                    if (written === 0) {
+                        illumioLogger.info('No data present to map in {0} table', stagingTable);
+                    }
+
                     var cleanupStartTime = Date.now();
-                    stagingTableGr.initialize();
-                    stagingTableGr.addQuery('illumio_pce_configuration', configSysId);
-                    stagingTableGr.deleteMultiple();
+                    var stagingCleanupGr = new GlideRecordSecure(stagingTable);
+                    stagingCleanupGr.addQuery('illumio_pce_configuration', configSysId);
+                    stagingCleanupGr.deleteMultiple();
                     var cleanupElapsed = ((Date.now() - cleanupStartTime) / 1000).toFixed(2);
                     utils.updateJobRecord(jobId, {
                         logs: '[' + tag + '] Deleted records from ' + stagingLabel + ' (' + cleanupElapsed + 's)'
                     });
 
                     updateJob(current.sys_id);
-                } catch (ex) {
-                    illumioLogger.error("Exception occurred while creating workloads for mapping table: " + ex);
                 }
-
-            } else {
-
-                mappingTableGr.deleteMultiple();
-                illumioLogger.info('No data present to map in {0} table', stagingTableGr);
-                updateJob(current.sys_id);
-
+            } catch (ex) {
+                // RETHROWN, not swallowed. This catch used to log and fall through, which meant
+                // updateJob() was never reached AND the outer catch -- the only thing that sets
+                // JOB_STATUS_FAILED -- never ran, because this one had already consumed the
+                // exception. The scheduled job then sat `running` with no terminal state until
+                // invalidate_running_job_limit (7200s) killed it with "Time Limit Exceeded", and
+                // the R25 guard blocked every other job on that PCE configuration for two hours.
+                //
+                // This is R47's pattern -- every failure path hung -- at a site R47 could not
+                // reach, because it is a Business Rule logging directly rather than one of the
+                // twelve IllumioUtils.handleFailure callers.
+                //
+                // The log line is kept for the context it carries; the rethrow is what makes the
+                // job fail instead of hang.
+                illumioLogger.error("Exception occurred while creating workloads for mapping table: " + ex);
+                throw ex;
             }
             // New record is inserted, start polling for the job status
         } else {
@@ -198,15 +286,15 @@ function updateJob(sys_id) {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>6db41282dbcc6700dc9fabc5ca96191f</sys_id>
-        <sys_mod_count>92</sys_mod_count>
+        <sys_mod_count>94</sys_mod_count>
         <sys_name>Illumio Poll PCE Async Job Status</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_6db41282dbcc6700dc9fabc5ca96191f</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:04</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 18:36:27</sys_updated_on>
         <template/>
         <when>async</when>
     </sys_script>

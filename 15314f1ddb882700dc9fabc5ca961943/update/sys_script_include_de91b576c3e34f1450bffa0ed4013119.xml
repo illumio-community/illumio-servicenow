@@ -149,10 +149,27 @@ IllumioLogger.prototype = {
      *
      * Anything emitted once per record belongs here, not at info.
      *
-     * Written with gs.info and a 'DEBUG: ' marker rather than gs.debug on purpose. gs.debug only
-     * reaches syslog_app_scope when the application's log level is turned down on sys_app, which
-     * is a second switch in a second place that nobody remembers to set. The property above is
-     * the only switch.
+     * gs.info, and the ONLY switch is x_illu2_illumio.debug_logging.
+     *
+     * This has now been tried all three ways on ven02375, so the history is worth keeping:
+     *
+     *   1. gs.info with a literal 'DEBUG: ' prefix. Worked, and looked hand-rolled -- a level
+     *      marker in the message column of a table that has a level column.
+     *   2. gs.debug, 2026-10-06. Correct in principle: Level = Debug, filterable like any other.
+     *      MEASURED NOT TO REACH syslog_app_scope on this instance -- a full discovery run
+     *      produced none of the per-batch lines that step 1 had produced. gs.debug for a scoped
+     *      app needs the application's log verbosity turned down as well, which is a second
+     *      switch in a second place, and an unset one fails SILENTLY. That is the same failure
+     *      mode as the MID's _info: a line that is written and goes nowhere.
+     *   3. gs.info with no prefix -- this. One switch, no silent gate, and the Level column is
+     *      not lied to. Debug lines are not distinguishable from info lines by level, which is
+     *      the real cost and is accepted: every debug line this app emits is already tagged
+     *      ([Batch N] ...), so they are distinguishable by the thing people actually filter on.
+     *
+     * To get a true Debug level, `x_illu2_illumio.logging.verbosity` = `debug` is the property
+     * the platform reads, and gs.debug becomes viable the moment it exists. DO NOT make that
+     * change without verifying it with a Fix Script first -- see the note above about failing
+     * silently, and about what that costs when the verification is a 90-minute discovery run.
      *
      * @param {String} message Message, optionally with {0}, {1}, ... placeholders
      */
@@ -160,7 +177,7 @@ IllumioLogger.prototype = {
         if (!this.debugEnabled) {
             return;
         }
-        gs.info(this.line('DEBUG: ' + this._format(arguments)));
+        gs.info(this.line(this._format(arguments)));
     },
 
     /**
@@ -195,13 +212,13 @@ IllumioLogger.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-29 10:11:40</sys_created_on>
         <sys_id>de91b576c3e34f1450bffa0ed4013119</sys_id>
-        <sys_mod_count>2</sys_mod_count>
+        <sys_mod_count>4</sys_mod_count>
         <sys_name>IllumioLogger</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_de91b576c3e34f1450bffa0ed4013119</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:01</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 17:06:21</sys_updated_on>
     </sys_script_include>
 </record_update>

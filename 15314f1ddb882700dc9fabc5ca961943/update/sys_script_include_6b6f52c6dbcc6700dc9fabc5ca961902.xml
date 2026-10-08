@@ -13,7 +13,7 @@
 var IllumioPollAsyncJobStatus = Class.create();
 IllumioPollAsyncJobStatus.prototype = {
 
-    initialize: function(asyncJobLocation, retryAfter, jobSysID, primaryKey, resultTable, keysToMap, retryCount, illumio_job_id, job_identifier) {
+    initialize: function(asyncJobLocation, retryAfter, jobSysID, primaryKey, resultTable, keysToMap, retryCount, illumio_job_id, job_identifier, jobCreatedOn) {
 
         this.asyncJobLocation = asyncJobLocation;
         this.retryAfter = retryAfter;
@@ -24,7 +24,56 @@ IllumioPollAsyncJobStatus.prototype = {
         this.retryCount = retryCount;
         this.illumio_job_id = illumio_job_id;
         this.job_identifier = job_identifier;
+        // Passed in from the Script Action's `current.sys_created_on` rather than re-queried here.
+        // The caller already holds the async job record; reading it again would be one extra
+        // query per poll to learn something it was looking at.
+        this.jobCreatedOn = jobCreatedOn;
         this.logger = new IllumioLogger(illumio_job_id, 'IllumioPollAsyncJobStatus');
+    },
+
+    /**
+     * '[Labels]' / '[Workloads]', matching the tag the MID side puts on its own lines.
+     *
+     * Without it a poll line cannot be told from the other async job's poll line -- the two run
+     * concurrently and interleave in syslog, which is most of why the old HANDOFF line was
+     * unreadable.
+     *
+     * @returns {String} Bracketed tag, or '' when the identifier is missing
+     */
+    _tag: function() {
+        var identifier = this.job_identifier + "";
+        if (gs.nil(identifier) || identifier === 'null' || identifier === 'undefined') {
+            return '';
+        }
+        return '[' + identifier.charAt(0).toUpperCase() + identifier.slice(1) + '] ';
+    },
+
+    /**
+     * How long this async job has been outstanding, and which poll this is.
+     *
+     * The poll ordinal is DERIVED from elapsed over the retry interval, not counted -- there is no
+     * counter on x_illu2_illumio_illumio_pce_async_jobs and adding one is a dictionary change for
+     * a log line. It is therefore approximate whenever the scheduler runs late, which is why the
+     * elapsed figure is the one printed first and the ordinal reads as a rough position rather
+     * than a guarantee.
+     *
+     * @returns {String} e.g. '93s elapsed, poll ~10'
+     */
+    _progress: function() {
+        if (gs.nil(this.jobCreatedOn)) {
+            return 'elapsed unknown';
+        }
+
+        var started = new GlideDateTime(this.jobCreatedOn + "");
+        var elapsedSeconds = Math.round(
+            (new GlideDateTime().getNumericValue() - started.getNumericValue()) / 1000);
+
+        var interval = parseInt(this.retryAfter, 10);
+        if (isNaN(interval) || interval <= 0) {
+            return elapsedSeconds + 's elapsed';
+        }
+
+        return elapsedSeconds + 's elapsed, poll ~' + (Math.floor(elapsedSeconds / interval) + 1);
     },
     /**
      * Calls the MID server script include to poll the async job status
@@ -57,7 +106,16 @@ IllumioPollAsyncJobStatus.prototype = {
                     chunk_size: BATCH_SIZE_STANDARD
                 };
 
-                var illumioAddToECCQueue = new IllumioAddToECCQueue('IllumioManageAsyncJobs', pceConfig.midServer, parameters);
+                // The line that replaces the HANDOFF repeat this call now suppresses. It says the
+                // three things the old one could not: which async job, how long it has been
+                // outstanding, and roughly which attempt this is. A PCE job that hangs is the
+                // case this exists for -- "still waiting" is only useful with a number on it.
+                this.logger.info(this._tag() + 'Checking fetch status (' + this._progress() + ')');
+
+                // quiet: the HANDOFF line drops to debug for polls. See IllumioAddToECCQueue --
+                // this is the only caller that passes it, and the only one that loops.
+                var illumioAddToECCQueue = new IllumioAddToECCQueue('IllumioManageAsyncJobs',
+                    pceConfig.midServer, parameters, { quiet: true });
                 illumioAddToECCQueue.insert();
 
             } catch (exception) {
@@ -76,13 +134,13 @@ IllumioPollAsyncJobStatus.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:21:10</sys_created_on>
         <sys_id>6b6f52c6dbcc6700dc9fabc5ca961902</sys_id>
-        <sys_mod_count>23</sys_mod_count>
+        <sys_mod_count>24</sys_mod_count>
         <sys_name>IllumioPollAsyncJobStatus</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_6b6f52c6dbcc6700dc9fabc5ca961902</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 15:36:19</sys_updated_on>
     </sys_script_include>
 </record_update>

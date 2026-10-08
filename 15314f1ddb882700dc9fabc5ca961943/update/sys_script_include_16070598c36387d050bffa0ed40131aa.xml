@@ -198,31 +198,189 @@ IllumioSyncRepoUtils.prototype = {
      * @param {Array} subPredicates Sub-predicates of one term, from IllumioSyncUtils
      * @returns {Array} Matching workload sys_ids
      */
-    aggregateLabelTermWorkloads: function(pceConfigSysId, classMappingSysId, subPredicates) {
-        var matched = [];
+    /**
+     * Stream every workload satisfying one label term. R50.
+     *
+     * A term is a set of sub-predicates that must ALL hold. The field value table carries one row
+     * per (workload, dimension), so the rows for one workload are counted and the term is
+     * satisfied when that count reaches `subPredicates.length`.
+     *
+     * WAS A GROUPED AGGREGATE, AND THAT WAS A SILENT CORRECTNESS DEFECT. The old form did
+     * `groupBy(WORKLOAD_FIELD)` + `COUNT`, which makes the GROUP COUNT EQUAL THE ANSWER SIZE --
+     * the platform caps a grouped result at ~100,000 and the walk simply ends. Measured
+     * 2026-10-07: a filter matching 250,000 workloads returned **100,001** and reported the run
+     * completed. Correct below ~100k, so it passes every test anyone would naturally run.
+     * An aggregate is for SUMMARISING -- many rows into few groups. One group per result inverts
+     * that. Never use a grouped aggregate as a set-returning query; see
+     * docs/reference/platform-gotchas.md.
+     *
+     * Row iteration is NOT capped -- measured, 250,000 walked = 250,000 counted -- so the same
+     * AND-semantics come from sorting and counting runs instead.
+     *
+     * ^ORDERBY<ref>.sys_id, NOT orderBy(<ref>). `orderBy` on a reference sorts by the referenced
+     * record's DISPLAY VALUE, which here is `hostname`, and adds a join to do it. Measured
+     * 2026-10-07: that ordering reversed sys_id order at 17,817 of 41,667 run boundaries.
+     * Grouping by adjacency needs one workload's rows contiguous AND SEPARABLE, and hostname
+     * ordering gives that only while hostnames are unique -- which is exactly what `duplicate`
+     * exists to say they are not. The `.sys_id` form measured 0 reversals at no extra cost.
+     *
+     * @param {String} pceConfigSysId PCE Configuration sys_id
+     * @param {String} classMappingSysId Class Mapping sys_id, optional
+     * @param {Array} subPredicates Encoded fragments, all of which must hold
+     * @param {Function} onWorkload Called with each qualifying workload sys_id. Return false to
+     *                   stop the walk.
+     * @returns {Number} how many workloads qualified
+     */
+    eachLabelTermWorkload: function(pceConfigSysId, classMappingSysId, subPredicates, onWorkload) {
+        var qualified = 0;
 
         if (!subPredicates || subPredicates.length === 0) {
-            return matched;
+            return qualified;
         }
 
+        var required = subPredicates.length;
         var query = this.syncUtils.buildTermQuery(
             this.syncUtils.buildBaseQuery(pceConfigSysId, classMappingSysId), subPredicates);
 
-        var ga = new GlideAggregate(this.syncUtils.WORKLOAD_FIELD_VALUE_TABLE);
-        ga.addEncodedQuery(query);
-        ga.groupBy(this.syncUtils.WORKLOAD_FIELD);
-        ga.addAggregate("COUNT", this.syncUtils.DIMENSION_FIELD);
-        ga.query();
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_FIELD_VALUE_TABLE);
+        gr.addEncodedQuery(query + "^ORDERBY" + this.syncUtils.WORKLOAD_FIELD + ".sys_id");
+        gr.query();
 
-        while (ga.next()) {
-            var count = parseInt(ga.getAggregate("COUNT", this.syncUtils.DIMENSION_FIELD), 10) || 0;
-            if (count >= subPredicates.length) {
-                matched.push(ga.getValue(this.syncUtils.WORKLOAD_FIELD));
+        // The entire state of the walk. Two variables whatever the result size, which is the
+        // point -- the old form returned an array the size of the answer and the caller then
+        // copied it into a set, so two full-size structures existed at once.
+        var current = null;
+        var runCount = 0;
+        var stopped = false;
+
+        while (gr.next()) {
+            var workload = gr.getValue(this.syncUtils.WORKLOAD_FIELD);
+
+            if (workload !== current) {
+                if (current !== null && runCount >= required) {
+                    qualified++;
+                    if (onWorkload(current) === false) { stopped = true; break; }
+                }
+                current = workload;
+                runCount = 0;
+            }
+
+            runCount++;
+        }
+
+        // The last run has no boundary after it to trigger the emit above.
+        if (!stopped && current !== null && runCount >= required) {
+            qualified++;
+            onWorkload(current);
+        }
+
+        return qualified;
+    },
+
+    /**
+     * Narrow one window of workloads by `duplicate`, the extent, and the CMDB condition. R50.
+     *
+     * TWO SIMPLE QUERIES, NOT A JOIN, and the split is deliberate: each condition is asked of the
+     * table where it is natively expressible.
+     *
+     *   Q1  the workload table   -- app-controlled predicates (sys_id IN, duplicate, extent)
+     *   Q2  the CMDB source table -- the CUSTOMER'S encoded condition, unchanged
+     *
+     * `addJoinQuery` would collapse this into one query and was measured working (41,688 =
+     * expected). It is not used, for two reasons. Its condition object is a ScopedQueryCondition
+     * with **no `addEncodedQuery`** -- measured, it throws -- so the filter's stored condition
+     * would have to be decomposed into field/operator/value triples including ^OR and ^NQ, which
+     * is a new parser with real edge cases. And `addJoinQuery` appears nowhere else in this
+     * application, so it would be a platform dependency taken for no gain.
+     *
+     * A DOT-WALK IS NOT AN OPTION EITHER. `servicenow_cmdb_identifier` references `cmdb_ci`, and
+     * the join lands on the `cmdb` base table: `servicenow_cmdb_identifier.cpu_count` fails with
+     * "Unknown field". A CMDB condition may name any column of the source table, so base-class
+     * fields are not enough.
+     *
+     * @param {Array} windowSysIds Workload sys_ids, <=WORKLOAD_CHUNK_SIZE
+     * @param {Array} extentList Extent entries from IllumioSyncUtils.splitExtent
+     * @param {String} sourceTable CMDB table the condition is authored against
+     * @param {String} cmdbCondition Encoded query, as stored on the Sync Filter
+     * @returns {Array} surviving workload sys_ids
+     */
+    findSurvivingWorkloadsMatchingCmdb: function(windowSysIds, extentList, sourceTable, cmdbCondition) {
+        var survivors = [];
+
+        if (!windowSysIds || windowSysIds.length === 0) {
+            return survivors;
+        }
+
+        // ---- Q1. Bounded by the window, so this map is never larger than one window.
+        var ciToWorkloads = {};
+        var ciSysIds = [];
+
+        var gr = new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
+        gr.addQuery("sys_id", "IN", windowSysIds.join(","));
+        gr.addQuery("duplicate", false);
+        this._addExtentConditions(gr, extentList || []);
+        gr.query();
+
+        while (gr.next()) {
+            var ciSysId = gr.getValue("servicenow_cmdb_identifier");
+            if (gs.nil(ciSysId)) {
+                continue;
+            }
+            // An ARRAY per CI, not a single sys_id. Two workloads can carry the same CI -- that
+            // is what `duplicate` records -- and although duplicates are excluded above, nothing
+            // in the schema makes the survivor set unique on CI. Overwriting would silently drop
+            // one of them.
+            if (!ciToWorkloads[ciSysId]) {
+                ciToWorkloads[ciSysId] = [];
+                ciSysIds.push(ciSysId);
+            }
+            ciToWorkloads[ciSysId].push(gr.getUniqueValue());
+        }
+
+        if (ciSysIds.length === 0) {
+            return survivors;
+        }
+
+        // ---- Q2. The customer's condition, encoded, against its own table. Bounded by the IN.
+        var ciGr = new GlideRecord(sourceTable);
+        if (!gs.nil(cmdbCondition)) {
+            ciGr.addEncodedQuery(cmdbCondition);
+        }
+        ciGr.addQuery("sys_id", "IN", ciSysIds.join(","));
+        ciGr.query();
+
+        while (ciGr.next()) {
+            var hits = ciToWorkloads[ciGr.getUniqueValue()] || [];
+            for (var h = 0; h < hits.length; h++) {
+                survivors.push(hits[h]);
             }
         }
 
-        return matched;
+        return survivors;
     },
+
+    // R13. The grouped aggregate this replaced. Kept for one release because the shape is the
+    // thing to recognise, not the code: it reads as a correct, rather elegant way to express
+    // "satisfies every sub-predicate" and it silently returns a short answer above ~100,000.
+    //
+    // aggregateLabelTermWorkloads: function(pceConfigSysId, classMappingSysId, subPredicates) {
+    //     var matched = [];
+    //     if (!subPredicates || subPredicates.length === 0) { return matched; }
+    //     var query = this.syncUtils.buildTermQuery(
+    //         this.syncUtils.buildBaseQuery(pceConfigSysId, classMappingSysId), subPredicates);
+    //     var ga = new GlideAggregate(this.syncUtils.WORKLOAD_FIELD_VALUE_TABLE);
+    //     ga.addEncodedQuery(query);
+    //     ga.groupBy(this.syncUtils.WORKLOAD_FIELD);
+    //     ga.addAggregate("COUNT", this.syncUtils.DIMENSION_FIELD);
+    //     ga.query();
+    //     while (ga.next()) {
+    //         var count = parseInt(ga.getAggregate("COUNT", this.syncUtils.DIMENSION_FIELD), 10) || 0;
+    //         if (count >= subPredicates.length) {
+    //             matched.push(ga.getValue(this.syncUtils.WORKLOAD_FIELD));
+    //         }
+    //     }
+    //     return matched;
+    // },
 
     // ---- CMDB condition evaluation ----
 
@@ -442,6 +600,85 @@ IllumioSyncRepoUtils.prototype = {
      * @param {String} pceConfigSysId sys_id of the PCE Configuration
      * @returns {Number} Non-duplicate workloads on the configuration, 0 when it cannot be read
      */
+    /**
+     * Which of these Label Dimensions cannot be used by a filter on this PCE Configuration?
+     *
+     * Two ways a dimension is unusable, and they need different wording because they need
+     * different fixes:
+     *
+     *   FOREIGN  it exists but belongs to another PCE Configuration. The condition builder for a
+     *            Label Condition cannot filter the picker -- a reference qualifier needs `current`
+     *            and a condition builder has no record of the target table -- so every dimension
+     *            on the instance is selectable regardless of configuration. This is the check
+     *            that replaces the qualifier that cannot run.
+     *   MISSING  the sys_id matches no dimension at all. A deleted dimension leaves its sys_id in
+     *            the saved condition text, and nothing rewrites it.
+     *
+     * Either way the term matches NOTHING at run time, and a filter that matches nothing syncs
+     * nothing -- silently. That is the U1 failure shape, which is why this is worth a save-time
+     * refusal rather than a log line.
+     *
+     * @param {String} pceConfigSysId The filter's PCE Configuration
+     * @param {Array} dimensionSysIds Dimension sys_ids named by the condition
+     * @returns {Array} [{ sysId, name, reason, configName }] -- empty when every dimension is usable
+     */
+    findUnusableLabelDimensions: function(pceConfigSysId, dimensionSysIds) {
+        var unusable = [];
+
+        if (!dimensionSysIds || dimensionSysIds.length === 0) {
+            return unusable;
+        }
+
+        // One pass, resolving every named dimension, so FOREIGN and MISSING are distinguished by
+        // what came back rather than by a second query.
+        // this.syncUtils.chunkArray, not IllumioUtils._chunkArray: this class has no `utils`
+        // member and no IN_CLAUSE_BATCH_SIZE of its own -- those belong to
+        // IllumioDiscoveryRepository. Chunked at the standard ~500 IN ceiling even though a
+        // hand-authored condition names a handful of dimensions at most, because the cost of
+        // being defensive here is one loop that runs once.
+        var found = {};
+        var chunks = this.syncUtils.chunkArray(
+            dimensionSysIds, this.syncUtils.WORKLOAD_CHUNK_SIZE);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            var gr = new GlideRecord(TABLE_LABEL_DIMENSION);
+            gr.addQuery("sys_id", "IN", chunks[chunkIndex].join(","));
+            gr.query();
+
+            while (gr.next()) {
+                found[gr.getUniqueValue()] = {
+                    config: gr.getValue("illumio_pce_configuration"),
+                    configName: gr.getDisplayValue("illumio_pce_configuration"),
+                    // display_name_singular is the display value; `key` is what the PCE calls it
+                    // and what the author sees in a rendered condition. Prefer the key, because
+                    // the error has to be matched against the condition text.
+                    name: gr.getValue("key") || gr.getDisplayValue()
+                };
+            }
+        }
+
+        for (var index = 0; index < dimensionSysIds.length; index++) {
+            var sysId = dimensionSysIds[index];
+            var record = found[sysId];
+
+            if (!record) {
+                unusable.push({
+                    sysId: sysId, name: "", reason: "missing", configName: ""
+                });
+                continue;
+            }
+
+            if (record.config !== pceConfigSysId + "") {
+                unusable.push({
+                    sysId: sysId, name: record.name,
+                    reason: "foreign", configName: record.configName
+                });
+            }
+        }
+
+        return unusable;
+    },
+
     countEligibleWorkloads: function(pceConfigSysId) {
         var ga = new GlideAggregate(this.syncUtils.WORKLOAD_TABLE);
         ga.addQuery("illumio_pce_configuration", pceConfigSysId);
@@ -1040,13 +1277,13 @@ IllumioSyncRepoUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-21 12:40:54</sys_created_on>
         <sys_id>16070598c36387d050bffa0ed40131aa</sys_id>
-        <sys_mod_count>13</sys_mod_count>
+        <sys_mod_count>15</sys_mod_count>
         <sys_name>IllumioSyncRepoUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_16070598c36387d050bffa0ed40131aa</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 04:58:09</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-08 14:51:27</sys_updated_on>
     </sys_script_include>
 </record_update>

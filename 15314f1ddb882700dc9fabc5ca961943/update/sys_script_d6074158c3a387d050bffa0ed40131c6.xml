@@ -79,6 +79,21 @@
             labelErrors.push('The Label Condition has no usable conditions. ' +
                 'Add at least one Label Dimension condition, or clear the field.');
         }
+
+        // Cross-configuration and deleted Label Dimensions. Not in parseLabelCondition with the
+        // other label rules because it needs a QUERY, and IllumioSyncUtils is deliberately the
+        // gs-free, DB-free half -- IllumioSyncFilterUtils.validateLabelDimensions is where the
+        // pure parse and the repository lookup are joined, and the evaluator calls that same
+        // method, so the doctrine above still holds: one implementation, two callers.
+        //
+        // This is the rule that stands in for a reference qualifier. The Label Dimension picker
+        // inside a condition builder cannot be filtered -- an advanced qualifier needs `current`
+        // and a condition builder has no record of the target table -- so every dimension on the
+        // instance is selectable here and a wrong one matches nothing, silently.
+        if (labelErrors.length === 0 && parsed.terms.length > 0) {
+            new IllumioSyncFilterUtils().validateLabelDimensions(
+                current.getValue('pce_configuration'), parsed, labelErrors);
+        }
     }
 
     var cmdbCondition = current.getValue('cmdb_condition');
@@ -148,15 +163,15 @@
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>d6074158c3a387d050bffa0ed40131c6</sys_id>
-        <sys_mod_count>4</sys_mod_count>
+        <sys_mod_count>5</sys_mod_count>
         <sys_name>Validate Sync Filter Conditions</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_d6074158c3a387d050bffa0ed40131c6</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:04</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-08 14:51:27</sys_updated_on>
         <template/>
         <when>before</when>
     </sys_script>

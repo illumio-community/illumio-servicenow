@@ -22,6 +22,12 @@ IllumioDiscoveryUtils.prototype = {
     // Number of CMDB rows discovery pages through at a time
     DISCOVERY_WINDOW_SIZE: 1000,
 
+    // R13. How often the write phase emitted a progress line, in records -- four lines per window
+    // at the size above. Unused since the line was removed from
+    // IllumioDiscoverAndMapCMDBServers._processWindow on 2026-10-06; kept so restoring that block
+    // does not also need this re-derived.
+    // DISCOVERY_PROGRESS_EVERY: 250,
+
     // Logged when a class mapping restricts unknown workload creation to a condition but
     // leaves the condition empty. The gate falls back to allow_all; this is what stops that
     // being a silent difference between what the form says and what the run did.
@@ -275,6 +281,12 @@ IllumioDiscoveryUtils.prototype = {
         var row = {
             servicenow_cmdb_identifier: workload.identifier + "",
             hostname: hostname,
+            // Denormalised so duplicate detection can be an indexed batched IN against this
+            // table instead of a run-global map in memory. Mirrors hostname_part on
+            // ..._pce_workloads_mapping exactly -- same derivation, same NOT lower-cased, for
+            // the same reason: the IN compares against raw values and relies on the column
+            // collation. Read by IllumioDiscoveryRepository.findInsertedWorkloadsByHostnamePart.
+            hostname_part: this.hostNamePart(hostname),
             illumio_pce_configuration: pceConfigId,
             source_table: workload["source_table"],
             conflicts: false,
@@ -725,13 +737,13 @@ IllumioDiscoveryUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>486df616c393479050bffa0ed40131f0</sys_id>
-        <sys_mod_count>17</sys_mod_count>
+        <sys_mod_count>18</sys_mod_count>
         <sys_name>IllumioDiscoveryUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_486df616c393479050bffa0ed40131f0</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 07:09:14</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 18:36:26</sys_updated_on>
     </sys_script_include>
 </record_update>

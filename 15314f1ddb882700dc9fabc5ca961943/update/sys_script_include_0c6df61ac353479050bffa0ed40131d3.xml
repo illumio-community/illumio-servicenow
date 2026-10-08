@@ -598,6 +598,60 @@ IllumioDiscoveryRepository.prototype = {
      * @param {Array} hostnames Hostnames to look up
      * @returns {Object} incidentKey(hostname, href) -> incident sys_id
      */
+    /**
+     * Workloads THIS RUN has already inserted, for the hostname-parts of one window.
+     *
+     * Replaces the run-global `hostnameMap` in IllumioDiscoverAndMapCMDBServers, which held one
+     * entry per distinct hostname for the whole run -- ~540 MB at 2M CIs, live from the first
+     * record to the last. The answer it provided is in the database already; this asks for it one
+     * window at a time, so peak is the window and not the scan.
+     *
+     * SAFE ONLY BECAUSE DISCOVERY TRUNCATES THE WORKLOAD TABLE FIRST (STALE_DISCOVERY_DATA, see
+     * IllumioDiscoverAndMapCMDBServers:687). Every row this returns was written by the run that
+     * is asking, which is exactly the scope the old in-memory map had. If that truncation is ever
+     * removed, this silently starts reporting last run's workloads as this run's duplicates.
+     *
+     * REQUIRES hostname_part AND ITS INDEX on ..._pce_workload. Without the index this is a full
+     * scan of a table growing to the size of the scan, issued once per window -- far worse than
+     * the memory it saves. See the deployment order note on L4.
+     *
+     * @param {String} pceConfigId PCE Configuration sys_id
+     * @param {Array} hostNameParts Hostname parts collected for the current window
+     * @returns {Object} { <known_to_pce>: { <mapKey(part)>: <workload sys_id> } } -- the same
+     *                   shape the caller's hostnameMap had, so its two read sites are unchanged
+     */
+    findInsertedWorkloadsByHostnamePart: function(pceConfigId, hostNameParts) {
+        var found = { managed: {}, unmanaged: {}, unknown: {} };
+        var chunks = this.utils._chunkArray(hostNameParts, this.IN_CLAUSE_BATCH_SIZE);
+
+        for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            var gr = new GlideRecordSecure(this.WORKLOAD_TABLE);
+            gr.addQuery("illumio_pce_configuration", pceConfigId);
+            gr.addQuery("hostname_part", "IN", chunks[chunkIndex].join(","));
+            // A duplicate points at the PRIMARY workload, never at another duplicate -- that is
+            // what duplicate_of means and what the old map stored, since it only ever recorded
+            // the first sys_id for a key and never overwrote it.
+            gr.addQuery("duplicate", false);
+            gr.query();
+
+            while (gr.next()) {
+                var bucket = gr.getValue("known_to_pce");
+                if (!found.hasOwnProperty(bucket)) {
+                    continue;
+                }
+                var key = this.discoveryUtils.mapKey(gr.getValue("hostname_part"));
+                // First row wins, matching the old map: `hostnameMap[bucket][key] = sysId` ran
+                // once per insert and the duplicate branch returned before reaching it, so a key
+                // was written exactly once.
+                if (!found[bucket][key]) {
+                    found[bucket][key] = gr.getUniqueValue();
+                }
+            }
+        }
+
+        return found;
+    },
+
     findIncidentMappings: function(pceConfigId, hostnames) {
         var incidents = {};
         var chunks = this.utils._chunkArray(hostnames, this.IN_CLAUSE_BATCH_SIZE);
@@ -828,13 +882,13 @@ IllumioDiscoveryRepository.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>0c6df61ac353479050bffa0ed40131d3</sys_id>
-        <sys_mod_count>19</sys_mod_count>
+        <sys_mod_count>20</sys_mod_count>
         <sys_name>IllumioDiscoveryRepository</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0c6df61ac353479050bffa0ed40131d3</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 18:36:26</sys_updated_on>
     </sys_script_include>
 </record_update>

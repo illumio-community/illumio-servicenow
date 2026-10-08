@@ -34,7 +34,7 @@
         <function_field>false</function_field>
         <internal_type display_value="String">string</internal_type>
         <mandatory>false</mandatory>
-        <max_length>100</max_length>
+        <max_length>255</max_length>
         <name>x_illu2_illumio_illumio_pce_workload</name>
         <next_element/>
         <primary>false</primary>
@@ -58,8 +58,8 @@
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_dictionary_x_illu2_illumio_illumio_pce_workload_hostname</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2024-03-28 06:01:57</sys_updated_on>
+        <sys_updated_by>koushik.choudhury</sys_updated_by>
+        <sys_updated_on>2026-10-06 19:24:57</sys_updated_on>
         <table_reference>false</table_reference>
         <text_index>false</text_index>
         <unique>false</unique>

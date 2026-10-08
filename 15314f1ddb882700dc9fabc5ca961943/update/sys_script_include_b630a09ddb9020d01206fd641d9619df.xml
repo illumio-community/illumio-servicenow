@@ -20,6 +20,32 @@ IllumioUtils.prototype = {
      */
     initialize: function(jobSysId) {
         this.logger = new IllumioLogger(jobSysId, 'IllumioUtils');
+
+        // F18 ROOT CAUSE, found 2026-10-05. `this.scheduledJobsGr` was read by handleFailure at
+        // :772 and assigned NOWHERE -- not here, not in handleFailure, not anywhere in this file.
+        // So `this.scheduledJobsGr.get(jobSysId)` dereferenced `undefined` and threw
+        // `RhinoEcmaError: The undefined value has no properties` on EVERY call, at all twelve
+        // call sites across IllumioStartAuthentication and IllumioStartDiscovery.
+        //
+        // handleFailure is the app's only way to move a job out of `running` when something goes
+        // wrong, so the effect was: every failure path threw instead of failing the job, the throw
+        // escaped the caller, and the job sat `running` until invalidate_running_job_limit (7200s)
+        // or invalidate_authentication_job_limit (3600s) force-cancelled it. That is F18 -- and it
+        // was never the missing try/catch, which only ever exposed this.
+        //
+        // Invisible until now because handleFailure runs only on failure paths, and every run to
+        // date was made by an admin, for whom nothing failed. Confirmed from the global syslog:
+        //   sys_script_include.b630a09d...script:772  <- here
+        //   at sys_script_include.9e6a94a8...script:82 <- IllumioStartAuthentication catch block
+        //   at sys_ui_action.d86e0c20...               <- Check PCE Configuration
+        //
+        // Plain GlideRecord, not GlideRecordSecure, and deliberately so. Five of the six fields
+        // handleFailure writes (`job_status`, `logs`, `job_completed`, plus the reads) are
+        // field-ACL'd to x_illu2_illumio.mid_server_user. Under GlideRecordSecure a caller without
+        // that role would have its status write silently dropped, leaving the job `running` --
+        // exactly the failure this is meant to end. Recording a terminal failure state is a system
+        // operation, not a user edit; same reasoning as IllumioDiscoveryRepository:329.
+        this.scheduledJobsGr = new GlideRecord(TABLE_SCHEDULED_JOBS);
     },
 
     VALID_IP_REGEX: /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/,
@@ -2746,14 +2772,14 @@ IllumioUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-11-04 13:11:02</sys_created_on>
         <sys_id>b630a09ddb9020d01206fd641d9619df</sys_id>
-        <sys_mod_count>483</sys_mod_count>
+        <sys_mod_count>484</sys_mod_count>
         <sys_name>IllumioUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_b630a09ddb9020d01206fd641d9619df</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 12:00:45</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-05 12:22:31</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>b630a09ddb9020d01206fd641d9619df</id>

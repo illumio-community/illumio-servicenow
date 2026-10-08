@@ -3,12 +3,12 @@
         <sys_ui_annotation action="INSERT_OR_UPDATE">
             <is_plain_text>false</is_plain_text>
             <name/>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:26</sys_created_on>
-            <sys_id>5cc7a678c36fcbd050bffa0ed40131a7</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>b27a05f9473b47508ab8cc02d16d43a0</sys_id>
             <sys_mod_count>0</sys_mod_count>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:26</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <text>&lt;style&gt;
         ol {
             list-style-type: disc;
@@ -47,161 +47,163 @@
 &lt;li&gt;Each set of a single&amp;nbsp;&lt;strong&gt;Illumio Label Dimension&lt;/strong&gt; and one or more (to match multiple values against a label) &lt;strong&gt;CMDB&lt;/strong&gt; &lt;strong&gt;Value&amp;nbsp;&lt;/strong&gt;is considered as one term and is evaluated independently.&lt;/li&gt;
 &lt;li&gt;Sync Filter selects the workloads that match all three (whichever is &lt;strong&gt;Non Empty&lt;/strong&gt;), i.e. Label Condition, CMDB Condition &amp;amp; Extent.&lt;/li&gt;
 &lt;li&gt;&lt;strong&gt;Export Matching Workloads&lt;/strong&gt; do not consider conflicts.&lt;/li&gt;
+&lt;li&gt;Once saturation is attained (number of workloads considered eligible by all processed Sync Filters becomes equal to total number of non-duplicate workloads), succeeding Sync Filters will be skipped.&lt;/li&gt;
+&lt;li&gt;When multiple PCE Configurations exist, a PCE Configuration filter should be applied to &lt;strong&gt;Illumio Label Dimension&amp;nbsp;&lt;/strong&gt;picker. Saving with a &lt;strong&gt;Illumio Label Dimension&amp;nbsp;&lt;/strong&gt;outside of current PCE Configuration is not allowed.&lt;/li&gt;
 &lt;/ul&gt;
 &lt;p&gt;&amp;nbsp;&lt;/p&gt;</text>
             <type display_value="Info Box Blue">753f88a80f930000b12e6903cfe01206</type>
         </sys_ui_annotation>
         <sys_ui_element action="INSERT_OR_UPDATE">
-            <element>5cc7a678c36fcbd050bffa0ed40131a7</element>
+            <element>b27a05f9473b47508ab8cc02d16d43a0</element>
             <position>0</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
-            <sys_id>acc7a678c36fcbd050bffa0ed40131c2</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>ba7a05f9473b47508ab8cc02d16d43c5</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type>annotation</type>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>name</element>
             <position>1</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
-            <sys_id>a0c7a678c36fcbd050bffa0ed40131c4</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>3a7a05f9473b47508ab8cc02d16d43c6</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>pce_configuration</element>
             <position>2</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
-            <sys_id>6cc7a678c36fcbd050bffa0ed40131c4</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>327a05f9473b47508ab8cc02d16d43c7</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>class_mapping</element>
             <position>3</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
-            <sys_id>28c7a678c36fcbd050bffa0ed40131c5</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>3a7a05f9473b47508ab8cc02d16d43c7</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>type</element>
             <position>4</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
-            <sys_id>e0c7a678c36fcbd050bffa0ed40131c6</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>327a05f9473b47508ab8cc02d16d43c8</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>extent</element>
             <position>5</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:27</sys_created_on>
-            <sys_id>bcc7a678c36fcbd050bffa0ed40131c6</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>3a7a05f9473b47508ab8cc02d16d43c8</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:27</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>label_condition_table</element>
             <position>6</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
-            <sys_id>78c7a678c36fcbd050bffa0ed40131c7</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>327a05f9473b47508ab8cc02d16d43c9</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>label_condition</element>
             <position>7</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
-            <sys_id>34c7a678c36fcbd050bffa0ed40131c8</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>3a7a05f9473b47508ab8cc02d16d43c9</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>cmdb_condition_table</element>
             <position>8</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
-            <sys_id>f8c7a678c36fcbd050bffa0ed40131fa</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>327a05f9473b47508ab8cc02d16d43ca</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>cmdb_condition</element>
             <position>9</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
-            <sys_id>b4c7a678c36fcbd050bffa0ed40131fb</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>3a7a05f9473b47508ab8cc02d16d43ca</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>
         <sys_ui_element action="INSERT_OR_UPDATE">
             <element>active</element>
             <position>10</position>
-            <sys_created_by>admin</sys_created_by>
-            <sys_created_on>2026-09-23 09:00:28</sys_created_on>
-            <sys_id>70c7a678c36fcbd050bffa0ed40131fc</sys_id>
+            <sys_created_by>koushik.choudhury</sys_created_by>
+            <sys_created_on>2026-10-08 15:02:32</sys_created_on>
+            <sys_id>327a05f9473b47508ab8cc02d16d43cb</sys_id>
             <sys_mod_count>0</sys_mod_count>
             <sys_ui_formatter/>
             <sys_ui_section caption="NULL" display_value="" name="x_illu2_illumio_illumio_sync_filter" sys_domain="global" view="Default view">3de8ebc5c3600b5050bffa0ed401315e</sys_ui_section>
-            <sys_updated_by>admin</sys_updated_by>
-            <sys_updated_on>2026-09-23 09:00:28</sys_updated_on>
+            <sys_updated_by>koushik.choudhury</sys_updated_by>
+            <sys_updated_on>2026-10-08 15:02:32</sys_updated_on>
             <sys_user/>
             <type/>
         </sys_ui_element>

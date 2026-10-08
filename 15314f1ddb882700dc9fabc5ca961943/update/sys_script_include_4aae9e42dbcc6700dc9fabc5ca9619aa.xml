@@ -11,10 +11,14 @@
         <sandbox_callable>false</sandbox_callable>
         <script><![CDATA[var IllumioAddToECCQueue = Class.create();
 IllumioAddToECCQueue.prototype = {
-    initialize: function(probe, midserver, parameters) {
+    initialize: function(probe, midserver, parameters, options) {
         this.probe = probe; // probe name
         this.midServer = midserver; // mid server name
         this.parameters = parameters; // extra parameters to be passed
+        // Demotes the HANDOFF line below to debug. Set by IllumioPollAsyncJobStatus and by
+        // nothing else -- see the comment on that line for why the poll path is the only caller
+        // that qualifies. Absent for every other caller, which keeps them at info.
+        this.quiet = !!(options && options.quiet);
         this.utils = new IllumioUtils();
         // Two names for the same thing, both in use: authentication, discovery, async polling and
         // preview send `illumio_scheduled_job_id`; sync and deletion send `jobSysId`. Reading only
@@ -74,8 +78,25 @@ IllumioAddToECCQueue.prototype = {
             // was queued, to which MID, for which job is what lets a missing "Probe entered."
             // line on the other side mean something -- without this, both halves look silent and
             // there is no way to tell which one never ran.
-            this.logger.info('HANDOFF: queueing probe ' + this.probe + ' for MID Server ' +
-                this.midServer + '.');
+            //
+            // QUIET FOR THE POLL PATH ONLY. A MID probe is one-shot, so every async status check
+            // has to queue a new one -- which made this line repeat once per poll, per job, at
+            // info: 18 of them inside 100 seconds on 2026-10-06, and 360 an hour for a PCE job
+            // that runs long. Repeated identically, it says nothing the previous one did not.
+            //
+            // The demotion is safe because IllumioPollAsyncJobStatus is the ONLY looping caller.
+            // Every other caller -- StartDiscovery, StartAuthentication, UpdatePCE,
+            // DeletionHandler, AutoSync, StartWorkloadDeletion, PreviewUtils -- hands off once and
+            // stays at info, so the handoff that STARTS a piece of work is still an info line.
+            // What goes quiet is only the "still waiting" repeat, and
+            // IllumioPollAsyncJobStatus logs a status line of its own in its place.
+            var handoffLine = 'HANDOFF: queueing probe ' + this.probe + ' for MID Server ' +
+                this.midServer + '.';
+            if (this.quiet) {
+                this.logger.debug(handoffLine);
+            } else {
+                this.logger.info(handoffLine);
+            }
 
             // add it to the ECC queue
             var eccSysId = ecc.insert();
@@ -104,13 +125,13 @@ IllumioAddToECCQueue.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:17:45</sys_created_on>
         <sys_id>4aae9e42dbcc6700dc9fabc5ca9619aa</sys_id>
-        <sys_mod_count>15</sys_mod_count>
+        <sys_mod_count>16</sys_mod_count>
         <sys_name>IllumioAddToECCQueue</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4aae9e42dbcc6700dc9fabc5ca9619aa</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:41</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-06 15:36:19</sys_updated_on>
     </sys_script_include>
 </record_update>
