@@ -592,7 +592,26 @@ IllumioGeneratePreviewFile.prototype = {
         }
 
         var status = '' + response.data.result[0].job_status;
-        return status === JOB_STATUS_CANCELLED || status === JOB_STATUS_FAILED || status === JOB_STATUS_COMPLETED;
+
+        // L2. This was three literals -- cancelled, failed, completed -- and so was the ONLY
+        // stop-check on the MID that did not recognise cancelled_threshold_limit_exceeded. The
+        // named list is tested first so this file cannot drift from the other probes again; it is
+        // exactly what IllumioMIDConstants warns about, a status spelled in one place and not
+        // another, which fails by continuing rather than by erroring.
+        //
+        // No threshold limit is evaluated on a preview today, so this is defensive rather than a
+        // live defect -- the paths that write that status are IllumioAutoSyncWithPCE and
+        // IllumioStartWorkloadDeletion, neither of which produces a preview job.
+        //
+        // failed and completed stay, and are deliberately NOT folded into CANCELLED_JOB_STATUSES:
+        // that list means "the instance stopped expecting this work", and it excludes the
+        // self-terminating statuses on purpose. Here both are still reasons to stop, because
+        // attaching a file to a job the user has already been shown as finished contradicts it.
+        if (CANCELLED_JOB_STATUSES.indexOf(status) > -1) {
+            return true;
+        }
+
+        return status === JOB_STATUS_FAILED || status === JOB_STATUS_COMPLETED;
     },
 
     /**
@@ -686,14 +705,14 @@ IllumioGeneratePreviewFile.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>f647d7e8c3638bd050bffa0ed40131b4</sys_id>
-        <sys_mod_count>6</sys_mod_count>
+        <sys_mod_count>7</sys_mod_count>
         <sys_name>IllumioGeneratePreviewFile</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_f647d7e8c3638bd050bffa0ed40131b4</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-09 05:30:57</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

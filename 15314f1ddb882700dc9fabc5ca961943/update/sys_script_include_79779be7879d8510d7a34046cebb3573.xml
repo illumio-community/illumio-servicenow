@@ -16,34 +16,57 @@ IllumioUtilsAJAX.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
     // On the prototype, not in initialize -- see the note in IllumioUpdatePCE.
     logger: new IllumioLogger(null, 'IllumioUtilsAJAX'),
 
-    FIELD_NAME_TYPE: "field_name",
-
-	/**
-     * get field name type fields.
-     * @return {String} fields with type field name.
-     */
-    getFieldNameTypeFields: function() {
-        var eligibleFields = [];
-        var mappingsGR = new GlideRecordSecure(TABLE_PCE_FIELD_MAPPING);
-        mappingsGR.initialize();
-        for (var field in mappingsGR) {
-            // indexOf, not String.prototype.startsWith: the rest of the server code is strict
-            // ES5 and this was the last ES6 construct left in it. It ran, so the scope is on an
-            // engine that supports it -- this is a consistency fix, not a crash fix. It stops
-            // being cosmetic the moment anything here is back-ported to a Rhino scope, which is
-            // exactly what the MID script includes are.
-            if (field.indexOf("sys_") === 0 || field == "order_by_column_name")
-                continue;
-            try {
-                if (mappingsGR.getElement(field).getED().getInternalType() == this.FIELD_NAME_TYPE)
-                    eligibleFields.push(field);
-            } catch (e) {
-                this.logger.error("Exception while fetching fields: " + e);
-            }
-
-        }
-        return JSON.stringify(eligibleFields);
-    },
+    // R13 / P4, 2026-10-09. DEAD -- commented, not deleted. Two independent reasons:
+    //
+    //   1. NO CALLERS. The string `getFieldNameTypeFields` appears exactly twice in everything
+    //      that is readable from here: once in this workspace, and once inside IllumioUtilsAJAX's
+    //      own sys_script_include record in the Studio export. Nowhere else -- not in a Client
+    //      Script, UI Policy, UI Action, UI Page or dictionary attribute. An AbstractAjaxProcessor
+    //      method is only reachable by name through GlideAjax, so no occurrence of the name means
+    //      no way in. (Searched with `grep -R`: illumio-servicenow is a SYMLINK and plain
+    //      `grep -r` silently does not follow it.)
+    //
+    //   2. The table does not exist. TABLE_PCE_FIELD_MAPPING is
+    //      'x_illu2_illumio_illumio_pce_field_mapping', which is not one of the application's 24
+    //      sys_db_object rows. The nearest live table is illumio_class_field_mapping. A
+    //      GlideRecordSecure on a missing table does not throw here -- `for (var field in gr)`
+    //      finds nothing to iterate and this returned "[]", so a caller, had there been one,
+    //      would have been handed an empty field list rather than an error.
+    //
+    // FIELD_NAME_TYPE goes with it: this was its only reader.
+    //
+    // Deliberately NOT folded into the D2 cleanup pass. That pass is the old Groups / Label Items
+    // / Field Value Items tables, held together so one edit restores them; this is an orphaned
+    // method on a live Script Include and shares nothing with them.
+    //
+    // FIELD_NAME_TYPE: "field_name",
+    //
+	// /**
+    //  * get field name type fields.
+    //  * @return {String} fields with type field name.
+    //  */
+    // getFieldNameTypeFields: function() {
+    //     var eligibleFields = [];
+    //     var mappingsGR = new GlideRecordSecure(TABLE_PCE_FIELD_MAPPING);
+    //     mappingsGR.initialize();
+    //     for (var field in mappingsGR) {
+    //         // indexOf, not String.prototype.startsWith: the rest of the server code is strict
+    //         // ES5 and this was the last ES6 construct left in it. It ran, so the scope is on an
+    //         // engine that supports it -- this is a consistency fix, not a crash fix. It stops
+    //         // being cosmetic the moment anything here is back-ported to a Rhino scope, which is
+    //         // exactly what the MID script includes are.
+    //         if (field.indexOf("sys_") === 0 || field == "order_by_column_name")
+    //             continue;
+    //         try {
+    //             if (mappingsGR.getElement(field).getED().getInternalType() == this.FIELD_NAME_TYPE)
+    //                 eligibleFields.push(field);
+    //         } catch (e) {
+    //             this.logger.error("Exception while fetching fields: " + e);
+    //         }
+    //
+    //     }
+    //     return JSON.stringify(eligibleFields);
+    // },
 
     /**
      * Render a Sync Filter's Label Condition as a readable expression.
@@ -126,13 +149,13 @@ IllumioUtilsAJAX.prototype = Object.extendsObject(global.AbstractAjaxProcessor, 
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2022-02-02 11:45:57</sys_created_on>
         <sys_id>79779be7879d8510d7a34046cebb3573</sys_id>
-        <sys_mod_count>24</sys_mod_count>
+        <sys_mod_count>25</sys_mod_count>
         <sys_name>IllumioUtilsAJAX</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_79779be7879d8510d7a34046cebb3573</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:02</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-09 05:30:56</sys_updated_on>
     </sys_script_include>
 </record_update>

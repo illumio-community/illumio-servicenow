@@ -142,9 +142,22 @@ var ASYNC_JOB_STATUS_READY_TO_MAP = "ready_to_map";
 //                                         the Illumio Invalidate Running Job script action fired
 //   cancelled_threshold_limit_exceeded -- a configured threshold was hit, or the thresholds could
 //                                         not be resolved at all (IllumioThresholdLimit throws)
-//   invalidated                        -- the job record was superseded
+//   invalidated                        -- NOTHING WRITES THIS. See below.
 // Matching only 'cancelled' meant a threshold-cancelled job kept pushing to the PCE for the rest
 // of the run: the instance had given up on it and the MID had not been told.
+//
+// L2, 2026-10-09: of the three, only two are real. `invalidated` is written by NO code on either
+// side -- the only writers of a stopping status are Illumio Invalidate Running Job and
+// GetLabelGroupsAjax (both `cancelled`) and IllumioAutoSyncWithPCE and IllumioStartWorkloadDeletion
+// (both `cancelled_threshold_limit_exceeded`) -- and it is not a value on the job_status choice
+// list in dictionary/x_illu2_illumio_illumio_scheduled_jobs.xml, which carries seven choices and
+// not this one. A sys_ui_style record still references it, so it was a real status once.
+//
+// It STAYS in the list. The field is a plain string with a choice list, so a status off the list
+// can be written to it, and a member that never matches costs one array comparison. Removing it
+// would be a behaviour change made on the strength of "nothing writes it today" -- but do not
+// write new code that relies on it being produced, and do not treat it as a third way to stop a
+// job, which is what this comment claimed before.
 //
 // Centralized copy: the same set is IllumioSyncRepoUtils' dead-status list minus the statuses that
 // mean the job finished on its own. Those are not here on purpose -- a job that reached
@@ -176,14 +189,14 @@ var MIN_PCE_CALL_INTERVAL_MS = 100;]]></script>
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>09d16579873dc550d7a34046cebb3592</sys_id>
-        <sys_mod_count>29</sys_mod_count>
+        <sys_mod_count>30</sys_mod_count>
         <sys_name>IllumioMIDConstants</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_09d16579873dc550d7a34046cebb3592</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-09 05:30:58</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

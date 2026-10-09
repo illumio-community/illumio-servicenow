@@ -12,9 +12,27 @@ ms.include("IllumioHttpIncludes");
 var IllumioPCEUtils = Class.create();
 
 IllumioPCEUtils.prototype = {
-    initialize: function(timezone, jobSysId) {
+    initialize: function(timezone, jobSysId, retryParams) {
         this.jobSysId = jobSysId || null;
         this.logger = new IllumioLogUtil(this.jobSysId, 'IllumioPCEUtils');
+
+        // L2. `this.retryParams` was READ by _snowClient below and ASSIGNED BY NOTHING -- there was
+        // no third argument and initialize never set the property. IllumioHTTPClient coerces an
+        // undefined retryParams to {}, every one of the three fields then parses to NaN, and
+        // _validateRetryParams turns retrying off. That client is built with pceMIDProxy = null,
+        // which is also what sets skipLogs, so the "Retrying is DISABLED" warning was suppressed
+        // as well: the two most frequent MID-to-instance calls in the app --
+        // checkCancelledJobStatus and _updateJobRecord -- had no retry and said nothing about it.
+        //
+        // The cost is silent in both directions. checkCancelledJobStatus returns false when the
+        // request does not land, so one transient instance error means a real cancellation is not
+        // seen at that check; _updateJobRecord returns false, so a job-record line is dropped.
+        //
+        // Defaulted rather than left undefined when a caller omits it. All three callers set
+        // exactly this default before overriding it from glide.jms.retry_params, so a caller that
+        // forgets gets working retry instead of silently none. Passing it is still the right
+        // thing -- the PCE Configuration's values are what the three sibling snHttpClients use.
+        this.retryParams = retryParams || DEFAULT_RETRY_PARAMS;
 
         this.timeZone = timezone;
         this.SimpleDF = Packages.java.text.SimpleDateFormat;
@@ -283,14 +301,14 @@ IllumioPCEUtils.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>93966d1f1b20381046dba9f6624bcb74</sys_id>
-        <sys_mod_count>49</sys_mod_count>
+        <sys_mod_count>50</sys_mod_count>
         <sys_name>IllumioPCEUtils</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_93966d1f1b20381046dba9f6624bcb74</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-09 05:30:56</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

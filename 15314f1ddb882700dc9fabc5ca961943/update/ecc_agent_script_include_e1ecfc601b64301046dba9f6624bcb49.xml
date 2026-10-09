@@ -39,15 +39,18 @@ IllumioAuthenticateToPCE.prototype = {
         this.snowDateFormat.setTimeZone(this.TimeZone.getTimeZone('GMT'));
         this.illumioDateFormat.setTimeZone(this.TimeZone.getTimeZone('UTC'));
 
-        this.utils = new IllumioPCEUtils(this.timeZone, this.illumio_job_id);
-        this.protocol = this.utils.getPortFromUrl(this.pceUrl);
-
+        // L2: moved ABOVE the IllumioPCEUtils construction, which now takes retryParams. It used
+        // to be parsed three lines below it, so passing it at construction without this move
+        // would have handed over an undefined.
         this.retryParams = DEFAULT_RETRY_PARAMS;
         try {
             this.retryParams = JSON.parse(probe.getParameter('glide.jms.retry_params'));
         } catch (e) {
             this.logger._except('IllumioAuthenticateToPCE - Cannot parse the JSON of retry parameters');
         }
+
+        this.utils = new IllumioPCEUtils(this.timeZone, this.illumio_job_id, this.retryParams);
+        this.protocol = this.utils.getPortFromUrl(this.pceUrl);
 
         var decodedAuth = this.utils.decodeBase64(this.pceAuthorization);
         decodedAuth = decodedAuth.split(":");
@@ -165,14 +168,14 @@ IllumioAuthenticateToPCE.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>e1ecfc601b64301046dba9f6624bcb49</sys_id>
-        <sys_mod_count>90</sys_mod_count>
+        <sys_mod_count>91</sys_mod_count>
         <sys_name>IllumioAuthenticateToPCE</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_e1ecfc601b64301046dba9f6624bcb49</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-30 10:41:00</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-09 05:30:58</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

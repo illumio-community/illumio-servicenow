@@ -72,16 +72,19 @@ IllumioManageAsyncJobs.prototype = {
         this.snowDateFormat.setTimeZone(this.TimeZone.getTimeZone('GMT'));
         this.illumioDateFormat.setTimeZone(this.TimeZone.getTimeZone('UTC'));
 
-        this.utils = new IllumioPCEUtils(this.timeZone, this.illumio_jobId);
-
-        this.protocol = this.utils.getPortFromUrl(this.pceUrl);
-
+        // L2: moved ABOVE the IllumioPCEUtils construction, which now takes retryParams. It used
+        // to be parsed four lines below it, so passing it at construction without this move would
+        // have handed over an undefined.
         this.retryParams = DEFAULT_RETRY_PARAMS;
         try {
             this.retryParams = JSON.parse(probe.getParameter('glide.jms.retry_params'));
         } catch (e) {
             this.logger._except('IllumioManageAsyncJobs - Cannot parse the JSON of retry parameters');
         }
+
+        this.utils = new IllumioPCEUtils(this.timeZone, this.illumio_jobId, this.retryParams);
+
+        this.protocol = this.utils.getPortFromUrl(this.pceUrl);
 
         var decodedAuth = this.utils.decodeBase64(this.pceAuthorization);
         decodedAuth = decodedAuth.split(":");
@@ -745,7 +748,7 @@ IllumioManageAsyncJobs.prototype = {
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>63973142db8c6700dc9fabc5ca961947</sys_id>
-        <sys_mod_count>100</sys_mod_count>
+        <sys_mod_count>101</sys_mod_count>
         <sys_name>IllumioManageAsyncJobs</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
@@ -753,6 +756,6 @@ IllumioManageAsyncJobs.prototype = {
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>ecc_agent_script_include_63973142db8c6700dc9fabc5ca961947</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-06 16:09:51</sys_updated_on>
+        <sys_updated_on>2026-10-09 05:30:57</sys_updated_on>
     </ecc_agent_script_include>
 </record_update>

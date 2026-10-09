@@ -28,6 +28,40 @@
         <rest_variables/>
         <role_conditions/>
         <script><![CDATA[gs.include("IllumioConstants");
+
+// P4, 2026-10-09. THIS RULE DOES NOT RUN, AND COULD NOT WORK IF IT DID. Left intact on purpose --
+// see the last paragraph. Four findings, in the order they stop it:
+//
+//   1. INACTIVE ON THE INSTANCE. `active` is false on sys_script_ed2a2013dbcca4901206fd641d9619d5
+//      in the Studio export. It is `after` insert/update on
+//      x_illu2_illumio_illumio_label_group_mapping with an empty condition, so if it were ever
+//      switched on it would fire on every row of that table.
+//
+//   2. THE TARGET TABLE DOES NOT EXIST. TABLE_LABEL_GROUP_MEMBER is
+//      'x_illu2_illumio_label_group_member', which is not one of the application's 24
+//      sys_db_object rows. Note the shape of the name: every real table in this app is
+//      x_illu2_illumio_illumio_*, with the scope prefix and then a name that itself starts with
+//      'illumio'. This constant has only one. So it is as likely to be a mis-transcribed name as
+//      a removed table, and either way grMember.insert() below writes nowhere.
+//
+//   3. THE BODY IS BROKEN INDEPENDENTLY OF BOTH. grLabel is fetched and never read -- `label` is
+//      resolved by .get() and then nothing uses the record. grMember has only
+//      illumio_label_group set, which is `current.sys_id`, the same value on every pass. So even
+//      against a table that existed, this would insert N identical rows carrying no label at all.
+//      The loop variable `label` reaches nothing that is written.
+//
+//   4. fetchLabels is DECLARED INSIDE `if (pceConfig.next())` and USED OUTSIDE IT. `var` hoists,
+//      so with no PCE Configuration record this is not a ReferenceError -- it is `undefined`, and
+//      `fetchLabels.execute()` throws into the catch below, where it is logged as
+//      '[Illumio]Exception' and looks like a PCE problem.
+//
+// NOT commented out, and this is the deliberate part. It belongs to Critical Label Groups, which
+// is parked by D5 pending the user's conversation with their manager -- not abandoned. The rule
+// is inactive, so it is already unreachable and commenting the body changes nothing that runs;
+// doing it anyway would make a parked decision look like a settled one. If D5 closes as
+// out-of-scope for good, this goes in that pass, with findings 2-4 as the shopping list for
+// whoever revives it.
+
 // W3: one correlated logger for this script. Job sys_id is nil where this code has no job;
 // the prefix degrades to [-] rather than vanishing. See the IllumioLogger script include.
 var illumioLogger = new IllumioLogger(null, 'Fetch Labels From LabelGroups');
@@ -87,15 +121,15 @@ var illumioLogger = new IllumioLogger(null, 'Fetch Labels From LabelGroups');
         <sys_domain>global</sys_domain>
         <sys_domain_path>/</sys_domain_path>
         <sys_id>ed2a2013dbcca4901206fd641d9619d5</sys_id>
-        <sys_mod_count>29</sys_mod_count>
+        <sys_mod_count>30</sys_mod_count>
         <sys_name>Fetch Labels From LabelGroups</sys_name>
         <sys_overrides/>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_ed2a2013dbcca4901206fd641d9619d5</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:45</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-09 05:30:56</sys_updated_on>
         <template/>
         <when>after</when>
     </sys_script>
