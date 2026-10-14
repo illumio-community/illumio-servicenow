@@ -75,7 +75,7 @@
         <macroponent/>
         <map display_value="World">93b8a3a2d7101200bd4a4ebfae61033a</map>
         <map_source/>
-        <name/>
+        <name>Total Unique Workloads</name>
         <no_bulk_migration>false</no_bulk_migration>
         <orderby_list/>
         <other_threshold>-2</other_threshold>

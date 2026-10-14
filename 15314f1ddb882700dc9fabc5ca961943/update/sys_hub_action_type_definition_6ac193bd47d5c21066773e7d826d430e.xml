@@ -39,7 +39,7 @@
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_hub_action_type_definition_6ac193bd47d5c21066773e7d826d430e</sys_update_name>
         <sys_updated_by>koushik.choudhury</sys_updated_by>
-        <sys_updated_on>2026-07-27 10:27:06</sys_updated_on>
+        <sys_updated_on>2026-09-30 13:02:50</sys_updated_on>
         <system_level>false</system_level>
         <type/>
     </sys_hub_action_type_definition>
@@ -1801,7 +1801,7 @@ ms.include("IllumioMIDConstants");&#13;
     <sys_hub_action_plan action="INSERT_OR_UPDATE">
         <action_id display_value="Fetch Label Dimensions">6ac193bd47d5c21066773e7d826d430e</action_id>
         <plan>{"@class":"com.snc.process_flow.engine.serialization.plan_data.ChunkingPlanData","chunk_data":{"table":"sys_hub_action_plan","id":"4a23f45a4751461066773e7d826d43ed","name":"plan","plan_signature":null},"plan_data":"CHUNKING_PLAN"}</plan>
-        <snapshot>a3e3d096339ecf101d8a76273e5c7ba6</snapshot>
+        <snapshot>49e96cfc47bfc3108ab8cc02d16d43e7</snapshot>
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2024-04-03 11:16:00</sys_created_on>
         <sys_domain>global</sys_domain>
@@ -3610,6 +3610,6 @@ ms.include("IllumioMIDConstants");&#13;
     <sys_hub_action_type_definition action="UPDATE">
         <sys_id>6ac193bd47d5c21066773e7d826d430e</sys_id>
         <latest_snapshot>2923b45a4751461066773e7d826d43fc</latest_snapshot>
-        <compiler_build>glide-australia-02-11-2026__patch2-hotfix3a-07-01-2026_07-02-2026_1220.zip</compiler_build>
+        <compiler_build>glide-australia-02-11-2026__patch5aw40-09-25-2026_09-29-2026_2210.zip</compiler_build>
     </sys_hub_action_type_definition>
 </record_update>
