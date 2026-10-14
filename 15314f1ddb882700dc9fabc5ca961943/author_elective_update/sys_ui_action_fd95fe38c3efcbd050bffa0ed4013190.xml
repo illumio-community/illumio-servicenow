@@ -1,0 +1,488 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_ui_action">
+    <sys_ui_action action="DELETE">
+        <action_name>start_sync</action_name>
+        <active>true</active>
+        <client>true</client>
+        <client_script_v2><![CDATA[function onClick(g_form) {
+
+}
+]]></client_script_v2>
+        <comments/>
+        <condition/>
+        <form_action>true</form_action>
+        <form_button>false</form_button>
+        <form_button_icon/>
+        <form_button_v2>false</form_button_v2>
+        <form_context_menu>false</form_context_menu>
+        <form_link>true</form_link>
+        <form_menu_button_v2>false</form_menu_button_v2>
+        <form_style/>
+        <format_for_configurable_workspace>false</format_for_configurable_workspace>
+        <hint/>
+        <isolate_script>false</isolate_script>
+        <list_action>false</list_action>
+        <list_banner_button>false</list_banner_button>
+        <list_button>false</list_button>
+        <list_button_icon/>
+        <list_choice>false</list_choice>
+        <list_context_menu>false</list_context_menu>
+        <list_link>false</list_link>
+        <list_save_with_form_button>false</list_save_with_form_button>
+        <list_style/>
+        <messages/>
+        <name>Start Sync</name>
+        <onclick>confirmStartSync()</onclick>
+        <order>100</order>
+        <script><![CDATA[function confirmStartSync() {
+    var gm = new GlideModal('', false, 700);
+    gm.setTitle('Confirm sync');
+
+    top.window.startSyncConfirm = function(answer) {
+        gm.destroy();
+
+        if (answer === 'yes') {
+            gsftSubmit(null, g_form.getFormElement(), 'start_sync');
+        }
+
+        return false;
+    };
+
+    var html =
+        '<div style="padding: 8px 4px 4px 4px; font-size: 16px; line-height: 1.5;">' +
+            '<p>Start a sync to the PCE now, without waiting for the scheduled run?</p>' +
+            '<p>Workloads matched by active inclusion sync filters will be created or updated ' +
+            'on the PCE. Workloads whose <b>Known to PCE</b> is <i>unknown</i> are ' +
+            '<b>created</b>; managed and unmanaged ones are updated.</p>' +
+            '<p>Only workloads with <b>Conflicts = true</b> are synced. If none are flagged, ' +
+            'the job will finish successfully having done nothing.</p>' +
+            '<div style="display:flex; justify-content:flex-end; gap:12px; margin-top:20px;">' +
+                '<button style="flex: 1; width: 100%" class="btn btn-default" onclick="top.window.startSyncConfirm(\'no\'); return false;">Cancel</button>' +
+                '<button style="flex: 1; width: 100%" class="btn btn-primary" onclick="top.window.startSyncConfirm(\'yes\'); return false;">Yes</button>' +
+            '</div>' +
+        '</div>';
+
+    gm.renderWithContent(html);
+    return false;
+}
+
+// Server half: a trigger, and nothing else.
+//
+// Deliberately identical in shape to `Start Workload Deletion`, with one difference: there is no
+// preview gate. Deletion demands a fresh DELETION-PREVIEW- attachment because it is
+// non-reversible; sync is re-runnable, so the gate would be ceremony.
+//
+// DEVELOPMENT AID. This exists so a sync can be triggered on demand instead of waiting for the
+// PCE Configuration's own schedule. It does not replace the scheduled run and adds nothing to it
+// -- it creates the same job record that the scheduler would and raises an event that lands in
+// the same IllumioAutoSyncWithPCE.process(). Remove it, its Event Registry entry and its Script
+// Action before this ships.
+if (typeof window === 'undefined') {
+    // Declared inside the server guard for the same reason gs.include is: this Script
+    // field is evaluated in the browser too, for the client half above, and IllumioLogger
+    // is a server Script Include. At the top of the file it threw a ReferenceError on
+    // every form load and stopped the form rendering.
+    var illumioLogger = new IllumioLogger(null, 'Start Sync');
+
+    // Inside the server guard, not at the top of the file. This Script field is evaluated in
+    // the browser too, for the client half above, and `gs` does not exist there -- a
+    // top-level gs.include would throw a ReferenceError and kill the onclick handler.
+    gs.include("IllumioConstants");
+
+    var configSysId = current.getUniqueValue();
+    var redirectUrl = current.getTableName() + '.do?sys_id=' + configSysId;
+
+    /**
+     * Is this event name in the Event Registry?
+     *
+     * sysevent_register is a global table, so a scoped read of it can be refused depending on
+     * cross-scope privileges. A refusal is not evidence the event is missing, so it is treated as
+     * "cannot tell" and the sync is allowed to proceed -- the point of this check is to catch the
+     * common case where the entry was simply never created, not to add a new way to block.
+     *
+     * @param {String} eventName Fully qualified event name
+     * @returns {Boolean} False only when the registry could be read and the event was absent
+     */
+    var eventIsRegistered = function(eventName) {
+        try {
+            var registryGr = new GlideRecord('sysevent_register');
+            if (!registryGr.isValid()) {
+                return true;
+            }
+            registryGr.addQuery('event_name', eventName);
+            registryGr.setLimit(1);
+            registryGr.query();
+            return registryGr.hasNext();
+        } catch (checkEx) {
+            illumioLogger.warn('Could not read sysevent_register, proceeding anyway: ' + checkEx);
+            return true;
+        }
+    };
+
+    try {
+        var utils = new IllumioUtils();
+        var runningJob = utils.getRunningJob(configSysId);
+
+        if (runningJob) {
+            // A genuine guard: nothing has been queried or written at this point.
+            //
+            // Scoped to this PCE Configuration. It used to match any Illumio job anywhere,
+            // justified by sync, deletion and preview all writing to the shared payload tables
+            // and all driving the same MID Server. Both of those really were unsafe -- the
+            // payload sweep deleted other jobs' rows and the MID temp-file sweep deleted other
+            // runs' part-written files -- and both are fixed at the source now, so the wide
+            // scope bought nothing beyond blocking configuration B while A ran. See
+            // getRunningJob.
+            gs.addErrorMessage(utils.describeRunningJob(runningJob));
+            action.setRedirectURL(redirectUrl);
+
+        } else if (!eventIsRegistered('x_illu2_illumio.start_sync')) {
+            // Pre-flight, and the reason this button "did nothing". gs.eventQueueScheduled on an
+            // unregistered event is a no-op that returns nothing and throws nothing: the job
+            // record was inserted as `running`, the UI said "Sync job started", and the job then
+            // sat there forever. Worse, getRunningJob matched ANY running job at the time, so
+            // that one stuck record went on to refuse every Start Sync, Start Workload Deletion
+            // and preview on the instance. The guard is per-configuration now, so a repeat would
+            // strand one configuration rather than all of them -- still worth refusing here,
+            // before a job record exists, rather than relying on that.
+            //
+            // Event Registry rows live in sysevent_register, which is not in this repository --
+            // so pushing the UI Action, the Script Action and this script is not enough and
+            // nothing in source control says so. Checked rather than assumed, and refused before
+            // a job record exists so there is nothing left stuck.
+            gs.addErrorMessage('Sync not started: the event "x_illu2_illumio.start_sync" is not ' +
+                'in the Event Registry, so nothing would have picked the job up. Create a ' +
+                'System Policy > Events > Registry entry with Event name ' +
+                '"x_illu2_illumio.start_sync" and Table ' +
+                'TABLE_SCHEDULED_JOBS, and a Script Action named "StartSync" ' +
+                'bound to it.');
+            action.setRedirectURL(redirectUrl);
+
+        } else {
+            var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            jobGr.initialize();
+            jobGr.job_owner = gs.getUser().getID();
+            jobGr.job_type = JOB_TYPE_DATA_SYNC;
+            jobGr.job_status = JOB_STATUS_RUNNING;
+            jobGr.job_started = new GlideDateTime();
+            jobGr.current_operation = 'Synchronizing workloads to PCE';
+            jobGr.illumio_pce_configuration = configSysId;
+            jobGr.logs = 'Sync requested manually. Discovery skipped.';
+            var jobSysId = jobGr.insert();
+            // From here on the job record exists, so anything this action logs -- including
+            // an exception out of the block below -- lands under the same job id the
+            // scheduler half will use.
+            illumioLogger.setContext(jobSysId);
+
+            if (gs.nil(jobSysId)) {
+                gs.addErrorMessage('Failed to create scheduled job for sync.');
+            } else {
+                // Same handoff deletion and discovery use: the event is raised here, the Script
+                // Action picks it up in the scheduler. process() reads the configuration and the
+                // owner off the job record, so the event only has to carry the job sys_id.
+                gs.eventQueueScheduled('x_illu2_illumio.start_sync',
+                    jobGr, jobSysId, '', new GlideDateTime());
+
+                gs.addInfoMessage('Sync job started. Track progress in Scheduled Jobs.');
+            }
+
+            action.setRedirectURL(redirectUrl);
+        }
+    } catch (ex) {
+        illumioLogger.error('Exception: ' + ex);
+        gs.addErrorMessage('Error starting sync: ' + ex);
+        action.setRedirectURL(redirectUrl);
+    }
+}
+]]></script>
+        <show_form_icon_only>false</show_form_icon_only>
+        <show_insert>false</show_insert>
+        <show_list_icon_only>false</show_list_icon_only>
+        <show_multiple_update>false</show_multiple_update>
+        <show_query>false</show_query>
+        <show_update>true</show_update>
+        <sys_class_name>sys_ui_action</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-23 10:00:53</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>fd95fe38c3efcbd050bffa0ed4013190</sys_id>
+        <sys_mod_count>7</sys_mod_count>
+        <sys_name>Start Sync</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sys_ui_action_fd95fe38c3efcbd050bffa0ed4013190</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-30 10:41:04</sys_updated_on>
+        <table>x_illu2_illumio_illumio_pce_conf</table>
+        <ui11_compatible>true</ui11_compatible>
+        <ui16_compatible>false</ui16_compatible>
+    </sys_ui_action>
+<sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>a4f78e48db001704a874f897bf96198d</instance_id>
+        <instance_name>ven02375</instance_name>
+        <name>sys_ui_action_fd95fe38c3efcbd050bffa0ed4013190</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update sys_domain="global" table="sys_ui_action"&gt;
+    &lt;sys_ui_action action="INSERT_OR_UPDATE"&gt;
+        &lt;action_name&gt;start_sync&lt;/action_name&gt;
+        &lt;active&gt;true&lt;/active&gt;
+        &lt;client&gt;true&lt;/client&gt;
+        &lt;client_script_v2&gt;&lt;![CDATA[function onClick(g_form) {
+
+}
+]]&gt;&lt;/client_script_v2&gt;
+        &lt;comments/&gt;
+        &lt;condition/&gt;
+        &lt;form_action&gt;true&lt;/form_action&gt;
+        &lt;form_button&gt;false&lt;/form_button&gt;
+        &lt;form_button_icon/&gt;
+        &lt;form_button_v2&gt;false&lt;/form_button_v2&gt;
+        &lt;form_context_menu&gt;false&lt;/form_context_menu&gt;
+        &lt;form_link&gt;true&lt;/form_link&gt;
+        &lt;form_menu_button_v2&gt;false&lt;/form_menu_button_v2&gt;
+        &lt;form_style/&gt;
+        &lt;format_for_configurable_workspace&gt;false&lt;/format_for_configurable_workspace&gt;
+        &lt;hint/&gt;
+        &lt;isolate_script&gt;false&lt;/isolate_script&gt;
+        &lt;list_action&gt;false&lt;/list_action&gt;
+        &lt;list_banner_button&gt;false&lt;/list_banner_button&gt;
+        &lt;list_button&gt;false&lt;/list_button&gt;
+        &lt;list_button_icon/&gt;
+        &lt;list_choice&gt;false&lt;/list_choice&gt;
+        &lt;list_context_menu&gt;false&lt;/list_context_menu&gt;
+        &lt;list_link&gt;false&lt;/list_link&gt;
+        &lt;list_save_with_form_button&gt;false&lt;/list_save_with_form_button&gt;
+        &lt;list_style/&gt;
+        &lt;messages/&gt;
+        &lt;name&gt;Start Sync&lt;/name&gt;
+        &lt;onclick&gt;confirmStartSync()&lt;/onclick&gt;
+        &lt;order&gt;100&lt;/order&gt;
+        &lt;script&gt;&lt;![CDATA[function confirmStartSync() {
+    var gm = new GlideModal('', false, 700);
+    gm.setTitle('Confirm sync');
+
+    top.window.startSyncConfirm = function(answer) {
+        gm.destroy();
+
+        if (answer === 'yes') {
+            gsftSubmit(null, g_form.getFormElement(), 'start_sync');
+        }
+
+        return false;
+    };
+
+    var html =
+        '&lt;div style="padding: 8px 4px 4px 4px; font-size: 16px; line-height: 1.5;"&gt;' +
+            '&lt;p&gt;Start a sync to the PCE now, without waiting for the scheduled run?&lt;/p&gt;' +
+            '&lt;p&gt;Workloads matched by active inclusion sync filters will be created or updated ' +
+            'on the PCE. Workloads whose &lt;b&gt;Known to PCE&lt;/b&gt; is &lt;i&gt;unknown&lt;/i&gt; are ' +
+            '&lt;b&gt;created&lt;/b&gt;; managed and unmanaged ones are updated.&lt;/p&gt;' +
+            '&lt;p&gt;Only workloads with &lt;b&gt;Conflicts = true&lt;/b&gt; are synced. If none are flagged, ' +
+            'the job will finish successfully having done nothing.&lt;/p&gt;' +
+            '&lt;div style="display:flex; justify-content:flex-end; gap:12px; margin-top:20px;"&gt;' +
+                '&lt;button style="flex: 1; width: 100%" class="btn btn-default" onclick="top.window.startSyncConfirm(\'no\'); return false;"&gt;Cancel&lt;/button&gt;' +
+                '&lt;button style="flex: 1; width: 100%" class="btn btn-primary" onclick="top.window.startSyncConfirm(\'yes\'); return false;"&gt;Yes&lt;/button&gt;' +
+            '&lt;/div&gt;' +
+        '&lt;/div&gt;';
+
+    gm.renderWithContent(html);
+    return false;
+}
+
+// Server half: a trigger, and nothing else.
+//
+// Deliberately identical in shape to `Start Workload Deletion`, with one difference: there is no
+// preview gate. Deletion demands a fresh DELETION-PREVIEW- attachment because it is
+// non-reversible; sync is re-runnable, so the gate would be ceremony.
+//
+// DEVELOPMENT AID. This exists so a sync can be triggered on demand instead of waiting for the
+// PCE Configuration's own schedule. It does not replace the scheduled run and adds nothing to it
+// -- it creates the same job record that the scheduler would and raises an event that lands in
+// the same IllumioAutoSyncWithPCE.process(). Remove it, its Event Registry entry and its Script
+// Action before this ships.
+if (typeof window === 'undefined') {
+    // Declared inside the server guard for the same reason gs.include is: this Script
+    // field is evaluated in the browser too, for the client half above, and IllumioLogger
+    // is a server Script Include. At the top of the file it threw a ReferenceError on
+    // every form load and stopped the form rendering.
+    var illumioLogger = new IllumioLogger(null, 'Start Sync');
+
+    // Inside the server guard, not at the top of the file. This Script field is evaluated in
+    // the browser too, for the client half above, and `gs` does not exist there -- a
+    // top-level gs.include would throw a ReferenceError and kill the onclick handler.
+    gs.include("IllumioConstants");
+
+    var configSysId = current.getUniqueValue();
+    var redirectUrl = current.getTableName() + '.do?sys_id=' + configSysId;
+
+    /**
+     * Is this event name in the Event Registry?
+     *
+     * sysevent_register is a global table, so a scoped read of it can be refused depending on
+     * cross-scope privileges. A refusal is not evidence the event is missing, so it is treated as
+     * "cannot tell" and the sync is allowed to proceed -- the point of this check is to catch the
+     * common case where the entry was simply never created, not to add a new way to block.
+     *
+     * @param {String} eventName Fully qualified event name
+     * @returns {Boolean} False only when the registry could be read and the event was absent
+     */
+    var eventIsRegistered = function(eventName) {
+        try {
+            var registryGr = new GlideRecord('sysevent_register');
+            if (!registryGr.isValid()) {
+                return true;
+            }
+            registryGr.addQuery('event_name', eventName);
+            registryGr.setLimit(1);
+            registryGr.query();
+            return registryGr.hasNext();
+        } catch (checkEx) {
+            illumioLogger.warn('Could not read sysevent_register, proceeding anyway: ' + checkEx);
+            return true;
+        }
+    };
+
+    try {
+        var utils = new IllumioUtils();
+        var runningJob = utils.getRunningJob(configSysId);
+
+        if (runningJob) {
+            // A genuine guard: nothing has been queried or written at this point.
+            //
+            // Scoped to this PCE Configuration. It used to match any Illumio job anywhere,
+            // justified by sync, deletion and preview all writing to the shared payload tables
+            // and all driving the same MID Server. Both of those really were unsafe -- the
+            // payload sweep deleted other jobs' rows and the MID temp-file sweep deleted other
+            // runs' part-written files -- and both are fixed at the source now, so the wide
+            // scope bought nothing beyond blocking configuration B while A ran. See
+            // getRunningJob.
+            gs.addErrorMessage(utils.describeRunningJob(runningJob));
+            action.setRedirectURL(redirectUrl);
+
+        } else if (!eventIsRegistered('x_illu2_illumio.start_sync')) {
+            // Pre-flight, and the reason this button "did nothing". gs.eventQueueScheduled on an
+            // unregistered event is a no-op that returns nothing and throws nothing: the job
+            // record was inserted as `running`, the UI said "Sync job started", and the job then
+            // sat there forever. Worse, getRunningJob matched ANY running job at the time, so
+            // that one stuck record went on to refuse every Start Sync, Start Workload Deletion
+            // and preview on the instance. The guard is per-configuration now, so a repeat would
+            // strand one configuration rather than all of them -- still worth refusing here,
+            // before a job record exists, rather than relying on that.
+            //
+            // Event Registry rows live in sysevent_register, which is not in this repository --
+            // so pushing the UI Action, the Script Action and this script is not enough and
+            // nothing in source control says so. Checked rather than assumed, and refused before
+            // a job record exists so there is nothing left stuck.
+            gs.addErrorMessage('Sync not started: the event "x_illu2_illumio.start_sync" is not ' +
+                'in the Event Registry, so nothing would have picked the job up. Create a ' +
+                'System Policy &gt; Events &gt; Registry entry with Event name ' +
+                '"x_illu2_illumio.start_sync" and Table ' +
+                'TABLE_SCHEDULED_JOBS, and a Script Action named "StartSync" ' +
+                'bound to it.');
+            action.setRedirectURL(redirectUrl);
+
+        } else {
+            var jobGr = new GlideRecordSecure(TABLE_SCHEDULED_JOBS);
+            jobGr.initialize();
+            jobGr.job_owner = gs.getUser().getID();
+            jobGr.job_type = JOB_TYPE_DATA_SYNC;
+            jobGr.job_status = JOB_STATUS_RUNNING;
+            jobGr.job_started = new GlideDateTime();
+            jobGr.current_operation = 'Synchronizing workloads to PCE';
+            jobGr.illumio_pce_configuration = configSysId;
+            jobGr.logs = 'Sync requested manually. Discovery skipped.';
+            var jobSysId = jobGr.insert();
+            // From here on the job record exists, so anything this action logs -- including
+            // an exception out of the block below -- lands under the same job id the
+            // scheduler half will use.
+            illumioLogger.setContext(jobSysId);
+
+            if (gs.nil(jobSysId)) {
+                gs.addErrorMessage('Failed to create scheduled job for sync.');
+            } else {
+                // Same handoff deletion and discovery use: the event is raised here, the Script
+                // Action picks it up in the scheduler. process() reads the configuration and the
+                // owner off the job record, so the event only has to carry the job sys_id.
+                gs.eventQueueScheduled('x_illu2_illumio.start_sync',
+                    jobGr, jobSysId, '', new GlideDateTime());
+
+                gs.addInfoMessage('Sync job started. Track progress in Scheduled Jobs.');
+            }
+
+            action.setRedirectURL(redirectUrl);
+        }
+    } catch (ex) {
+        illumioLogger.error('Exception: ' + ex);
+        gs.addErrorMessage('Error starting sync: ' + ex);
+        action.setRedirectURL(redirectUrl);
+    }
+}
+]]&gt;&lt;/script&gt;
+        &lt;show_form_icon_only&gt;false&lt;/show_form_icon_only&gt;
+        &lt;show_insert&gt;false&lt;/show_insert&gt;
+        &lt;show_list_icon_only&gt;false&lt;/show_list_icon_only&gt;
+        &lt;show_multiple_update&gt;false&lt;/show_multiple_update&gt;
+        &lt;show_query&gt;false&lt;/show_query&gt;
+        &lt;show_update&gt;true&lt;/show_update&gt;
+        &lt;sys_class_name&gt;sys_ui_action&lt;/sys_class_name&gt;
+        &lt;sys_created_by&gt;admin&lt;/sys_created_by&gt;
+        &lt;sys_created_on&gt;2026-09-23 10:00:53&lt;/sys_created_on&gt;
+        &lt;sys_domain&gt;global&lt;/sys_domain&gt;
+        &lt;sys_domain_path&gt;/&lt;/sys_domain_path&gt;
+        &lt;sys_id&gt;fd95fe38c3efcbd050bffa0ed4013190&lt;/sys_id&gt;
+        &lt;sys_mod_count&gt;7&lt;/sys_mod_count&gt;
+        &lt;sys_name&gt;Start Sync&lt;/sys_name&gt;
+        &lt;sys_overrides/&gt;
+        &lt;sys_package display_value="Illumio" source="x_illu2_illumio"&gt;15314f1ddb882700dc9fabc5ca961943&lt;/sys_package&gt;
+        &lt;sys_policy/&gt;
+        &lt;sys_scope display_value="Illumio"&gt;15314f1ddb882700dc9fabc5ca961943&lt;/sys_scope&gt;
+        &lt;sys_update_name&gt;sys_ui_action_fd95fe38c3efcbd050bffa0ed4013190&lt;/sys_update_name&gt;
+        &lt;sys_updated_by&gt;admin&lt;/sys_updated_by&gt;
+        &lt;sys_updated_on&gt;2026-09-30 10:41:04&lt;/sys_updated_on&gt;
+        &lt;table&gt;x_illu2_illumio_illumio_pce_conf&lt;/table&gt;
+        &lt;ui11_compatible&gt;true&lt;/ui11_compatible&gt;
+        &lt;ui16_compatible&gt;false&lt;/ui16_compatible&gt;
+    &lt;/sys_ui_action&gt;
+&lt;/record_update&gt;</payload>
+        <payload_hash>1342302036</payload_hash>
+        <record_name>Start Sync</record_name>
+        <reverted_from/>
+        <source>d642634347278f108ab8cc02d16d4311</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by>koushik.choudhury</sys_created_by>
+        <sys_created_on>2026-09-30 13:02:59</sys_created_on>
+        <sys_id>2162638347278f108ab8cc02d16d4327</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a0f26940260000001</sys_recorded_at>
+        <sys_updated_by>koushik.choudhury</sys_updated_by>
+        <sys_updated_on>2026-09-30 13:02:59</sys_updated_on>
+        <type>UI Action</type>
+        <update_guid>ed62638358278f1031f47d32acd11626</update_guid>
+        <update_guid_history>ed62638358278f1031f47d32acd11626:1342302036</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-10-14 06:13:43</sys_created_on>
+        <sys_db_object display_value="" name="sys_ui_action">sys_ui_action</sys_db_object>
+        <sys_id>381dbf52181947b8beb6fb41faff0240</sys_id>
+        <sys_metadata>fd95fe38c3efcbd050bffa0ed4013190</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Start Sync</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent display_value="Illumio PCE Configuration">2bb285a79300021062233f018bba106a</sys_parent>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sys_ui_action_fd95fe38c3efcbd050bffa0ed4013190</sys_update_name>
+        <sys_update_version display_value="sys_ui_action_fd95fe38c3efcbd050bffa0ed4013190">2162638347278f108ab8cc02d16d4327</sys_update_version>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-10-14 06:13:43</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

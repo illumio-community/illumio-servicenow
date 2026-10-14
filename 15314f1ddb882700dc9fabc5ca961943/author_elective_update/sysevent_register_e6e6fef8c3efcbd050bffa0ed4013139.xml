@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sysevent_register">
+    <sysevent_register action="DELETE">
+        <caller_access/>
+        <derived_priority>100</derived_priority>
+        <description/>
+        <event_name>x_illu2_illumio.start_sync</event_name>
+        <fired_by/>
+        <priority>100</priority>
+        <queue/>
+        <suffix>start_sync</suffix>
+        <sys_class_name>sysevent_register</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-23 10:07:25</sys_created_on>
+        <sys_id>e6e6fef8c3efcbd050bffa0ed4013139</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio.start_sync</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sysevent_register_e6e6fef8c3efcbd050bffa0ed4013139</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-23 10:07:25</sys_updated_on>
+        <table>x_illu2_illumio_illumio_scheduled_jobs</table>
+    </sysevent_register>
+<sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</application>
+        <file_path/>
+        <instance_id>a4f78e48db001704a874f897bf96198d</instance_id>
+        <instance_name>ven02375</instance_name>
+        <name>sysevent_register_e6e6fef8c3efcbd050bffa0ed4013139</name>
+        <payload><![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update table="sysevent_register">
+    <sysevent_register action="INSERT_OR_UPDATE">
+        <caller_access/>
+        <derived_priority>100</derived_priority>
+        <description/>
+        <event_name>x_illu2_illumio.start_sync</event_name>
+        <fired_by/>
+        <priority>100</priority>
+        <queue/>
+        <suffix>start_sync</suffix>
+        <sys_class_name>sysevent_register</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-09-23 10:07:25</sys_created_on>
+        <sys_id>e6e6fef8c3efcbd050bffa0ed4013139</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio.start_sync</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_update_name>sysevent_register_e6e6fef8c3efcbd050bffa0ed4013139</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-09-23 10:07:25</sys_updated_on>
+        <table>x_illu2_illumio_illumio_scheduled_jobs</table>
+    </sysevent_register>
+</record_update>]]></payload>
+        <payload_hash>-714840809</payload_hash>
+        <record_name>x_illu2_illumio.start_sync</record_name>
+        <reverted_from/>
+        <source>d642634347278f108ab8cc02d16d4311</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by>koushik.choudhury</sys_created_by>
+        <sys_created_on>2026-09-30 13:03:01</sys_created_on>
+        <sys_id>4262a38347278f108ab8cc02d16d4383</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a0f26948ae0000001</sys_recorded_at>
+        <sys_updated_by>koushik.choudhury</sys_updated_by>
+        <sys_updated_on>2026-09-30 13:03:01</sys_updated_on>
+        <type>Event Registration</type>
+        <update_guid>0262a38367278f10756f5d19650ff583</update_guid>
+        <update_guid_history>0262a38367278f10756f5d19650ff583:-714840809</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-10-14 06:14:29</sys_created_on>
+        <sys_db_object display_value="" name="sysevent_register">sysevent_register</sys_db_object>
+        <sys_id>0fbffe301b1649b086dc7f0ecbbe1a64</sys_id>
+        <sys_metadata>e6e6fef8c3efcbd050bffa0ed4013139</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>x_illu2_illumio.start_sync</sys_name>
+        <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
+        <sys_parent display_value="Illumio Scheduled Jobs">07b245a79300021062233f018bba1042</sys_parent>
+        <sys_policy/>
+        <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
+        <sys_scope_delete display_value="">2dc0243a4eea402496fda72c84e16309</sys_scope_delete>
+        <sys_update_name>sysevent_register_e6e6fef8c3efcbd050bffa0ed4013139</sys_update_name>
+        <sys_update_version display_value="sysevent_register_e6e6fef8c3efcbd050bffa0ed4013139">4262a38347278f108ab8cc02d16d4383</sys_update_version>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-10-14 06:14:29</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

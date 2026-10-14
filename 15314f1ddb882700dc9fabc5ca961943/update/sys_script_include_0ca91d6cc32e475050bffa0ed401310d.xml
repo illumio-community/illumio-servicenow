@@ -108,11 +108,19 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 jobSysId, payload.retiredWorkloads, payload.vensToUnpair);
 
             if (payloadRows < 1) {
-                scheduledJobGr.get(jobSysId);
-                scheduledJobGr.job_status = JOB_STATUS_FAILED;
-                scheduledJobGr.job_completed = new GlideDateTime();
-                scheduledJobGr.logs += '\nCould not write the deletion payload. Nothing was sent to the MID server.';
-                scheduledJobGr.update();
+                // Through updateJobRecord rather than a bare re-read + `logs +=` + update().
+                // The re-read was unguarded: if it missed, every line below it set a field on an
+                // empty GlideRecord, `logs +=` produced the string "undefined...", update()
+                // silently did nothing, and the job stayed `running` -- holding this
+                // configuration under the R25 guard until the wall-clock cap ended it. The
+                // helper guards its own get(), does its own fresh read so there is nothing stale
+                // to put back, and on a miss says so in syslog_app_scope (W2: the job-record
+                // line must never be the only witness).
+                new IllumioUtils().updateJobRecord(jobSysId, {
+                    job_status: JOB_STATUS_FAILED,
+                    job_completed: new GlideDateTime(),
+                    logs: 'Could not write the deletion payload. Nothing was sent to the MID server.'
+                });
                 result.message = 'Could not write the deletion payload. Nothing was deleted.';
                 return JSON.stringify(result);
             }
@@ -154,11 +162,12 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
                 new IllumioSyncRepoUtils(syncUtils)
                     .deletePayloadRowsForJob(syncUtils.DELETION_PAYLOAD_TABLE, jobSysId);
 
-                scheduledJobGr.get(jobSysId);
-                scheduledJobGr.job_status = JOB_STATUS_FAILED;
-                scheduledJobGr.job_completed = new GlideDateTime();
-                scheduledJobGr.logs += '\nFailed to dispatch deletion to MID server';
-                scheduledJobGr.update();
+                // Same change, same reason as the payload branch above.
+                new IllumioUtils().updateJobRecord(jobSysId, {
+                    job_status: JOB_STATUS_FAILED,
+                    job_completed: new GlideDateTime(),
+                    logs: 'Failed to dispatch deletion to MID server'
+                });
                 result.message = 'Failed to dispatch deletion to MID server.';
             }
         } catch (ex) {
@@ -212,14 +221,14 @@ IllumioDeletionHandler.prototype = Object.extendsObject(global.AbstractAjaxProce
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-08-03 15:39:42</sys_created_on>
         <sys_id>0ca91d6cc32e475050bffa0ed401310d</sys_id>
-        <sys_mod_count>10</sys_mod_count>
+        <sys_mod_count>11</sys_mod_count>
         <sys_name>IllumioDeletionHandler</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0ca91d6cc32e475050bffa0ed401310d</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-14 09:01:16</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>0ca91d6cc32e475050bffa0ed401310d</id>

@@ -174,7 +174,21 @@ IllumioAutoSyncWithPCE.prototype = {
             // function is now stale -- and every write below is `logs += ...` on that copy
             // followed by update(), which would put the stale value back and erase every
             // progress line phase 1 just wrote.
-            illumioScheduledJobsGr.get(illumioJobId);
+            //
+            // Guarded, and the run continues on a miss. The record was proved readable at the
+            // guarded get() in this method's opening, so a miss here means it was deleted or
+            // became unreadable mid-run. Nothing below can then reach the job record at all --
+            // `logs +=` builds "undefined..." and update() no-ops -- so the run finishes with
+            // no terminal status and sits `running` until the wall-clock cap. Aborting instead
+            // would be worse: under W2 syslog_app_scope is authoritative and the job record is a
+            // best-effort summary, and a sync is not abandoned because its summary sink went
+            // away. What this line buys is that the hang stops being silent.
+            if (!illumioScheduledJobsGr.get(illumioJobId)) {
+                this.logger.error("[IllumioAutoSyncWithPCE] Job record (" + illumioJobId + ") " +
+                    "could not be re-read before phase 2. Every job-record write from here on " +
+                    "will be a no-op and the record will not reach a terminal status. " +
+                    "syslog_app_scope is the only remaining witness for this run.");
+            }
 
             // A synchronous MID Server round trip to the PCE. Silent, and on a slow PCE it is the
             // longest single step before anything is sent.
@@ -255,7 +269,14 @@ IllumioAutoSyncWithPCE.prototype = {
             // copy followed by update(), so without this the whole of phase 2's commentary is
             // overwritten by the value read before phase 2 started -- which is exactly the bug
             // the first re-read was added to fix.
-            illumioScheduledJobsGr.get(illumioJobId);
+            // Guarded for the same reason as the re-read before phase 2, and with the same
+            // decision to continue rather than abort.
+            if (!illumioScheduledJobsGr.get(illumioJobId)) {
+                this.logger.error("[IllumioAutoSyncWithPCE] Job record (" + illumioJobId + ") " +
+                    "could not be re-read after phase 2. Every job-record write from here on " +
+                    "will be a no-op and the record will not reach a terminal status. " +
+                    "syslog_app_scope is the only remaining witness for this run.");
+            }
 
             skippedWorkloads = outcome.skippedCritical;
             var totalRecords = outcome.processed;
@@ -318,7 +339,15 @@ IllumioAutoSyncWithPCE.prototype = {
             // line just wrote `logs` through the progress sink's own GlideRecord, and every write
             // below is `logs += ...` on this copy followed by update(). Without this, the last
             // thing phase 2 says would be overwritten by the value read before it said it.
-            illumioScheduledJobsGr.get(illumioJobId);
+            // Guarded, same as the two re-reads above. This is the last one before the terminal
+            // status writes, so a miss here is the case where a completed sync is never recorded
+            // as completed -- worth saying loudly even though the PCE work itself is done.
+            if (!illumioScheduledJobsGr.get(illumioJobId)) {
+                this.logger.error("[IllumioAutoSyncWithPCE] Job record (" + illumioJobId + ") " +
+                    "could not be re-read before the closing status write. The sync itself ran, " +
+                    "but the job record will not reach a terminal status. syslog_app_scope is " +
+                    "the only remaining witness for this run.");
+            }
 
             // check if there is unknown or inconsistent or retired workload
             if (totalRecords == 0) {
@@ -335,7 +364,13 @@ IllumioAutoSyncWithPCE.prototype = {
 
                 illumioScheduledJobsGr.job_status = partial_success == "true" ? JOB_STATUS_PARTIAL_SUCCESS : JOB_STATUS_COMPLETED;
                 illumioScheduledJobsGr.job_completed = new GlideDateTime();
-                illumioScheduledJobsGr.update();
+                // Checked, like the two threshold updates above it. This is a terminal status
+                // write: if it fails the run is over but the record still says `running`.
+                if (!illumioScheduledJobsGr.update()) {
+                    this.logger.error("[IllumioAutoSyncWithPCE] Closing status write failed for " +
+                        "job " + illumioJobId + " (no workloads branch). The record will not " +
+                        "reach a terminal status.");
+                }
                 return;
             }
 
@@ -349,7 +384,13 @@ IllumioAutoSyncWithPCE.prototype = {
                     "\n" + this.droppedOnInsert + " workload(s) were prepared but their payload " +
                     "row could not be written and will not be sent to the PCE. See the " +
                     "application logs (source IllumioAutoSyncWithPCE).";
-                illumioScheduledJobsGr.update();
+                // Checked. This line is the only place the job record admits to dropped payload
+                // rows, so losing it silently would leave counts that overstate what was sent.
+                if (!illumioScheduledJobsGr.update()) {
+                    this.logger.error("[IllumioAutoSyncWithPCE] Could not record " +
+                        this.droppedOnInsert + " dropped payload row(s) on job " + illumioJobId +
+                        ". The job record's counts overstate what reached the PCE.");
+                }
             }
 
             this.logger.info("Sync process started for PCE Configuration: {0}", configGr.getValue("name"));
@@ -376,7 +417,13 @@ IllumioAutoSyncWithPCE.prototype = {
                         "Synchronization with PCE completed";
                     illumioScheduledJobsGr.job_status = partial_success == "true" ? JOB_STATUS_PARTIAL_SUCCESS : JOB_STATUS_COMPLETED;
                     illumioScheduledJobsGr.job_completed = new GlideDateTime();
-                    illumioScheduledJobsGr.update();
+                    // Checked. The main success path's terminal status write -- the one a
+                    // completed sync is judged by.
+                    if (!illumioScheduledJobsGr.update()) {
+                        this.logger.error("[IllumioAutoSyncWithPCE] Closing status write failed " +
+                            "for job " + illumioJobId + ". The sync completed but the record " +
+                            "will not reach a terminal status.");
+                    }
                     return;
                 }
 
@@ -415,46 +462,6 @@ IllumioAutoSyncWithPCE.prototype = {
                     enable_pce_mid_proxy: pceConfig.enable_pce_mid_proxy,
                     retry_params: JSON.stringify(pceConfig.retry_params)
                 };
-                // ===================================================================
-                // TEMPORARY -- DIAGNOSTIC ABORT. REMOVE BEFORE SHIPPING.
-                //
-                // Stops the run at the last instant before the MID Server is handed the work, so
-                // the phase 1 + phase 2 timings can be read off the job log without waiting for
-                // (or actually performing) a 10k workload push to the PCE. Everything that used
-                // to happen silently in the gap has happened by this point: candidate selection,
-                // the label-group fetch, every chunk, and the final payload flush.
-                //
-                // Off unless the property exists and is 'true', so this is inert on an instance
-                // that never creates it. Toggling it does not need a re-push.
-                //
-                // Withdraws the payload rows on the way out. They describe work the MID will now
-                // never do, and leaving 10k of them behind would both litter the table and let a
-                // later run pick them up. Same call the threshold cancellation already uses.
-                // ===================================================================
-                if (gs.getProperty(PROP_ABORT_BEFORE_MID_HANDOFF, 'false') == 'true') {
-                    var abortedRows = repo.deletePayloadRowsForJob(
-                        syncUtils.AUTOSYNC_PAYLOAD_TABLE, illumioJobId);
-
-                    // Re-read before appending: every `logs +=` in this method is a read-modify-
-                    // write, and the progress sink wrote through its own GlideRecord.
-                    illumioScheduledJobsGr.get(illumioJobId);
-                    illumioScheduledJobsGr.logs +=
-                        "\nDIAGNOSTIC ABORT (x_illu2_illumio.abort_before_mid_handoff is true). " +
-                        "Everything up to the MID Server handoff ran: " + totalRecords +
-                        " workload(s) were prepared and would have been sent now. " +
-                        abortedRows + " payload record(s) withdrawn. Nothing was sent to the PCE." +
-                        "\nSet the property to false to let the sync complete normally.";
-                    illumioScheduledJobsGr.current_operation = "Aborted before MID Server handoff";
-                    illumioScheduledJobsGr.job_status = JOB_STATUS_FAILED;
-                    illumioScheduledJobsGr.job_completed = new GlideDateTime();
-                    illumioScheduledJobsGr.update();
-
-                    this.logger.warn("[IllumioAutoSyncWithPCE] Diagnostic abort before MID handoff for " +
-                        "job " + illumioJobId + "; withdrew " + abortedRows + " payload row(s).");
-                    return;
-                }
-                // =============== END TEMPORARY DIAGNOSTIC ABORT ====================
-
                 // Add the request to ECC queue
                 var illumioAddToECCQueue = new IllumioAddToECCQueue(
                     "IllumioUpdateWorkloads",
@@ -662,14 +669,14 @@ IllumioAutoSyncWithPCE.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-10-01 06:20:45</sys_created_on>
         <sys_id>f14ad3f6db34274033c1a026ca96192e</sys_id>
-        <sys_mod_count>369</sys_mod_count>
+        <sys_mod_count>371</sys_mod_count>
         <sys_name>IllumioAutoSyncWithPCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_f14ad3f6db34274033c1a026ca96192e</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-10-01 04:58:08</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-14 09:01:16</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>f14ad3f6db34274033c1a026ca96192e</id>

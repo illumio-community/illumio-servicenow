@@ -59,7 +59,25 @@ IllumioDiscoveryRepository.prototype = {
      */
     isPostSyncJob: function(jobId) {
         var jobGr = new GlideRecordSecure(this.JOB_TABLE);
-        jobGr.get(jobId);
+
+        // Unreadable record returns TRUE -- skip the sync -- and that is the opposite of what
+        // this used to do. The old code let the get() fail, `getValue` returned null, `|| ""`
+        // made it an empty string and the answer came back false: "not post-sync, hand off to
+        // sync". On a run that really was post-sync that is a loop -- sync triggers post-sync
+        // discovery, this misreads it, discovery hands back to sync -- which keeps going for as
+        // long as the record stays unreadable, burning PCE calls and holding the configuration
+        // under the R25 guard until the wall-clock cap.
+        //
+        // The two failures are not symmetric. Skipping a sync that should have run is visible
+        // and the user re-runs it; running a sync that should have been skipped is not. So an
+        // unanswerable question is answered in the direction that stops.
+        if (!jobGr.get(jobId)) {
+            this.logger.error("[isPostSyncJob] Scheduled job record (" + jobId + ") could not " +
+                "be read, so post-sync cannot be determined. Skipping the sync handoff rather " +
+                "than risking a sync/discovery loop.");
+            return true;
+        }
+
         return (jobGr.getValue("logs") || "").indexOf("[POST_SYNC]") !== -1;
     },
 
@@ -832,6 +850,22 @@ IllumioDiscoveryRepository.prototype = {
 
     /**
      * Evaluate an advanced (script-based) class field mapping
+     *
+     * SCRIPT SOURCE, AND WHY THIS IS NOT SCRIPT INJECTION. The script is never assembled here.
+     * `evaluateScript(fieldMappingGr, 'script', null)` is the record-and-column form: it runs the
+     * `script` column of a stored Class Field Mapping row. There is no concatenation, no caller
+     * string reaches the evaluator, and the third argument is null so no variable map is passed
+     * in either -- the only inputs are the two putVariable calls below.
+     *
+     * The row is read with GlideRecordSecure, so the read is ACL-evaluated, and the column itself
+     * carries two field ACLs on the global `admin` role -- one `write`, one `execute`. Authoring
+     * or running one of these scripts is a platform-administrator action, not something an
+     * application user can reach.
+     *
+     * This is the only GlideScopedEvaluator in the application, and the application contains no
+     * eval(), no GlideEvaluator and no new Function(). Raised by the 2.6.0 certification review
+     * (point 5) and answered there; left documented so the next scan does not have to re-derive it.
+     *
      * @param {GlideRecord} sourceGr GlideRecord of the CMDB table
      * @param {Object} fieldMapping Object of Class Field Mapping
      * @returns {Object} value from script
@@ -882,13 +916,13 @@ IllumioDiscoveryRepository.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>0c6df61ac353479050bffa0ed40131d3</sys_id>
-        <sys_mod_count>20</sys_mod_count>
+        <sys_mod_count>21</sys_mod_count>
         <sys_name>IllumioDiscoveryRepository</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0c6df61ac353479050bffa0ed40131d3</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-06 18:36:26</sys_updated_on>
+        <sys_updated_on>2026-10-14 09:01:16</sys_updated_on>
     </sys_script_include>
 </record_update>

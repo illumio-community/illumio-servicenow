@@ -1014,7 +1014,10 @@ IllumioPreviewUtils.prototype = {
 
         // The column is not named the same on every table. Everything migrated by the
         // "Migrate configurations" fix script came out as `illumio_pce_configuration`; the Sync
-        // Filter kept the older `pce_configuration` (see IllumioUtils:1775, IllumioTestUtils:216).
+        // Filter kept the older `pce_configuration`. Confirmed against the dictionary:
+        // dictionary/x_illu2_illumio_illumio_sync_filter.xml carries `pce_configuration`,
+        // dictionary/x_illu2_illumio_illumio_config_class_mapping.xml carries
+        // `illumio_pce_configuration`.
         // getValue on a column that does not exist returns null rather than throwing, so reading
         // the wrong one here does not fail -- it yields an empty configuration, and the preview
         // dies four steps later as "Failed to dispatch", after the CSV has already been rendered.
@@ -1202,13 +1205,13 @@ IllumioPreviewUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-22 17:49:40</sys_created_on>
         <sys_id>8f47d7e8c3638bd050bffa0ed4013186</sys_id>
-        <sys_mod_count>14</sys_mod_count>
+        <sys_mod_count>15</sys_mod_count>
         <sys_name>IllumioPreviewUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_8f47d7e8c3638bd050bffa0ed4013186</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-08 14:31:02</sys_updated_on>
+        <sys_updated_on>2026-10-14 05:56:00</sys_updated_on>
     </sys_script_include>
 </record_update>
