@@ -105,7 +105,7 @@
         <produces_customized>false</produces_customized>
         <relative_path>/push</relative_path>
         <request_example/>
-        <requires_acl_authorization>false</requires_acl_authorization>
+        <requires_acl_authorization>true</requires_acl_authorization>
         <requires_authentication>true</requires_authentication>
         <requires_snc_internal_role>true</requires_snc_internal_role>
         <short_description/>
@@ -114,14 +114,14 @@
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-29 12:20:19</sys_created_on>
         <sys_id>4efe8a72c3e74f1450bffa0ed40131da</sys_id>
-        <sys_mod_count>1</sys_mod_count>
+        <sys_mod_count>2</sys_mod_count>
         <sys_name>Push</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_ws_operation_4efe8a72c3e74f1450bffa0ed40131da</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 12:32:51</sys_updated_on>
+        <sys_updated_by>koushik.choudhury</sys_updated_by>
+        <sys_updated_on>2026-10-14 11:37:20</sys_updated_on>
         <web_service_definition display_value="IllumioMIDLog">eb36c6f2c3a74f1450bffa0ed40131f2</web_service_definition>
         <web_service_version/>
     </sys_ws_operation>
