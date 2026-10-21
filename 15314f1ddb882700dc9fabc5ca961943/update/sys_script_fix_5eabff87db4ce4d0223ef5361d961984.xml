@@ -21,13 +21,33 @@ var grPCEConfig = new GlideRecord('x_illu2_illumio_illumio_pce_conf');
 grPCEConfig.setLimit(1);
 grPCEConfig.query();
 
+// Certification round 2, point 2. The same defect the certifier reported against "Migrate
+// configurations" is here too, latent rather than visible. That script READS
+// x_illu2_illumio_illumio_pce_field_mapping; this one WRITES it. The table was deleted from the
+// application on 2025-08-21 (illumio-servicenow 67538ee, "chore: remove deprecated tables (#21)").
+//
+// It did not show up on the certifier's instance because servicenow_source_table and host_name
+// still exist on pce_conf but are active="false" and empty on a fresh install, so the guard below
+// takes the skip branch before reaching the dead table. On a real upgrading customer those legacy
+// fields are populated and this fails -- and with no try/catch here, it fails uncaught, which is
+// louder than what they actually reported.
+//
+// Guard, not removal, for the reason recorded in "Migrate configurations": the delete record
+// belongs to 2.5.x's package rather than 2.6.0's, so an instance upgrading from 2.0-2.4 keeps the
+// legacy table and still has a real migration to run.
+var TABLE_LEGACY_PCE_FIELD_MAPPING = 'x_illu2_illumio_illumio_pce_field_mapping';
+
 // check if record exists
 if (grPCEConfig.next()) {
 
-    if (!gs.nil(grPCEConfig.servicenow_source_table) && !gs.nil(grPCEConfig.host_name)) {
+    if (!new GlideRecord(TABLE_LEGACY_PCE_FIELD_MAPPING).isValid()) {
+
+        illumioLogger.info('Skipping field mapping record creation: the Illumio PCE Field Mappings table is not present on this instance.');
+
+    } else if (!gs.nil(grPCEConfig.servicenow_source_table) && !gs.nil(grPCEConfig.host_name)) {
 
         // creating record in PCE field mapping
-        var grPCEFieldMapping = new GlideRecord('x_illu2_illumio_illumio_pce_field_mapping');
+        var grPCEFieldMapping = new GlideRecord(TABLE_LEGACY_PCE_FIELD_MAPPING);
         grPCEFieldMapping.servicenow_source_table = grPCEConfig.servicenow_source_table;
         grPCEFieldMapping.host_name = grPCEConfig.host_name;
         grPCEFieldMapping.pce_configuration = grPCEConfig.sys_id;
@@ -63,14 +83,14 @@ if (grPCEConfig.next()) {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2020-10-29 05:24:47</sys_created_on>
         <sys_id>5eabff87db4ce4d0223ef5361d961984</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>10</sys_mod_count>
         <sys_name>Add exisiting mapping to other table</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_fix_5eabff87db4ce4d0223ef5361d961984</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-21 08:59:34</sys_updated_on>
         <unloadable>false</unloadable>
     </sys_script_fix>
     <sys_es_latest_script action="INSERT_OR_UPDATE">

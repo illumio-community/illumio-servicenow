@@ -49,9 +49,20 @@ var PROP_INVALIDATE_AUTHENTICATION_JOB_LIMIT =
     "x_illu2_illumio.invalidate_authentication_job_limit";
 // Defaults for the properties read at more than one call site, or whose default was previously
 // written out beside the name every time.
+//
+// THESE ARE FALLBACKS, NOT THE SHIPPED VALUES. Each applies only when the matching
+// `sys_properties` record is absent or empty -- `gs.getProperty(NAME) || DEFAULT` at every call
+// site. A customer who deletes a property does not get "unlimited", they get the number below,
+// which is why these were raised on 2026-10-14 to sit in the same range as the values the
+// application is actually run at rather than two orders of magnitude under them.
 var DEFAULT_FLOW_ACTION_TIMEOUT = 30000;
-var DEFAULT_MAXIMUM_CI_RECORDS = 25000;
-var DEFAULT_INVALIDATE_RUNNING_JOB_LIMIT = 1800;
+var DEFAULT_MAXIMUM_CI_RECORDS = 2000000;
+// 72000s = 20 hours, and it is paired with DEFAULT_MAXIMUM_CI_RECORDS above rather than chosen on
+// its own. At R40's measured 28-160 rows/sec, 2,000,000 CIs take 3.5 hours at the fastest rate
+// ever recorded on an instance here and ~20 hours at the slowest. The previous 7200s (2 hours)
+// could not finish a default-sized run at ANY measured rate -- it would end `cancelled` with
+// "Time Limit Exceeded" and nothing else. Change one of these two and re-check the other.
+var DEFAULT_INVALIDATE_RUNNING_JOB_LIMIT = 72000;
 var DEFAULT_INVALIDATE_AUTHENTICATION_JOB_LIMIT = 300;
 
 var MID_SERVER_UP_STATUS = "Up";
@@ -271,14 +282,14 @@ var JOB_TYPE_CONNECTIVITY_CHECK = "connectivity_check";
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2022-02-11 10:58:35</sys_created_on>
         <sys_id>47d325a21b6d0d10ad73ec23604bcb93</sys_id>
-        <sys_mod_count>13</sys_mod_count>
+        <sys_mod_count>14</sys_mod_count>
         <sys_name>IllumioConstants</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_47d325a21b6d0d10ad73ec23604bcb93</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-14 06:15:07</sys_updated_on>
+        <sys_updated_on>2026-10-21 08:59:35</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>47d325a21b6d0d10ad73ec23604bcb93</id>

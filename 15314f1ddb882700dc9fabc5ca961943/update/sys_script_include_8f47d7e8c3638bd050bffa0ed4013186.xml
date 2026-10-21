@@ -323,12 +323,17 @@ IllumioPreviewUtils.prototype = {
      * to do with it. It shares what is genuinely common instead: the context, the
      * one-attachment-per-record sweep, the file naming, and the two job-closing helpers.
      *
-     * It also keeps GlideSysAttachment.write rather than going through the payload table and the
-     * MID Server. That machinery exists because a 200k-workload export is a ~120 MB string; this
-     * one is capped by `x_illu2_illumio.maximum_ci_records` (25,000 by default) at five short
-     * columns, so a few MB. Paying for the byte-windowing, the gzip and the round trip to buy
-     * nothing would be the wrong trade -- what this preview actually needed was to stop running
-     * inside the user's click, which is what the Script Action route gives it.
+     * It used to keep GlideSysAttachment.write rather than going through the payload table and the
+     * MID Server, on the argument that `x_illu2_illumio.maximum_ci_records` capped it at five
+     * short columns and so a few MB. **That is no longer true in either half.** D15/R51 moved this
+     * method onto the payload-table/gzip/MID pipeline like every other preview -- see the D15
+     * markers at :385, :458 and :588 -- and the cap it leaned on is now large: the property ships
+     * well above the old 25,000 and `DEFAULT_MAXIMUM_CI_RECORDS` was raised to 2,000,000 on
+     * 2026-10-14.
+     *
+     * The two changes point the same way. Peak is bounded by the payload chunk size rather than by
+     * the record cap, which is what makes a large cap survivable here at all; had this method still
+     * been joining one string, raising the default would have made it a memory defect.
      *
      * P0-2 point 9, the fifth and last of the UI Actions.
      *
@@ -1205,13 +1210,13 @@ IllumioPreviewUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-22 17:49:40</sys_created_on>
         <sys_id>8f47d7e8c3638bd050bffa0ed4013186</sys_id>
-        <sys_mod_count>15</sys_mod_count>
+        <sys_mod_count>16</sys_mod_count>
         <sys_name>IllumioPreviewUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_8f47d7e8c3638bd050bffa0ed4013186</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-14 05:56:00</sys_updated_on>
+        <sys_updated_on>2026-10-21 08:59:35</sys_updated_on>
     </sys_script_include>
 </record_update>

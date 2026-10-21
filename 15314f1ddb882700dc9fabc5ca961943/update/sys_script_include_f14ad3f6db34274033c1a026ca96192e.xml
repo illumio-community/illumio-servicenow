@@ -65,10 +65,19 @@ IllumioAutoSyncWithPCE.prototype = {
         // second, larger number only meant finished workload objects piled up in heap before
         // anything was written.
         //
-        // No code has read that property since. The sys_properties RECORD is not in source
-        // control, so it still exists on any instance where it was set and has to be deleted
-        // there by hand -- leaving it means an admin can find and set a property that does
-        // nothing, which is worse than it not existing.
+        // No code has read that property since.
+        //
+        // The paragraph that stood here said the sys_properties record was not in source control
+        // and had to be deleted by hand on any instance where it was set. Both halves are now
+        // false and the instruction is the opposite of what we want. Certification round 1,
+        // point 13: a record present in a certified version must not vanish from a later one,
+        // because the upgrade removes it from the customer's instance. So the record was
+        // deliberately RESTORED under its original sys_id (9a2711f5db18a0d01206fd641d961919),
+        // ships in the app, and must not be deleted.
+        //
+        // The risk it named -- an admin finding a property that does nothing -- is handled in the
+        // description instead, which carries a deprecation note saying the application no longer
+        // reads it and setting it has no effect. Its value ships blank for the same reason.
     },
 
     /**
@@ -669,14 +678,14 @@ IllumioAutoSyncWithPCE.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-10-01 06:20:45</sys_created_on>
         <sys_id>f14ad3f6db34274033c1a026ca96192e</sys_id>
-        <sys_mod_count>371</sys_mod_count>
+        <sys_mod_count>372</sys_mod_count>
         <sys_name>IllumioAutoSyncWithPCE</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_f14ad3f6db34274033c1a026ca96192e</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-14 09:01:16</sys_updated_on>
+        <sys_updated_on>2026-10-21 08:59:35</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>f14ad3f6db34274033c1a026ca96192e</id>

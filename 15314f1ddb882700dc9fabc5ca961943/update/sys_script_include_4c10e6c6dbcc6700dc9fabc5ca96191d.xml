@@ -187,7 +187,33 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         this.repo.log(this.illumioJobId, "Filtering from " + table);
 
         var filterStartTime = Date.now();
-        ctx.totalRecords = this.repo.countFilteredCMDBRecords(table, filterMode, filterCondition, maxRecords);
+
+        // The cap is applied HERE rather than inside countFilteredCMDBRecords, so that the number
+        // of records actually matched survives long enough to be compared against it. Behaviour is
+        // unchanged -- ctx.totalRecords is the same capped figure it has always been -- but a run
+        // that hits the ceiling now says so instead of reporting a round number and going quiet.
+        var cap = parseInt(maxRecords, 10);
+        var matchedRecords = this.repo.countFilteredCMDBRecords(table, filterMode, filterCondition);
+        ctx.totalRecords = Math.min(matchedRecords, cap);
+
+        if (matchedRecords > cap) {
+            // On the job record, not only in syslog: this changes what the run MEANS. Every count
+            // below it describes the capped subset, so a reader comparing "processed" against
+            // their own CMDB would otherwise conclude records went missing.
+            //
+            // "in scope", NOT "match the filter". countFilteredCMDBRecords applies DB-level
+            // filters only, so the figure is the matching records only for `inclusion` with a
+            // condition set. For exclusion_legacy it is the whole table before the in-memory
+            // GlideFilter runs, and with NO condition it is the whole table because
+            // applyDiscoveryFilter returns without adding a query -- which is also the case where
+            // this line fires soonest, since nothing else bounds the scan.
+            this.repo.log(this.illumioJobId,
+                "CAPPED: " + matchedRecords + " record(s) in " + table + " are in scope for this " +
+                "run, but x_illu2_illumio.maximum_ci_records limits it to " + cap + ". " +
+                (matchedRecords - cap) + " record(s) will not be reached. Raise the property, or " +
+                "narrow the Class Mapping's filter condition, to include them.");
+        }
+
         var totalBatches = Math.ceil(ctx.totalRecords / this.discoveryUtils.DISCOVERY_WINDOW_SIZE);
 
         this.repo.log(this.illumioJobId, this.discoveryUtils.formatFilteredLog(ctx.totalRecords, filterStartTime, table));
@@ -1242,14 +1268,14 @@ IllumioDiscoverAndMapCMDBServers.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2018-08-22 11:26:01</sys_created_on>
         <sys_id>4c10e6c6dbcc6700dc9fabc5ca96191d</sys_id>
-        <sys_mod_count>450</sys_mod_count>
+        <sys_mod_count>451</sys_mod_count>
         <sys_name>IllumioDiscoverAndMapCMDBServers</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_4c10e6c6dbcc6700dc9fabc5ca96191d</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-08 14:31:02</sys_updated_on>
+        <sys_updated_on>2026-10-21 08:59:35</sys_updated_on>
     </sys_script_include>
     <sys_es_latest_script action="INSERT_OR_UPDATE">
         <id>4c10e6c6dbcc6700dc9fabc5ca96191d</id>

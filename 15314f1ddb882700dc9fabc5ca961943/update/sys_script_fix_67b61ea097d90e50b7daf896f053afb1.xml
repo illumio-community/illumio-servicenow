@@ -185,7 +185,31 @@ function createConfigClass(configSysId) {
         "order_by_column_name": "order_by_column_name",
     };
 
+    // Certification round 2, point 2. x_illu2_illumio_illumio_pce_field_mapping was deleted from
+    // the application on 2025-08-21 -- illumio-servicenow 67538ee, "chore: remove deprecated
+    // tables (#21)", which wrote a sys_db_object action="DELETE" record -- but this script, which
+    // reads that table, was left in place. GlideRecord's constructor tolerates an unknown table;
+    // addQuery is what throws, so the failure surfaced as an App Error in syslog_app_scope on
+    // every install or upgrade whose instance already held a PCE Configuration record.
+    //
+    // A guard, NOT a removal. The delete record belongs to 2.5.x's package, not 2.6.0's, so an
+    // instance upgrading from 2.0-2.4 straight to 2.6.0 never receives it and still carries the
+    // legacy table with data in it. That instance has a real migration to run and must keep it.
+    //
+    // Two things this does NOT fix, both recorded rather than changed here:
+    //   1. A genuine 1.4.x instance never had this table at all -- it is a 2.0.0 table and 2.6.0
+    //      no longer creates it -- so the pce_conf -> pce_field_mapping -> config_class_mapping
+    //      pipeline has no middle stage any more. This silences the error; it does not restore
+    //      the migration for that customer.
+    //   2. The insert below is not idempotent. Where the orphan table does survive, a re-run
+    //      duplicates every Config Class Mapping.
     var fieldMapGr = new GlideRecord("x_illu2_illumio_illumio_pce_field_mapping");
+    if (!fieldMapGr.isValid()) {
+        illumioLogger.info("[FIX SCRIPT] Skipping migration of Illumio PCE Field Mappings: the " +
+            "table is not present on this instance, so there is nothing to migrate.");
+        return;
+    }
+
     fieldMapGr.addQuery("pce_configuration", configSysId);
     fieldMapGr.query();
     while (fieldMapGr.next()) {
@@ -303,14 +327,14 @@ startMigration();
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2024-03-29 08:02:10</sys_created_on>
         <sys_id>67b61ea097d90e50b7daf896f053afb1</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>10</sys_mod_count>
         <sys_name>Migrate configurations</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy>read</sys_policy>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_fix_67b61ea097d90e50b7daf896f053afb1</sys_update_name>
-        <sys_updated_by>admin</sys_updated_by>
-        <sys_updated_on>2026-09-29 10:11:40</sys_updated_on>
+        <sys_updated_by>developer</sys_updated_by>
+        <sys_updated_on>2026-10-21 08:59:35</sys_updated_on>
         <unloadable>false</unloadable>
     </sys_script_fix>
     <sys_es_latest_script action="INSERT_OR_UPDATE">

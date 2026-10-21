@@ -393,13 +393,29 @@ IllumioDiscoveryRepository.prototype = {
      * records dropped by the in-memory GlideFilter are still counted here. The number of
      * windows is exact either way, since pagination happens at DB level.
      * Moved verbatim from IllumioUtils:1644.
+     * RETURNS UNCAPPED. It used to take `maxRecords` and return `Math.min(total, maxRecords)`,
+     * which threw the real number away -- and with `iterateFilteredCMDBRecords` doing
+     * `setLimit(maxRecords)` on the same cap, a run that processed everything and a run that
+     * stopped at the ceiling were **indistinguishable**: both reported exactly `maxRecords` and
+     * neither said anything was left behind. Capping is the caller's business, because the caller
+     * is the one that can say so on the job record.
+     *
+     * NOT a count of "records matching the filter", and the difference is not pedantry -- it is
+     * what the caller's CAPPED line has to be worded around. Three cases:
+     *   - `inclusion` WITH a condition -- the count is the matching records.
+     *   - `exclusion_legacy` -- the count is the whole table; the GlideFilter runs in memory
+     *     afterwards, so this is an upper bound (see above).
+     *   - **NO condition, either mode** -- `applyDiscoveryFilter` returns before adding anything,
+     *     so the count is the whole table. The cap is then the ONLY bound on the scan, which
+     *     makes an unconfigured Class Mapping the case where it binds soonest, not the case where
+     *     it stops mattering.
+     *
      * @param {String} sourceTable CMDB table name
      * @param {String} filterMode 'inclusion' or 'exclusion_legacy'
      * @param {String} condition Encoded query condition string
-     * @param {Number} maxRecords Maximum records discovery will process
-     * @returns {Number} Record count, capped at maxRecords
+     * @returns {Number} Record count, NOT capped
      */
-    countFilteredCMDBRecords: function(sourceTable, filterMode, condition, maxRecords) {
+    countFilteredCMDBRecords: function(sourceTable, filterMode, condition) {
         var countGa = new GlideAggregate(sourceTable);
         this.applyDiscoveryFilter(countGa, filterMode, condition);
         countGa.addAggregate('COUNT');
@@ -410,7 +426,7 @@ IllumioDiscoveryRepository.prototype = {
             total = parseInt(countGa.getAggregate('COUNT'), 10) || 0;
         }
 
-        return Math.min(total, parseInt(maxRecords, 10));
+        return total;
     },
 
     /**
@@ -916,13 +932,13 @@ IllumioDiscoveryRepository.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>0c6df61ac353479050bffa0ed40131d3</sys_id>
-        <sys_mod_count>21</sys_mod_count>
+        <sys_mod_count>22</sys_mod_count>
         <sys_name>IllumioDiscoveryRepository</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0c6df61ac353479050bffa0ed40131d3</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-14 09:01:16</sys_updated_on>
+        <sys_updated_on>2026-10-21 08:59:35</sys_updated_on>
     </sys_script_include>
 </record_update>
