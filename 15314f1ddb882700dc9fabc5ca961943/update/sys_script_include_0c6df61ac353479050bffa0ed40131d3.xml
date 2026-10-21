@@ -890,6 +890,31 @@ IllumioDiscoveryRepository.prototype = {
         try {
             var fieldMappingGr = new GlideRecordSecure(this.CLASS_FIELD_MAPPING_TABLE);
             if (fieldMappingGr.get(fieldMapping["mappingSysId"])) {
+                // SCOPE GUARD. Asked for by the certifier, round 2, against round-1 point 5:
+                // where the record whose column is evaluated is metadata, GlideScopedEvaluator
+                // runs the script under THAT record's application, so a record owned by another
+                // scope must be refused rather than evaluated.
+                //
+                // Unreachable as written, deliberately. CLASS_FIELD_MAPPING_TABLE is a base table
+                // -- sys_db_object d9b212fc97bc0210b7daf896f053aff4 carries an empty super_class,
+                // so it is not sys_metadata nor a descendant, and its dictionary has no sys_scope
+                // column. isValidField is therefore always false here and short-circuits before
+                // the dot-walk, which matters: reading sys_scope is a cross-scope read of a system
+                // table and could need a sys_scope_privilege row of its own. Do not reorder these
+                // terms, and do not "simplify" the guard to the comparison alone.
+                //
+                // It is kept anyway so the property is enforced rather than argued: if this table
+                // is ever re-parented onto sys_metadata, a row owned by another application stops
+                // being evaluated on the day that happens rather than the day someone notices.
+                if (fieldMappingGr.isValidField('sys_scope') &&
+                    !gs.nil(fieldMappingGr.sys_scope) &&
+                    fieldMappingGr.sys_scope.scope + '' !== gs.getCurrentScopeName() + '') {
+                    this.logger.error('[evaluateFieldScript] Refused field mapping ' +
+                        fieldMapping["mappingSysId"] + ': the record is owned by another ' +
+                        'application scope.');
+                    return "";
+                }
+
                 var evaluator = new GlideScopedEvaluator();
                 evaluator.putVariable('sourceGr', sourceGr);
                 evaluator.putVariable('answer', null);
@@ -932,13 +957,13 @@ IllumioDiscoveryRepository.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-15 16:10:05</sys_created_on>
         <sys_id>0c6df61ac353479050bffa0ed40131d3</sys_id>
-        <sys_mod_count>22</sys_mod_count>
+        <sys_mod_count>23</sys_mod_count>
         <sys_name>IllumioDiscoveryRepository</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_0c6df61ac353479050bffa0ed40131d3</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-21 08:59:35</sys_updated_on>
+        <sys_updated_on>2026-10-21 16:46:55</sys_updated_on>
     </sys_script_include>
 </record_update>

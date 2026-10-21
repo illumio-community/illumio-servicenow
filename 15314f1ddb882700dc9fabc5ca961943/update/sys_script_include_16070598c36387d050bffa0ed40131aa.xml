@@ -809,7 +809,18 @@ IllumioSyncRepoUtils.prototype = {
             new GlideRecord(this.syncUtils.WORKLOAD_TABLE);
         gr.addQuery("sys_id", "IN", sysIds.join(","));
         if (!gs.nil(encodedQuery)) {
-            gr.addEncodedQuery(encodedQuery);
+            // Second argument asked for by the certifier, round 2, against round-1 point 6: if the
+            // record is read through ACLs then the chunk query should be evaluated through them
+            // too, rather than the constructor being secure and the query not. Normalised with !!
+            // because three of the four call sites omit `secure` and would otherwise pass
+            // undefined into a Java boolean.
+            //
+            // Behaviour is unchanged on every path that exists today. encodedQuery is an app
+            // literal at every call site -- SYNC_CHUNK_QUERY, 'duplicate=false' or null, never
+            // anything a customer authored -- the sync path builds a plain GlideRecord, and the
+            // one caller that passes secure=true (the deletion path, IllumioUtils:2438) runs in a
+            // Script Action as system, where ACLs evaluate the same rows either way.
+            gr.addEncodedQuery(encodedQuery, !!secure);
         }
         gr.query();
 
@@ -1277,13 +1288,13 @@ IllumioSyncRepoUtils.prototype = {
         <sys_created_by>admin</sys_created_by>
         <sys_created_on>2026-09-21 12:40:54</sys_created_on>
         <sys_id>16070598c36387d050bffa0ed40131aa</sys_id>
-        <sys_mod_count>15</sys_mod_count>
+        <sys_mod_count>16</sys_mod_count>
         <sys_name>IllumioSyncRepoUtils</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>sys_script_include_16070598c36387d050bffa0ed40131aa</sys_update_name>
         <sys_updated_by>developer</sys_updated_by>
-        <sys_updated_on>2026-10-08 14:51:27</sys_updated_on>
+        <sys_updated_on>2026-10-21 16:39:31</sys_updated_on>
     </sys_script_include>
 </record_update>
