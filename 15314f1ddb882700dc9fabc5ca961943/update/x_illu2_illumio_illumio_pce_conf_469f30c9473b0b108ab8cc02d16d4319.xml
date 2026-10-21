@@ -3,7 +3,7 @@
         <active>true</active>
         <advanced>false</advanced>
         <application/>
-        <auto_synchronization>false</auto_synchronization>
+        <auto_synchronization>true</auto_synchronization>
         <business_calendar/>
         <cancel_job_on_limit_exceed>false</cancel_job_on_limit_exceed>
         <condition/>
@@ -33,7 +33,7 @@
         <number_of_workloads_to_be_created_from_servicenow/>
         <offset/>
         <offset_type>0</offset_type>
-        <organization_id>68</organization_id>
+        <organization_id>2</organization_id>
         <pce_url>https://2x2testvc504.ilabs.io:8443</pce_url>
         <repeat_every/>
         <role/>
@@ -50,7 +50,7 @@
         <run_type>on_demand</run_type>
         <run_weekinmonth/>
         <script><![CDATA[var startDiscovery = new x_illu2_illumio.IllumioStartDiscovery(); startDiscovery.process(current.getUniqueValue());]]></script>
-        <secret_key>﷞﷟﷒c03b5d63470aa6108ab8cc02d16d439a﷬﷔1﷬﷭jbv36TtH2nxfjhFPc5J1eA==I1a8SOHsrjviIogaVPrEhkVwBfwN26VHyrhm3Gn38sMb5cJKtMkQ_y3254nc_MV2O1oltKUSukdt_7cOlVibwSKLKL5MwfrE7-QcR2QmRMA=﷮﷯</secret_key>
+        <secret_key>﷞﷟﷒c03b5d63470aa6108ab8cc02d16d439a﷬﷔1﷬﷭UJeBvfNcA25zxQq7E3dWNg==C0FRZmZmMigxyZLxlG5O1x_MfHvBvHzVum2d5zk1ROeUBaQ4CJIMgrsMyPdqV9nDlUV_aEvwWXe40OnFevaWYHT0K0P8h8eTIRc8Nu0LeL8=﷮﷯</secret_key>
         <servicenow_source_table/>
         <set_limit_on_new_label_creation>false</set_limit_on_new_label_creation>
         <set_limit_on_workload_deletion>false</set_limit_on_workload_deletion>
@@ -59,17 +59,17 @@
         <sys_created_by>koushik.choudhury</sys_created_by>
         <sys_created_on>2026-10-06 06:32:32</sys_created_on>
         <sys_id>469f30c9473b0b108ab8cc02d16d4319</sys_id>
-        <sys_mod_count>9</sys_mod_count>
+        <sys_mod_count>13</sys_mod_count>
         <sys_name>2x2testvc504.ilabs.io</sys_name>
         <sys_package display_value="Illumio" source="x_illu2_illumio">15314f1ddb882700dc9fabc5ca961943</sys_package>
         <sys_policy/>
         <sys_scope display_value="Illumio">15314f1ddb882700dc9fabc5ca961943</sys_scope>
         <sys_update_name>x_illu2_illumio_illumio_pce_conf_469f30c9473b0b108ab8cc02d16d4319</sys_update_name>
         <sys_updated_by>koushik.choudhury</sys_updated_by>
-        <sys_updated_on>2026-10-08 16:49:45</sys_updated_on>
+        <sys_updated_on>2026-10-16 12:51:36</sys_updated_on>
         <time_zone/>
         <upgrade_safe>false</upgrade_safe>
-        <username>﷞﷟﷒c03b5d63470aa6108ab8cc02d16d439a﷬﷔1﷬﷭02MEdaU7X1oxI3ibYaHEOw==v-vp9vAgCBeXHxZcvLNkpHMwXC9mW3P354kTpUevrwer59mGEg==﷮﷯</username>
+        <username>﷞﷟﷒c03b5d63470aa6108ab8cc02d16d439a﷬﷔1﷬﷭iQHMRk8VwL67lYu6M10d-Q==LBCcjzHywCbOkr4X2kVIP85oTpTuddsH_IMzD2z2l8k1DKPRgg==﷮﷯</username>
         <workload_deletion_limit/>
         <workload_label_modifications_limit/>
     </x_illu2_illumio_illumio_pce_conf>
