@@ -92,28 +92,17 @@ IllumioAuthenticateToPCE.prototype = {
 				
 		
 		
-        if (this.utils.getMidConfigParam("mid.proxy.use_proxy")) {
-            if (this.pceMIDProxy == "true") {
-                this.utils._updateJobRecord(this.illumio_job_id, {
-                    logs: ["Found a proxy configured between MID server and ServiceNow and MID server and the PCE",
-                        "Validated the connectivity between MID server and ServiceNow through proxy",
-                        "Validated the connectivity between MID server and the PCE through proxy"
-                    ]
-                });
-            } else {
-                this.utils._updateJobRecord(this.illumio_job_id, {
-                    logs: ["Found a proxy configured between MID server and ServiceNow",
-                        "Validated the connectivity between MID server and ServiceNow through proxy"
-                    ]
-                });
-            }
-        } else {
-            if (this.pceMIDProxy == "true") {
-                this.utils._updateJobRecord(this.illumio_job_id, {
-                    logs: ["Proxy is not configured between MID server and the PCE", ]
-                });
-            }
-        }
+        // Report what the HTTP client actually decided. Nothing has been validated at this point --
+        // the request below is the validation -- so these lines only state the configuration.
+        var midProxyConfigured = String(this.utils.getMidConfigParam("mid.proxy.use_proxy")).toLowerCase() == "true";
+        this.utils._updateJobRecord(this.illumio_job_id, {
+            logs: [
+                midProxyConfigured ?
+                "MID Server proxy (mid.proxy.* in config.xml) is configured and used for MID Server to ServiceNow traffic" :
+                "No MID Server proxy (mid.proxy.* in config.xml) is configured; MID Server connects to ServiceNow directly",
+                "PCE connection: " + this.pceHttpClient.proxyDecision
+            ]
+        });
         this.utils._updateJobRecord(this.illumio_job_id, {
             logs: ["Checking connectivity between MID Server and the PCE (" + this.pceUrl + ")"]
         });
@@ -136,9 +125,12 @@ IllumioAuthenticateToPCE.prototype = {
                 if (response.status == "401") {
                     this.utils.handleException("Authentication failed with PCE. Message: Invalid API Key/Secret/Organisation ID", this.illumio_job_id);
                 } else if(response.status == "403") {
-                    this.utils.handleException("Authentication failed with PCE. Message: Invalid Organisation ID", this.illumio_job_id);
+                    this.utils.handleException("Authentication failed with PCE. Message: Invalid Organisation ID" +
+                        (this.pceHttpClient.proxy ? ", or the proxy " + this.pceHttpClient.describeProxy() + " refused CONNECT to the PCE host/port" : ""), this.illumio_job_id);
                 }else if (response.status == "0") {
-                    this.utils.handleException("Authentication failed with PCE. Message: Cannot find PCE " + this.pceUrl, this.illumio_job_id);
+                    this.utils.handleException("Could not connect to PCE " + this.pceUrl + " (" + this.pceHttpClient.proxyDecision + "). Error: " + (response.error || "unknown"), this.illumio_job_id);
+                } else if (response.status == "407") {
+                    this.utils.handleException("Proxy authentication failed (HTTP 407) for proxy " + this.pceHttpClient.describeProxy() + ". Check the proxy username/password; only Basic, Digest and NTLMv1 are supported.", this.illumio_job_id);
                 } else {
                     this.utils.handleException("Connectivity check to PCE failed. Response status code: " + response.status, this.illumio_job_id);
                 }

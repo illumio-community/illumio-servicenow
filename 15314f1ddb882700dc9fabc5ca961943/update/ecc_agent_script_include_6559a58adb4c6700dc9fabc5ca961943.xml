@@ -14,9 +14,12 @@ IllumioHTTPClient.prototype = {
     initialize: function(baseUrl, username, password, protocol, pceMIDProxy, retryParams, jobSysId) {
         this.logger = new IllumioLogUtil(jobSysId, 'IllumioHTTPClient');
         this.baseUrl = baseUrl;
-        var proxyFlag = (pceMIDProxy == 'true' || pceMIDProxy == '1' || pceMIDProxy == true || pceMIDProxy == null);
+        // A null pceMIDProxy marks the client used for ServiceNow instance calls (job logs, cancel
+        // checks, log pushes). It follows the MID Server's own proxy settings only.
+        this.isInstanceClient = (pceMIDProxy == null);
+        var proxyFlag = this.isInstanceClient || this._isTrue(pceMIDProxy);
         // we'll skip the logs when creating object for 'snHttpClient'
-        var skipLogs = pceMIDProxy == null;
+        var skipLogs = this.isInstanceClient;
         this.client = this._setupClient(baseUrl, username, password, protocol, proxyFlag, skipLogs);
         retryParams = retryParams || {};
         // Validated, never defaulted. Substituting a default would be this file deciding on the
@@ -110,6 +113,7 @@ IllumioHTTPClient.prototype = {
      * @param {string} password Password for the REST API
      * @param {string} protocol Protocol to use for the REST API
      * @param {boolean} proxyFlag Flag to indicate if the proxy should be used
+     * @param {boolean} skipLogs Flag to skip duplicate logs on creation of HTTPClient
      * @returns {HttpClient} HTTP client
      **/
     _setupClient: function(baseUrl, username, password, protocol, proxyFlag, skipLogs) {
@@ -118,63 +122,244 @@ IllumioHTTPClient.prototype = {
         var credentials = new UsernamePasswordCredentials(username, password);
         client.getParams().setAuthenticationPreemptive(true);
         client.getState().setCredentials(authScope.ANY, credentials);
-        var proxy = this._getProxy(proxyFlag, skipLogs);
-        if (proxy != null) {
-            client.getHostConfiguration().setProxy(proxy.host, proxy.port);
-            client.getParams().setAuthenticationPreemptive(true);
-            if (proxy.username != null && proxy.password != null) {
-                // set the authentication only when username & password aren't null
-                client.getState().setProxyCredentials(new AuthScope(proxy.host, proxy.port), new UsernamePasswordCredentials(proxy.username, proxy.password));
+        this.proxy = this._getProxy(baseUrl, proxyFlag, skipLogs);
+        if (this.proxy != null) {
+            client.getHostConfiguration().setProxy(this.proxy.host, this.proxy.port);
+            if (this.proxy.username) {
+                // set the authentication only when a proxy username is configured
+                client.getState().setProxyCredentials(
+                    new AuthScope(this.proxy.host, this.proxy.port),
+                    new UsernamePasswordCredentials(this.proxy.username, this.proxy.password || ''));
             }
         }
         return client;
     },
 
     /**
-     * Get the proxy details
+     * Decide which proxy (if any) to use for the given target URL.
+     *
+     * Proxy sources, first match wins:
+     *   1. MID Server config.xml: mid.proxy.use_proxy / host / port / username / password
+     *   2. JVM system properties: https.proxyHost / https.proxyPort (http.* for http:// targets),
+     *      honouring http.nonProxyHosts
+     *   3. Environment variables: https_proxy / HTTPS_PROXY (http_proxy / HTTP_PROXY for http:// targets),
+     *      honouring no_proxy / NO_PROXY
+     *
+     * ServiceNow instance traffic only ever uses source 1, exactly like the MID Server itself.
+     * PCE traffic uses any source, but only when "Enable Proxy between PCE and MID server" is checked.
+     *
+     * Sets this.proxyDecision to a human readable explanation of the outcome.
+     * @param {string} targetUrl URL the client will talk to
      * @param {boolean} proxyFlag Flag to indicate if the proxy should be used
      * @param {boolean} skipLogs Flag to skip duplicate logs on creation of HTTPClient
-     * @returns {object} Proxy details
+     * @returns {object} Proxy details {host, port, username, password, source} or null for a direct connection
      **/
-    _getProxy: function(proxyFlag, skipLogs) {
-        var proxy = null;
-        if (ms.getConfigParameter('mid.proxy.use_proxy') != 'true' && proxyFlag) {
-            if (!skipLogs) {
-                this.logger._warning('Proxy is not configured on MID Server and enabled for connecting to PCE. Please either configure Proxy in MID Server or uncheck the "Enable Proxy between PCE and MID server" checkbox in configuration.');
+    _getProxy: function(targetUrl, proxyFlag, skipLogs) {
+        var target = this._parseTargetUrl(targetUrl);
+        var midProxy = this._getMidConfigProxy();
+
+        if (this.isInstanceClient) {
+            this.proxyDecision = midProxy ? 'using MID Server proxy ' + this._describe(midProxy) : 'direct connection (no MID Server proxy configured)';
+            return midProxy;
+        }
+
+        var detected = midProxy || this._getJvmProxy(target) || this._getEnvProxy(target);
+
+        if (!proxyFlag) {
+            if (detected && !detected.bypassedBy) {
+                this.proxyDecision = 'direct connection: a proxy is configured on the MID Server (' + this._describe(detected) +
+                    ') but "Enable Proxy between PCE and MID server" is unchecked';
+                // A mid.proxy.* proxy with the box unchecked is a deliberate, supported setup (proxy to the
+                // instance, PCE direct), so it stays quiet. A JVM/environment proxy was most likely meant
+                // for the PCE -- nothing else in this app reads it -- so say why it is not being used.
+                this._log(skipLogs, detected === midProxy ? '_debug' : '_warning', 'PCE connection: ' + this.proxyDecision +
+                    '. Check the box in the PCE configuration if the PCE is only reachable through this proxy.');
+            } else {
+                this.proxyDecision = 'direct connection (proxy disabled for the PCE)';
+                this._log(skipLogs, '_debug', 'PCE connection: ' + this.proxyDecision);
             }
-            return proxy; // null
-        } else if (ms.getConfigParameter('mid.proxy.use_proxy') != 'true' && !proxyFlag) {
-            if (!skipLogs) {
-                this.logger._debug('Proxy is not configured on MID Server and disabled for connecting to PCE. Continuing without proxy to connect with PCE and ServiceNow instance.');
-            }
-            return proxy; // null
-        } else if (ms.getConfigParameter('mid.proxy.use_proxy') == 'true' && proxyFlag) {
-            if (!skipLogs) {
-                this.logger._debug('Proxy is configured on MID Server and enabled for connecting to PCE. Proceeding to use proxy to connect with PCE and ServiceNow instance.');
-            }
-            var proxyHost = ms.getConfigParameter('mid.proxy.host');
-            var proxyPort = ms.getConfigParameter('mid.proxy.port');
-            var proxyUsername = ms.getConfigParameter('mid.proxy.username');
-            var proxyPassword = ms.getConfigParameter('mid.proxy.password');
-            proxy = {
-                host: proxyHost,
-                port: proxyPort,
-                username: proxyUsername,
-                password: proxyPassword
-            };
-            return proxy; // non-null
-        } else if (ms.getConfigParameter('mid.proxy.use_proxy') == 'true' && !proxyFlag) {
-            if (!skipLogs) {
-                this.logger._debug('Proxy is configured on MID Server and disabled for connecting to PCE. Proceeding to use proxy for ServiceNow instance but not for PCE.');
-            }
-            return proxy; // null
-        } else {
-            if (!skipLogs) {
-                this.logger._error('Found an invalid scenario with MID Server proxy value (' + ms.getConfigParameter('mid.proxy.use_proxy') + ') and the checkbox. Please recheck the setup or reach out to Illumio Support.');
-            }
-            // just in case if we ever fall into gaps due to misconfiguration
             return null;
         }
+
+        if (!detected) {
+            this.proxyDecision = 'direct connection: "Enable Proxy between PCE and MID server" is checked but no proxy was found. ' +
+                'Configure mid.proxy.* in the MID Server config.xml, -Dhttps.proxyHost/-Dhttps.proxyPort in wrapper-override.conf, ' +
+                'or https_proxy in the MID Server service environment';
+            this._log(skipLogs, '_warning', 'PCE connection: ' + this.proxyDecision);
+            return null;
+        }
+
+        if (detected.bypassedBy) {
+            this.proxyDecision = 'direct connection: PCE host ' + target.host + ' matches proxy exclusion "' + detected.bypassedBy + '" (' + detected.source + ')';
+            this._log(skipLogs, '_info', 'PCE connection: ' + this.proxyDecision);
+            return null;
+        }
+
+        this.proxyDecision = 'using proxy ' + this._describe(detected);
+        this._log(skipLogs, '_info', 'PCE connection: ' + this.proxyDecision);
+        return detected;
+    },
+
+    /**
+     * @returns {string} Human readable description of the proxy in use (never includes the password)
+     **/
+    describeProxy: function() {
+        return this.proxy ? this._describe(this.proxy) : 'none';
+    },
+
+    /**
+     * Proxy configured in the MID Server config.xml (mid.proxy.*)
+     * @returns {object} Proxy details or null
+     **/
+    _getMidConfigProxy: function() {
+        if (!this._isTrue(this._midConfig('mid.proxy.use_proxy'))) {
+            return null;
+        }
+        return this._makeProxy(
+            this._midConfig('mid.proxy.host'),
+            this._midConfig('mid.proxy.port'),
+            this._midConfig('mid.proxy.username'),
+            this._midConfig('mid.proxy.password'),
+            'MID Server config.xml mid.proxy.*');
+    },
+
+    /**
+     * Proxy configured as JVM system properties (e.g. in the MID Server wrapper-override.conf)
+     * @param {object} target Parsed target URL
+     * @returns {object} Proxy details or null
+     **/
+    _getJvmProxy: function(target) {
+        var prefix = target.scheme == 'http' ? 'http' : 'https';
+        var host = this._systemProperty(prefix + '.proxyHost');
+        if (!host) {
+            return null;
+        }
+        var source = 'JVM system property ' + prefix + '.proxyHost';
+        var proxy = this._makeProxy(
+            host,
+            this._systemProperty(prefix + '.proxyPort') || (prefix == 'http' ? '80' : '443'),
+            this._systemProperty(prefix + '.proxyUser'),
+            this._systemProperty(prefix + '.proxyPassword'),
+            source);
+        if (proxy) {
+            proxy.bypassedBy = IllumioHTTPClient.matchNonProxyHosts(target.host, this._systemProperty('http.nonProxyHosts'));
+            if (proxy.bypassedBy) {
+                proxy.source = 'JVM system property http.nonProxyHosts';
+            }
+        }
+        return proxy;
+    },
+
+    /**
+     * Proxy configured as environment variables of the MID Server process
+     * @param {object} target Parsed target URL
+     * @returns {object} Proxy details or null
+     **/
+    _getEnvProxy: function(target) {
+        var names = target.scheme == 'http' ? ['http_proxy', 'HTTP_PROXY'] : ['https_proxy', 'HTTPS_PROXY'];
+        for (var i = 0; i < names.length; i++) {
+            var value = this._env(names[i]);
+            if (!value) {
+                continue;
+            }
+            var parsed = IllumioHTTPClient.parseProxyUrl(value);
+            if (parsed.warning) {
+                this.logger._warning('Environment variable ' + names[i] + ': ' + parsed.warning);
+            }
+            var proxy = parsed.error ? null : this._makeProxy(parsed.host, parsed.port, parsed.username, parsed.password, 'environment variable ' + names[i]);
+            if (!proxy) {
+                this.logger._error('Ignoring environment variable ' + names[i] + ': ' + (parsed.error || 'invalid proxy host/port'));
+                return null;
+            }
+            var noProxyName = this._env('no_proxy') ? 'no_proxy' : 'NO_PROXY';
+            proxy.bypassedBy = IllumioHTTPClient.matchNoProxy(target.host, target.port, this._env(noProxyName));
+            if (proxy.bypassedBy) {
+                proxy.source = 'environment variable ' + noProxyName;
+            }
+            return proxy;
+        }
+        return null;
+    },
+
+    /**
+     * Validate and build a proxy object
+     * @returns {object} Proxy details or null if host/port are invalid
+     **/
+    _makeProxy: function(host, port, username, password, source) {
+        host = IllumioHTTPClient.trim(host);
+        var portNumber = parseInt(IllumioHTTPClient.trim(port), 10);
+        if (!host || isNaN(portNumber) || portNumber <= 0 || portNumber > 65535) {
+            this.logger._error('Invalid proxy configuration from ' + source + ' (host: "' + host + '", port: "' + port + '"). The proxy is ignored.');
+            return null;
+        }
+        return {
+            host: host,
+            port: portNumber,
+            username: IllumioHTTPClient.trim(username) || null,
+            password: (password == null) ? null : String(password),
+            source: source
+        };
+    },
+
+    _describe: function(proxy) {
+        return proxy.host + ':' + proxy.port + (proxy.username ? ' as user ' + proxy.username : '') + ' (from ' + proxy.source + ')';
+    },
+
+    _parseTargetUrl: function(url) {
+        var match = /^([a-z][a-z0-9+.\-]*):\/\/(?:[^@\/?#]*@)?(\[[^\]]+\]|[^\/:?#]+)(?::(\d+))?/i.exec(String(url));
+        if (!match) {
+            return { scheme: 'https', host: '', port: 443 };
+        }
+        var scheme = match[1].toLowerCase();
+        return {
+            scheme: scheme,
+            host: match[2].replace(/^\[|\]$/g, '').toLowerCase(),
+            port: match[3] ? parseInt(match[3], 10) : (scheme == 'http' ? 80 : 443)
+        };
+    },
+
+    _midConfig: function(name) {
+        var value = ms.getConfigParameter(name);
+        return (value == null) ? '' : IllumioHTTPClient.trim(value);
+    },
+
+    _systemProperty: function(name) {
+        var value = Packages.java.lang.System.getProperty(name);
+        return (value == null) ? '' : IllumioHTTPClient.trim(value);
+    },
+
+    _env: function(name) {
+        var value = Packages.java.lang.System.getenv(name);
+        return (value == null) ? '' : IllumioHTTPClient.trim(value);
+    },
+
+    _isTrue: function(value) {
+        var normalized = String(value).toLowerCase();
+        return normalized == 'true' || normalized == '1';
+    },
+
+    _log: function(skip, level, message) {
+        if (!skip) {
+            this.logger[level](message);
+        }
+    },
+
+    /**
+     * Describe an exception thrown by a Java call, including the Java exception class
+     * (e.g. java.net.UnknownHostException, java.net.ConnectException, javax.net.ssl.SSLHandshakeException)
+     **/
+    _connectionSummary: function() {
+        return this.proxy ? 'via proxy ' + this._describe(this.proxy) : 'direct connection';
+    },
+
+    _describeException: function(e) {
+        try {
+            var javaException = e && e.javaException;
+            if (javaException) {
+                return javaException.getClass().getName() + ': ' + javaException.getMessage();
+            }
+        } catch (ignored) {}
+        return String(e);
     },
 
     /**
@@ -240,6 +425,10 @@ IllumioHTTPClient.prototype = {
                 (RETRY_CODES.indexOf(responseCode) == -1 && responseCode < 500)) {
                 this.logger._error('Failed: HTTP' + method.getName() + ' Call, status: ' + responseCode);
                 this.logger._debug("Failure reason: " + method.getResponseBodyAsString());
+                if (responseCode == 407) {
+                    this.logger._error('Proxy authentication failed (HTTP 407) ' + this._connectionSummary() +
+                        '. Check the proxy username/password. Only Basic, Digest and NTLMv1 proxy authentication are supported.');
+                }
                 if (!this.retryEnabled && (RETRY_CODES.indexOf(responseCode) != -1 ||
                         responseCode >= 500)) {
                     // Name it at the point of loss. Otherwise a 429 that would have succeeded on
@@ -283,11 +472,13 @@ IllumioHTTPClient.prototype = {
             Packages.java.lang.Thread.sleep(lastSleepTime * 1000);
             return this._executeMethod(endpoint, queryString, method, headers, requestData, retryCount - 1, lastSleepTime);
         } catch (e) {
-            this.logger._error('PCE request failed : Exception ' + e);
+            var errorMessage = this._describeException(e);
+            this.logger._error('PCE request failed : Exception ' + errorMessage + ' (' + this._connectionSummary() + ')');
             this.logger._error('Failed: HTTP' + method.getName() + ' Call, status: 0');
             return {
                 hasError: true,
-                status: 0
+                status: 0,
+                error: errorMessage
             };
         } finally {
             method.releaseConnection();
@@ -425,11 +616,13 @@ IllumioHTTPClient.prototype = {
                 headers: responseHeaders
             };
         } catch (e) {
-            this.logger._error('PCE request failed : Exception ' + e);
+            var fileErrorMessage = this._describeException(e);
+            this.logger._error('PCE request failed : Exception ' + fileErrorMessage + ' (' + this._connectionSummary() + ')');
             this.logger._error('Failed: HTTPGET-to-file Call, status: 0');
             return {
                 hasError: true,
-                status: 0
+                status: 0,
+                error: fileErrorMessage
             };
         } finally {
             // Closed in this order and individually: a failure closing the stream must not leave
@@ -540,10 +733,12 @@ IllumioHTTPClient.prototype = {
                 status: responseCode
             };
         } catch (e) {
-            this.logger._error('POST file request failed : Exception ' + e);
+            var postErrorMessage = this._describeException(e);
+            this.logger._error('POST file request failed : Exception ' + postErrorMessage + ' (' + this._connectionSummary() + ')');
             return {
                 hasError: true,
-                status: 0
+                status: 0,
+                error: postErrorMessage
             };
         } finally {
             postMethod.releaseConnection();
@@ -609,6 +804,198 @@ IllumioHTTPClient.prototype = {
     },
 
     type: 'IllumioHTTPClient'
+};
+// -------------------------------------------------------------------------------------------------
+// Pure helpers for proxy resolution. No Java and no MID APIs, so they can be unit tested outside
+// the MID Server.
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * Trim a value that may be a Java String, a JS string or null.
+ * @returns {string} trimmed string, '' for null/undefined
+ */
+IllumioHTTPClient.trim = function(value) {
+    if (value == null) {
+        return '';
+    }
+    return String(value).replace(/^\s+|\s+$/g, '');
+};
+
+/**
+ * Parse a proxy URL as used in https_proxy / http_proxy, e.g.
+ *   http://user:p%40ss@proxy.example.com:3128/   proxy.example.com:3128   http://[fd00::1]:8080
+ * Commons HttpClient 3.x only speaks plain HTTP to the proxy (https targets are tunnelled with
+ * CONNECT), so an https:// proxy URL is accepted but warned about, and socks is rejected.
+ * @param {string} value Raw environment variable value
+ * @returns {object} {host, port, username, password, warning} or {error}
+ */
+IllumioHTTPClient.parseProxyUrl = function(value) {
+    var rest = IllumioHTTPClient.trim(value);
+    var result = { host: '', port: null, username: null, password: null, warning: null, error: null };
+    if (!rest) {
+        result.error = 'empty value';
+        return result;
+    }
+
+    var scheme = 'http';
+    var schemeMatch = /^([a-z][a-z0-9+.\-]*):\/\//i.exec(rest);
+    if (schemeMatch) {
+        scheme = schemeMatch[1].toLowerCase();
+        rest = rest.substring(schemeMatch[0].length);
+    }
+    if (scheme != 'http' && scheme != 'https') {
+        result.error = 'unsupported proxy scheme "' + scheme + '://" (only http:// proxies are supported)';
+        return result;
+    }
+    if (scheme == 'https') {
+        result.warning = 'https:// proxy URLs are treated as http:// (TLS to the proxy itself is not supported; HTTPS targets are still tunnelled with CONNECT)';
+    }
+
+    rest = rest.split('/')[0].split('?')[0].split('#')[0];
+
+    var at = rest.lastIndexOf('@');
+    if (at >= 0) {
+        var credentials = rest.substring(0, at);
+        rest = rest.substring(at + 1);
+        var colon = credentials.indexOf(':');
+        result.username = IllumioHTTPClient._decode(colon >= 0 ? credentials.substring(0, colon) : credentials);
+        result.password = colon >= 0 ? IllumioHTTPClient._decode(credentials.substring(colon + 1)) : '';
+    }
+
+    var port = '';
+    if (rest.charAt(0) == '[') {
+        var close = rest.indexOf(']');
+        if (close < 0) {
+            result.error = 'malformed IPv6 address';
+            return result;
+        }
+        result.host = rest.substring(1, close);
+        port = rest.substring(close + 1).replace(/^:/, '');
+    } else {
+        var portSeparator = rest.lastIndexOf(':');
+        if (portSeparator >= 0) {
+            port = rest.substring(portSeparator + 1);
+            rest = rest.substring(0, portSeparator);
+        }
+        result.host = rest;
+    }
+
+    if (!result.host) {
+        result.error = 'no proxy host';
+        return result;
+    }
+    result.port = port ? port : (scheme == 'https' ? '443' : '80');
+    return result;
+};
+
+IllumioHTTPClient._decode = function(value) {
+    try {
+        return decodeURIComponent(value);
+    } catch (e) {
+        return value;
+    }
+};
+
+/**
+ * Match a host against a no_proxy list (curl/wget conventions).
+ * Entries are separated by commas or whitespace. Supported forms:
+ *   *                     everything
+ *   example.com           example.com and every subdomain
+ *   .example.com, *.example.com   same as example.com
+ *   host:8443             only that port
+ *   10.0.0.0/8            IPv4 CIDR (when the target is an IPv4 address)
+ * @returns {string} the matching entry, or null
+ */
+IllumioHTTPClient.matchNoProxy = function(host, port, noProxy) {
+    host = IllumioHTTPClient.trim(host).toLowerCase();
+    var entries = IllumioHTTPClient.trim(noProxy).toLowerCase().split(/[\s,]+/);
+    for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i];
+        if (!entry) {
+            continue;
+        }
+        if (entry == '*') {
+            return entry;
+        }
+
+        var pattern = entry;
+        var entryPort = null;
+        var portMatch = /^(\[[^\]]+\]|[^:\[\]]+):(\d+)$/.exec(pattern);
+        if (portMatch) {
+            pattern = portMatch[1];
+            entryPort = parseInt(portMatch[2], 10);
+        }
+        if (entryPort != null && entryPort != port) {
+            continue;
+        }
+        pattern = pattern.replace(/^\[|\]$/g, '').replace(/^\*?\./, '');
+        if (!pattern) {
+            continue;
+        }
+
+        if (pattern.indexOf('/') > 0) {
+            if (IllumioHTTPClient._ipv4InCidr(host, pattern)) {
+                return entry;
+            }
+            continue;
+        }
+        if (host == pattern || IllumioHTTPClient._endsWith(host, '.' + pattern)) {
+            return entry;
+        }
+    }
+    return null;
+};
+
+/**
+ * Match a host against the JVM http.nonProxyHosts list: '|' separated, '*' wildcard anywhere.
+ * @returns {string} the matching entry, or null
+ */
+IllumioHTTPClient.matchNonProxyHosts = function(host, nonProxyHosts) {
+    host = IllumioHTTPClient.trim(host).toLowerCase();
+    var entries = IllumioHTTPClient.trim(nonProxyHosts).toLowerCase().split('|');
+    for (var i = 0; i < entries.length; i++) {
+        var entry = IllumioHTTPClient.trim(entries[i]);
+        if (!entry) {
+            continue;
+        }
+        var regex = new RegExp('^' + entry.replace(/[.+?^${}()\[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+        if (regex.test(host)) {
+            return entry;
+        }
+    }
+    return null;
+};
+
+IllumioHTTPClient._endsWith = function(value, suffix) {
+    return value.length >= suffix.length && value.substring(value.length - suffix.length) == suffix;
+};
+
+IllumioHTTPClient._ipv4ToInt = function(ip) {
+    var parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+    if (!parts) {
+        return null;
+    }
+    var value = 0;
+    for (var i = 1; i <= 4; i++) {
+        var octet = parseInt(parts[i], 10);
+        if (octet > 255) {
+            return null;
+        }
+        value = value * 256 + octet;
+    }
+    return value;
+};
+
+IllumioHTTPClient._ipv4InCidr = function(ip, cidr) {
+    var slash = cidr.indexOf('/');
+    var address = IllumioHTTPClient._ipv4ToInt(ip);
+    var network = IllumioHTTPClient._ipv4ToInt(cidr.substring(0, slash));
+    var bits = parseInt(cidr.substring(slash + 1), 10);
+    if (address == null || network == null || isNaN(bits) || bits < 0 || bits > 32) {
+        return false;
+    }
+    var size = Math.pow(2, 32 - bits);
+    return Math.floor(address / size) == Math.floor(network / size);
 };]]></script>
         <sys_class_name>ecc_agent_script_include</sys_class_name>
         <sys_created_by>admin</sys_created_by>
